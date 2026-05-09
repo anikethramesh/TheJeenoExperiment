@@ -1,0 +1,82 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+
+  U["Human / Operator<br>task, correction, missing knowledge"]
+  L["LLM Interface<br>language ↔ CorticalSchema"]
+
+  subgraph C["CORTEX<br>memory-backed operational model"]
+    CS["CorticalSchema<br>shared grammar"]
+
+    subgraph M["Operational Memory<br>what carries across time"]
+      U1["Understanding<br>task recipes / reusable patterns"]
+      I1["Embodied Intelligence<br>substrate & primitive bindings"]
+      K1["Knowledge<br>deployment facts / history"]
+    end
+
+    R["Readiness<br>can this task be grounded<br>with available primitives?"]
+
+    subgraph A["Active Operational Model<br>what is true now"]
+      CL["Claims"]
+      PR["Procedure"]
+      ES["Execution State"]
+      PG["Provenance"]
+    end
+
+    O["Orchestration<br>alignment / arbitration / contract management"]
+  end
+
+  subgraph SENSE["SENSE<br>JIT sensory composition"]
+    SPL["Sensing Primitive Library<br>available sensing primitives"]
+    QP["Query Parser<br>EvidenceFrame + ExecutionContext<br>→ SensePlanTemplate"]
+    SO["Sensory Orchestrator<br>instantiates template over latest observations"]
+    WMS["WorldModelSample<br>sampled world state"]
+    PROJ["Projection<br>OperationalEvidence for Cortex<br>Percepts for Spine"]
+  end
+
+  subgraph SPINE["SPINE<br>JIT action composition"]
+    APL["Action Primitive Library<br>available action primitives"]
+    CP["Contract Parser<br>ExecutionContract + Percepts<br>→ SkillPlanTemplate"]
+    SKO["Skill Orchestrator<br>instantiates template over latest state"]
+    ASE["ActiveSkillExecution<br>running embodied behaviour"]
+    REP["Reporting<br>ExecutionReport for Cortex<br>ExecutionContext for Sense"]
+  end
+
+  Sensors[("Sensors / simulator / metadata<br>camera / lidar / grid / maps / state")] 
+  Actuators[("Actuation / Control<br>env.step / Nav2 / PX4 / MoveIt / BTs")]
+
+  U <--> L
+  L <--> CS
+
+  CS --- M
+  CS --- R
+  CS --- A
+  CS --- O
+
+  M --> R
+  R --> A
+  A <--> O
+  O -. durable updates .-> M
+
+  Sensors --> SO
+  SPL --> QP
+  QP --> SO
+  SO --> WMS
+  WMS --> PROJ
+
+  APL --> CP
+  CP --> SKO
+  SKO --> ASE
+  ASE --> REP
+  ASE --> Actuators
+
+  O -- "EvidenceFrame<br>what evidence matters?" --> QP
+  PROJ -- "OperationalEvidence" --> A
+
+  O -- "ExecutionContract<br>what skill should run?" --> CP
+  REP -- "ExecutionReport" --> A
+
+  REP -- "ExecutionContext<br>what Spine is doing now" --> QP
+  PROJ -- "Percepts<br>skill-relevant cues" --> SKO

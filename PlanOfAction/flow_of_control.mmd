@@ -1,0 +1,40 @@
+---
+config:
+  layout: elk
+---
+flowchart TD
+
+  Start["Operator instruction"] --> CompileTask["LLM compile_task<br>instruction → TaskRequest"]
+  CompileTask --> CompileProc["LLM compile_procedure<br>TaskRequest → Procedure"]
+  CompileProc --> Readiness["Readiness check<br>task + sensing + action primitives"]
+
+  Readiness -->|not groundable| Ask["Ask operator / report missing primitive"]
+  Ask --> Start
+
+  Readiness -->|groundable| Prewarm["JIT prewarm<br>compile/cache templates before render"]
+
+  Prewarm --> Cache["PlanCache<br>ProcedureRecipe<br>SensePlanTemplate<br>SkillPlanTemplate"]
+
+  Cache --> Loop["Runtime control loop<br>NO LLM during render"]
+
+  Loop --> EF["Cortex creates EvidenceFrame"]
+  EF --> SenseCache{"Sense template cached?"}
+  SenseCache -->|hit| SenseRun["Sense executes cached template<br>latest observation → WorldModelSample"]
+  SenseCache -->|miss outside render| SenseCompile["LLM compile_sense_plan<br>then cache"]
+  SenseCompile --> SenseRun
+
+  SenseRun --> Evidence["OperationalEvidence + Percepts"]
+  Evidence --> CortexUpdate["Cortex updates Claims / State / Provenance"]
+
+  CortexUpdate --> Contract["Cortex issues ExecutionContract"]
+  Contract --> SkillCache{"Skill template cached?"}
+  SkillCache -->|hit| SpineRun["Spine executes cached template<br>latest percepts/state → action"]
+  SkillCache -->|miss outside render| SkillCompile["LLM compile_skill_plan<br>then cache"]
+  SkillCompile --> SpineRun
+
+  SpineRun --> Report["ExecutionReport + ExecutionContext"]
+  Report --> Done{"Task complete?"}
+
+  Done -->|no| Loop
+  Done -->|yes| Memory["End-of-episode memory update<br>durable Knowledge + episodic memory"]
+  Memory --> End["Finish"]
