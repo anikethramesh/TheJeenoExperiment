@@ -1,0 +1,11 @@
+# Ignore Python bytecode files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore the Minigrid source tree if it's generated or vendored
+Minigrid/
+
+# Ignore editor and OS files
+.vscode/
+.DS_Store
