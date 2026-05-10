@@ -11,6 +11,9 @@ class PrimitiveSpec:
     produces: tuple[str, ...] = ()
     description: str = ""
     safety_notes: str | None = None
+    side_effects: tuple[str, ...] = ()
+    implementation_status: str = "implemented"
+    safe_to_synthesize: bool = False
     required_action_primitives: tuple[str, ...] = ()
     runtime_kind: str | None = None
     runtime_value: int | str | None = None
@@ -62,6 +65,7 @@ TASK_PRIMITIVES: dict[str, PrimitiveSpec] = {
         produces=("clarification",),
         description="Request clarification from the operator.",
         safety_notes="Use only when the task is underspecified.",
+        implementation_status="planned",
     ),
     "replan": PrimitiveSpec(
         name="replan",
@@ -69,6 +73,7 @@ TASK_PRIMITIVES: dict[str, PrimitiveSpec] = {
         produces=("new_procedure",),
         description="Recompose the plan when the current one is blocked.",
         safety_notes="Use after a validated failure, not preemptively.",
+        implementation_status="planned",
     ),
     "abort": PrimitiveSpec(
         name="abort",
@@ -76,6 +81,56 @@ TASK_PRIMITIVES: dict[str, PrimitiveSpec] = {
         produces=("aborted",),
         description="Stop execution when the task cannot be completed safely.",
         safety_notes="Use only for impossible or unsafe states.",
+        implementation_status="planned",
+    ),
+}
+
+
+GROUNDING_PRIMITIVES: dict[str, PrimitiveSpec] = {
+    "visible_doors": PrimitiveSpec(
+        name="visible_doors",
+        consumes=("scene.grid_objects",),
+        produces=("door_candidates",),
+        description="List currently visible/available door objects in the MiniGrid scene.",
+        runtime_kind="python",
+        runtime_value="scene_doors",
+    ),
+    "closest_door.manhattan.agent": PrimitiveSpec(
+        name="closest_door.manhattan.agent",
+        consumes=("scene.door_candidates", "agent_pose"),
+        produces=("grounded_target", "distance"),
+        description="Rank door candidates by Manhattan distance from the agent.",
+        runtime_kind="python",
+        runtime_value="ground_closest_door_manhattan",
+    ),
+    "closest_door.euclidean.agent": PrimitiveSpec(
+        name="closest_door.euclidean.agent",
+        consumes=("scene.door_candidates", "agent_pose"),
+        produces=("grounded_target", "distance"),
+        description="Rank door candidates by Euclidean distance from the agent.",
+        implementation_status="synthesizable",
+        safe_to_synthesize=True,
+        runtime_kind=None,
+        runtime_value=None,
+    ),
+    "unique_door.color_filter": PrimitiveSpec(
+        name="unique_door.color_filter",
+        consumes=("scene.door_candidates", "selector.color", "selector.exclude_color"),
+        produces=("grounded_target", "distance"),
+        description="Resolve a unique door by include/exclude color constraints.",
+        runtime_kind="python",
+        runtime_value="ground_unique_door_color_filter",
+    ),
+    "all_doors.ranked.manhattan.agent": PrimitiveSpec(
+        name="all_doors.ranked.manhattan.agent",
+        consumes=("scene.door_candidates", "agent_pose"),
+        produces=("ranked_door_list", "distances"),
+        description=(
+            "List all visible doors ranked by Manhattan distance from the agent. "
+            "Query only — no target is selected and no motion occurs."
+        ),
+        runtime_kind="python",
+        runtime_value="ground_all_doors_ranked_manhattan",
     ),
 }
 
@@ -122,6 +177,7 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         produces=("planned_action_names", "path"),
         description="Plan a path in the MiniGrid occupancy map.",
         safety_notes="Runtime path planner must reject unreachable targets.",
+        side_effects=("computes_path",),
         runtime_kind="python",
         runtime_value="plan_grid_path",
     ),
@@ -130,42 +186,49 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         consumes=("planned_action_names",),
         produces=("executed_action",),
         description="Execute the first action from the current planned path.",
+        side_effects=("moves_agent",),
         runtime_kind="python",
         runtime_value="execute_next_path_action",
     ),
     "turn_left": PrimitiveSpec(
         name="turn_left",
         description="Turn the MiniGrid agent left.",
+        side_effects=("moves_agent",),
         runtime_kind="env_action",
         runtime_value=0,
     ),
     "turn_right": PrimitiveSpec(
         name="turn_right",
         description="Turn the MiniGrid agent right.",
+        side_effects=("moves_agent",),
         runtime_kind="env_action",
         runtime_value=1,
     ),
     "move_forward": PrimitiveSpec(
         name="move_forward",
         description="Move the MiniGrid agent forward.",
+        side_effects=("moves_agent",),
         runtime_kind="env_action",
         runtime_value=2,
     ),
     "pickup": PrimitiveSpec(
         name="pickup",
         description="Pick up an item in MiniGrid.",
+        side_effects=("changes_environment", "changes_inventory"),
         runtime_kind="env_action",
         runtime_value=3,
     ),
     "drop": PrimitiveSpec(
         name="drop",
         description="Drop the currently carried item in MiniGrid.",
+        side_effects=("changes_environment", "changes_inventory"),
         runtime_kind="env_action",
         runtime_value=4,
     ),
     "toggle": PrimitiveSpec(
         name="toggle",
         description="Toggle the front cell interaction in MiniGrid.",
+        side_effects=("changes_environment",),
         runtime_kind="env_action",
         runtime_value=5,
     ),

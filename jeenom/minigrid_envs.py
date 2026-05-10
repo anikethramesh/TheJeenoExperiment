@@ -3,7 +3,7 @@ from __future__ import annotations
 from gymnasium.envs.registration import register, registry
 
 
-CUSTOM_GOTODOOR_SIZES = (10, 12, 16)
+CUSTOM_GOTODOOR_SIZES = (10, 12, 16, 32)
 
 
 def ensure_custom_minigrid_envs_registered() -> None:

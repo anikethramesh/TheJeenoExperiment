@@ -86,7 +86,7 @@ class Cortex:
         self.task_request = task_request
         self.procedure = procedure
         self.resolved_task_params = self.memory.resolve_target_params(task_request.params)
-        self.memory.reset_episode()
+        self.memory.reset_episode(clear_reference_context=False)
 
         color_override = (
             task_request.params.get("color") is not None

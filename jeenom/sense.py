@@ -8,6 +8,7 @@ from .schemas import (
     OperationalEvidence,
     Percepts,
     PrimitiveCall,
+    SceneModel,
     SensePlanTemplate,
     WorldModelSample,
 )
@@ -169,6 +170,10 @@ class MiniGridSense:
         self.memory.update_episodic_memory("last_world_sample", sample.summary())
         if sample.target_location is not None:
             self.memory.update_episodic_memory("known_target_location", sample.target_location)
+        if sample.grid_objects is not None and sample.agent_pose is not None:
+            self.memory.update_scene_model(
+                SceneModel.from_world_model_sample(sample, source="task_sense")
+            )
         return sample
 
     def project_to_cortex(self, sample: WorldModelSample):
@@ -196,6 +201,34 @@ class MiniGridSense:
             "grid_objects": sample.grid_objects,
         }
         return Percepts(cues=cues, source="sense")
+
+    def sense_idle_scene(
+        self,
+        observation,
+        *,
+        env_id: str | None = None,
+        seed: int | None = None,
+    ) -> SceneModel:
+        """Build a SceneModel from a current observation without task context.
+
+        Uses the same parse_grid_objects primitive as task sense — no separate
+        sensing path. Stores the result in memory.scene_model.
+        """
+        sample = WorldModelSample(
+            mission=observation.raw.get("mission"),
+            direction=int(observation.raw.get("direction", 0))
+            if observation.raw.get("direction") is not None
+            else None,
+            step_count=observation.step_count,
+            raw_image=observation.raw.get("image"),
+        )
+        self._parse_grid_objects(sample)
+        self._get_agent_pose(sample)
+        model = SceneModel.from_world_model_sample(
+            sample, source="idle_sense", env_id=env_id, seed=seed
+        )
+        self.memory.update_scene_model(model)
+        return model
 
     def _validate_template(self, evidence_frame, template: SensePlanTemplate) -> None:
         for primitive in template.primitives:

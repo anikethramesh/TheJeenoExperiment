@@ -40,6 +40,57 @@ SKILL_TEMPLATE_ALLOWED_OUTPUTS = (
     "execution_report",
     "execution_context",
 )
+OPERATOR_INTENT_TYPES = (
+    "task_instruction",
+    "knowledge_update",
+    "status_query",
+    "claim_reference",
+    "cache_query",
+    "reset",
+    "quit",
+    "unsupported",
+    "ambiguous",
+)
+OPERATOR_CLAIM_REFERENCES = ("next_closest", "other_door")
+OPERATOR_TASK_TYPES = ("go_to_object",)
+OPERATOR_OBJECT_TYPES = ("door",)
+OPERATOR_COLORS = ("red", "green", "blue", "yellow", "purple", "grey")
+OPERATOR_REFERENCES = ("delivery_target", "last_target", "last_task")
+OPERATOR_SELECTOR_RELATIONS = ("closest", "unique")
+OPERATOR_DISTANCE_METRICS = ("manhattan", "euclidean")
+OPERATOR_DISTANCE_REFERENCES = ("agent",)
+OPERATOR_STATUS_QUERIES = (
+    "status",
+    "scene",
+    "help",
+    "last_run",
+    "last_target",
+    "delivery_target",
+    "ground_target",
+    "cache",
+)
+OPERATOR_CONTROLS = ("reset", "quit")
+OPERATOR_CAPABILITY_STATUSES = (
+    "executable",
+    "needs_clarification",
+    "missing_skills",
+    "synthesizable",
+    "unsupported",
+)
+ARBITRATION_DECISION_TYPES = (
+    "substitute",
+    "clarify",
+    "synthesize",
+    "refuse",
+)
+PRIMITIVE_SPEC_TYPES = ("task", "grounding", "sensing", "action")
+PRIMITIVE_IMPLEMENTATION_STATUSES = (
+    "implemented",
+    "unsupported",
+    "synthesizable",
+    "planned",
+    "missing",
+)
 
 
 class SchemaValidationError(ValueError):
@@ -62,6 +113,15 @@ def _ensure_bool(value: Any, label: str) -> bool:
     if not isinstance(value, bool):
         raise SchemaValidationError(f"{label} must be a boolean")
     return value
+
+
+def _ensure_float(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SchemaValidationError(f"{label} must be a number")
+    result = float(value)
+    if result < 0.0 or result > 1.0:
+        raise SchemaValidationError(f"{label} must be between 0.0 and 1.0")
+    return result
 
 
 def _ensure_list(value: Any, label: str) -> list[Any]:
@@ -129,6 +189,206 @@ def _ensure_subset(
     return values
 
 
+def _ensure_optional_str_enum(
+    value: Any,
+    allowed: tuple[str, ...],
+    label: str,
+) -> str | None:
+    if value is None:
+        return None
+    string_value = _ensure_str(value, label)
+    if string_value not in allowed:
+        raise SchemaValidationError(
+            f"{label} must be one of: {', '.join(allowed)}"
+        )
+    return string_value
+
+
+def _ensure_operator_target(value: Any, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    target = _ensure_dict(value, label)
+    required_keys = ("color", "object_type")
+    missing = [key for key in required_keys if key not in target]
+    if missing:
+        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
+    extra = sorted(set(target) - set(required_keys))
+    if extra:
+        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    return {
+        "color": _ensure_optional_str_enum(target.get("color"), OPERATOR_COLORS, f"{label}.color"),
+        "object_type": _ensure_optional_str_enum(
+            target.get("object_type"),
+            OPERATOR_OBJECT_TYPES,
+            f"{label}.object_type",
+        ),
+    }
+
+
+def _ensure_operator_knowledge_update(value: Any, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    update = _ensure_dict(value, label)
+    required_keys = ("delivery_target",)
+    missing = [key for key in required_keys if key not in update]
+    if missing:
+        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
+    extra = sorted(set(update) - set(required_keys))
+    if extra:
+        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    raw_delivery_target = update.get("delivery_target")
+    if raw_delivery_target is None:
+        return {"delivery_target": None}
+    delivery_target = _ensure_operator_target(raw_delivery_target, f"{label}.delivery_target")
+    if delivery_target.get("color") is None or delivery_target.get("object_type") is None:
+        raise SchemaValidationError(f"{label}.delivery_target must be fully specified")
+    return {"delivery_target": delivery_target}
+
+
+def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
+    spec = _ensure_dict(value, label)
+    required_keys = (
+        "name",
+        "primitive_type",
+        "layer",
+        "description",
+        "inputs",
+        "outputs",
+        "side_effects",
+        "implementation_status",
+        "safe_to_synthesize",
+        "runtime_binding",
+    )
+    missing = [key for key in required_keys if key not in spec]
+    if missing:
+        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
+    extra = sorted(set(spec) - set(required_keys))
+    if extra:
+        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    primitive_type = _ensure_str(spec["primitive_type"], f"{label}.primitive_type")
+    if primitive_type not in PRIMITIVE_SPEC_TYPES:
+        raise SchemaValidationError(
+            f"{label}.primitive_type must be one of: {', '.join(PRIMITIVE_SPEC_TYPES)}"
+        )
+    implementation_status = _ensure_str(
+        spec["implementation_status"],
+        f"{label}.implementation_status",
+    )
+    if implementation_status not in PRIMITIVE_IMPLEMENTATION_STATUSES:
+        raise SchemaValidationError(
+            f"{label}.implementation_status must be one of: "
+            + ", ".join(PRIMITIVE_IMPLEMENTATION_STATUSES)
+        )
+    return {
+        "name": _ensure_str(spec["name"], f"{label}.name"),
+        "primitive_type": primitive_type,
+        "layer": _ensure_str(spec["layer"], f"{label}.layer"),
+        "description": _ensure_str(spec["description"], f"{label}.description"),
+        "inputs": _ensure_str_list(spec["inputs"], f"{label}.inputs"),
+        "outputs": _ensure_str_list(spec["outputs"], f"{label}.outputs"),
+        "side_effects": _ensure_str_list(spec["side_effects"], f"{label}.side_effects"),
+        "implementation_status": implementation_status,
+        "safe_to_synthesize": _ensure_bool(
+            spec["safe_to_synthesize"],
+            f"{label}.safe_to_synthesize",
+        ),
+        "runtime_binding": spec["runtime_binding"],
+    }
+
+
+def _ensure_primitive_manifest(value: Any, label: str) -> dict[str, Any]:
+    manifest = _ensure_dict(value, label)
+    required_keys = ("name", "primitives")
+    missing = [key for key in required_keys if key not in manifest]
+    if missing:
+        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
+    extra = sorted(set(manifest) - set(required_keys))
+    if extra:
+        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    primitives = _ensure_list(manifest["primitives"], f"{label}.primitives")
+    return {
+        "name": _ensure_str(manifest["name"], f"{label}.name"),
+        "primitives": [
+            _ensure_primitive_spec(item, f"{label}.primitives[{idx}]")
+            for idx, item in enumerate(primitives)
+        ],
+    }
+
+
+def _migrate_exclude_color(selector: dict[str, Any]) -> None:
+    """Migrate legacy exclude_color (str) to exclude_colors (list[str]) in-place."""
+    if "exclude_color" in selector and "exclude_colors" not in selector:
+        val = selector.pop("exclude_color")
+        selector["exclude_colors"] = [val] if val else []
+    elif "exclude_color" in selector:
+        selector.pop("exclude_color")
+    if "exclude_colors" not in selector:
+        selector["exclude_colors"] = []
+
+
+def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    selector = _ensure_dict(value, label)
+    # Support both legacy exclude_color (single) and new exclude_colors (list)
+    _migrate_exclude_color(selector)
+    required_keys = (
+        "object_type",
+        "color",
+        "exclude_colors",
+        "relation",
+        "distance_metric",
+        "distance_reference",
+    )
+    missing = [key for key in required_keys if key not in selector]
+    if missing:
+        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
+    extra = sorted(set(selector) - set(required_keys))
+    if extra:
+        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+
+    raw_exclude = selector.get("exclude_colors") or []
+    if not isinstance(raw_exclude, list):
+        raw_exclude = [raw_exclude] if raw_exclude else []
+    validated_exclude = []
+    for c in raw_exclude:
+        validated = _ensure_optional_str_enum(c, OPERATOR_COLORS, f"{label}.exclude_colors[]")
+        if validated:
+            validated_exclude.append(validated)
+
+    result = {
+        "object_type": _ensure_optional_str_enum(
+            selector.get("object_type"),
+            OPERATOR_OBJECT_TYPES,
+            f"{label}.object_type",
+        ),
+        "color": _ensure_optional_str_enum(
+            selector.get("color"),
+            OPERATOR_COLORS,
+            f"{label}.color",
+        ),
+        "exclude_colors": validated_exclude,
+        "relation": _ensure_optional_str_enum(
+            selector.get("relation"),
+            OPERATOR_SELECTOR_RELATIONS,
+            f"{label}.relation",
+        ),
+        "distance_metric": _ensure_optional_str_enum(
+            selector.get("distance_metric"),
+            OPERATOR_DISTANCE_METRICS,
+            f"{label}.distance_metric",
+        ),
+        "distance_reference": _ensure_optional_str_enum(
+            selector.get("distance_reference"),
+            OPERATOR_DISTANCE_REFERENCES,
+            f"{label}.distance_reference",
+        ),
+    }
+    if result["object_type"] != "door":
+        raise SchemaValidationError(f"{label}.object_type must be door")
+    return result
+
+
 @dataclass
 class PrimitiveCall:
     name: str
@@ -159,6 +419,205 @@ class TaskRequest:
             params=_ensure_compiler_params(mapping.get("params", {}), "TaskRequest.params"),
             source=_ensure_str(mapping.get("source", "compiler"), "TaskRequest.source"),
         )
+
+
+@dataclass
+class TargetSelector:
+    object_type: str
+    color: str | None = None
+    exclude_colors: list[str] = field(default_factory=list)
+    relation: str | None = None
+    distance_metric: str | None = None
+    distance_reference: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> TargetSelector:
+        selector = _ensure_target_selector(data, "TargetSelector")
+        if selector is None:
+            raise SchemaValidationError("TargetSelector must not be null")
+        return cls(**selector)
+
+
+@dataclass
+class PrimitiveSpec:
+    name: str
+    primitive_type: str
+    layer: str
+    description: str
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    side_effects: list[str] = field(default_factory=list)
+    implementation_status: str = "implemented"
+    safe_to_synthesize: bool = False
+    runtime_binding: dict[str, Any] | None = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> PrimitiveSpec:
+        return cls(**_ensure_primitive_spec(data, "PrimitiveSpec"))
+
+
+@dataclass
+class PrimitiveManifest:
+    name: str
+    primitives: list[PrimitiveSpec] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> PrimitiveManifest:
+        manifest = _ensure_primitive_manifest(data, "PrimitiveManifest")
+        return cls(
+            name=manifest["name"],
+            primitives=[
+                PrimitiveSpec.from_dict(item)
+                for item in manifest["primitives"]
+            ],
+        )
+
+
+@dataclass
+class OperatorIntent:
+    intent_type: str
+    canonical_instruction: str | None = None
+    task_type: str | None = None
+    target: dict[str, Any] | None = None
+    knowledge_update: dict[str, Any] | None = None
+    reference: str | None = None
+    status_query: str | None = None
+    claim_reference: str | None = None
+    control: str | None = None
+    target_selector: dict[str, Any] | None = None
+    capability_status: str = "executable"
+    required_capabilities: list[str] = field(default_factory=list)
+    clear_memory: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Any) -> OperatorIntent:
+        mapping = _ensure_mapping(data, "OperatorIntent")
+        intent_type = _ensure_str(mapping.get("intent_type"), "OperatorIntent.intent_type")
+        if intent_type not in OPERATOR_INTENT_TYPES:
+            raise SchemaValidationError(
+                "OperatorIntent.intent_type must be one of: "
+                + ", ".join(OPERATOR_INTENT_TYPES)
+            )
+
+        target = _ensure_operator_target(mapping.get("target"), "OperatorIntent.target")
+        knowledge_update = _ensure_operator_knowledge_update(
+            mapping.get("knowledge_update"),
+            "OperatorIntent.knowledge_update",
+        )
+        task_type = _ensure_optional_str_enum(
+            mapping.get("task_type"),
+            OPERATOR_TASK_TYPES,
+            "OperatorIntent.task_type",
+        )
+        reference = _ensure_optional_str_enum(
+            mapping.get("reference"),
+            OPERATOR_REFERENCES,
+            "OperatorIntent.reference",
+        )
+        status_query = _ensure_optional_str_enum(
+            mapping.get("status_query"),
+            OPERATOR_STATUS_QUERIES,
+            "OperatorIntent.status_query",
+        )
+        claim_reference = _ensure_optional_str_enum(
+            mapping.get("claim_reference"),
+            OPERATOR_CLAIM_REFERENCES,
+            "OperatorIntent.claim_reference",
+        )
+        control = _ensure_optional_str_enum(
+            mapping.get("control"),
+            OPERATOR_CONTROLS,
+            "OperatorIntent.control",
+        )
+        capability_status = _ensure_optional_str_enum(
+            mapping.get("capability_status", "executable"),
+            OPERATOR_CAPABILITY_STATUSES,
+            "OperatorIntent.capability_status",
+        )
+        target_selector = _ensure_target_selector(
+            mapping.get("target_selector"),
+            "OperatorIntent.target_selector",
+        )
+
+        canonical_instruction = mapping.get("canonical_instruction")
+        if canonical_instruction is not None:
+            canonical_instruction = _ensure_str(
+                canonical_instruction,
+                "OperatorIntent.canonical_instruction",
+            )
+
+        raw_required = mapping.get("required_capabilities")
+        if raw_required is None:
+            required_capabilities: list[str] = []
+        elif isinstance(raw_required, list):
+            required_capabilities = [str(h) for h in raw_required if h is not None]
+        else:
+            required_capabilities = []
+
+        intent = cls(
+            intent_type=intent_type,
+            canonical_instruction=canonical_instruction,
+            task_type=task_type,
+            target=target,
+            knowledge_update=knowledge_update,
+            reference=reference,
+            status_query=status_query,
+            claim_reference=claim_reference,
+            control=control,
+            target_selector=target_selector,
+            capability_status=capability_status or "executable",
+            required_capabilities=required_capabilities,
+            clear_memory=_ensure_bool(
+                mapping.get("clear_memory"),
+                "OperatorIntent.clear_memory",
+            ),
+            confidence=_ensure_float(mapping.get("confidence"), "OperatorIntent.confidence"),
+            reason=_ensure_str(mapping.get("reason", ""), "OperatorIntent.reason"),
+        )
+        intent._validate_supported_shape()
+        return intent
+
+    def _validate_supported_shape(self) -> None:
+        if self.intent_type == "task_instruction":
+            if self.task_type != "go_to_object":
+                raise SchemaValidationError("task_instruction requires task_type=go_to_object")
+            has_target = (
+                isinstance(self.target, dict)
+                and self.target.get("color") is not None
+                and self.target.get("object_type") == "door"
+            )
+            if (
+                not has_target
+                and self.reference not in OPERATOR_REFERENCES
+                and self.target_selector is None
+            ):
+                raise SchemaValidationError(
+                    "task_instruction requires a supported target, reference, or target_selector"
+                )
+        elif self.intent_type == "knowledge_update":
+            if self.knowledge_update is None:
+                raise SchemaValidationError("knowledge_update requires knowledge_update payload")
+            if (
+                self.knowledge_update.get("delivery_target") is None
+                and self.target_selector is None
+            ):
+                raise SchemaValidationError(
+                    "selector-based knowledge_update requires target_selector"
+                )
+        elif self.intent_type == "status_query":
+            if self.status_query is None:
+                raise SchemaValidationError("status_query requires status_query")
+        elif self.intent_type == "cache_query":
+            if self.status_query not in {None, "cache"}:
+                raise SchemaValidationError("cache_query status_query must be cache or null")
+        elif self.intent_type == "reset":
+            if self.control not in {None, "reset"}:
+                raise SchemaValidationError("reset control must be reset or null")
+        elif self.intent_type == "quit":
+            if self.control not in {None, "quit"}:
+                raise SchemaValidationError("quit control must be quit or null")
 
 
 @dataclass
@@ -259,6 +718,189 @@ class WorldModelSample:
             "target_location": self.target_location,
             "target_object": self.target_object,
             "adjacency_to_target": self.adjacency_to_target,
+        }
+
+
+@dataclass
+class SceneObject:
+    object_type: str
+    color: str | None
+    x: int
+    y: int
+    state: int | None = None
+
+
+@dataclass
+class SceneModel:
+    """Structured snapshot of the last sensed scene, projected from WorldModelSample."""
+
+    agent_x: int
+    agent_y: int
+    agent_dir: int
+    grid_width: int
+    grid_height: int
+    objects: list[SceneObject]
+    source: str  # "task_sense" | "idle_sense"
+    env_id: str | None = None
+    seed: int | None = None
+    step_count: int = 0
+
+    def find(
+        self,
+        *,
+        object_type: str | None = None,
+        color: str | None = None,
+        exclude_colors: list[str] | None = None,
+    ) -> list[SceneObject]:
+        result: list[SceneObject] = self.objects
+        if object_type is not None:
+            result = [o for o in result if o.object_type == object_type]
+        if color is not None:
+            result = [o for o in result if o.color == color]
+        if exclude_colors:
+            result = [o for o in result if o.color not in exclude_colors]
+        return result
+
+    def manhattan_distance_from_agent(self, obj: SceneObject) -> int:
+        return abs(obj.x - self.agent_x) + abs(obj.y - self.agent_y)
+
+    @classmethod
+    def from_world_model_sample(
+        cls,
+        sample: WorldModelSample,
+        *,
+        source: str,
+        env_id: str | None = None,
+        seed: int | None = None,
+    ) -> SceneModel:
+        agent_pose = sample.agent_pose or {}
+        grid_w, grid_h = sample.grid_size if sample.grid_size else (0, 0)
+        objects = [
+            SceneObject(
+                object_type=obj["type"],
+                color=obj.get("color"),
+                x=int(obj["x"]),
+                y=int(obj["y"]),
+                state=obj.get("state"),
+            )
+            for obj in (sample.grid_objects or [])
+        ]
+        return cls(
+            agent_x=int(agent_pose.get("x", 0)),
+            agent_y=int(agent_pose.get("y", 0)),
+            agent_dir=int(agent_pose.get("dir", 0)),
+            grid_width=int(grid_w),
+            grid_height=int(grid_h),
+            objects=objects,
+            source=source,
+            env_id=env_id,
+            seed=seed,
+            step_count=sample.step_count,
+        )
+
+
+@dataclass
+class GroundedDoorEntry:
+    color: str | None
+    x: int
+    y: int
+    distance: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"type": "door", "color": self.color, "x": self.x, "y": self.y}
+
+
+@dataclass
+class StationActiveClaims:
+    """Session-scoped claims produced by grounding queries.
+
+    Tied to a SceneModel fingerprint (agent_x, agent_y, step_count).
+    Cleared on reset and at task start. Never written to durable memory.
+    """
+
+    scene_fingerprint: tuple[int, int, int]  # (agent_x, agent_y, step_count)
+    ranked_scene_doors: list[GroundedDoorEntry]
+    last_grounded_target: GroundedDoorEntry
+    last_grounded_rank: int
+    last_grounding_query: dict[str, Any]
+
+    def is_valid_for(self, scene: SceneModel) -> bool:
+        return self.scene_fingerprint == (scene.agent_x, scene.agent_y, scene.step_count)
+
+    def next_ranked(self) -> tuple[GroundedDoorEntry, int] | tuple[None, None]:
+        rank = self.last_grounded_rank + 1
+        if rank < len(self.ranked_scene_doors):
+            return self.ranked_scene_doors[rank], rank
+        return None, None
+
+    def other_doors(self) -> list[GroundedDoorEntry]:
+        t = self.last_grounded_target
+        return [
+            d for d in self.ranked_scene_doors
+            if not (d.x == t.x and d.y == t.y)
+        ]
+
+    def compact_summary(self) -> dict[str, Any]:
+        return {
+            "last_grounded_target": (
+                f"{self.last_grounded_target.color} door @ distance {self.last_grounded_target.distance}"
+            ),
+            "ranked_doors": [
+                f"{d.color}@{d.distance}" for d in self.ranked_scene_doors
+            ],
+            "last_rank": self.last_grounded_rank,
+        }
+
+
+@dataclass
+class ArbitrationDecision:
+    """Typed arbitration decision produced by CapabilityArbitrator when a capability gap is detected.
+
+    decision_type must be one of ARBITRATION_DECISION_TYPES.
+    safe_to_execute must be False for refuse and synthesize decision types.
+    """
+
+    decision_type: str
+    safe_to_execute: bool
+    reason: str
+    suggested_handle: str | None = None
+    clarification_prompt: str | None = None
+    operator_message: str = ""
+
+    def __post_init__(self) -> None:
+        if self.decision_type not in ARBITRATION_DECISION_TYPES:
+            raise SchemaValidationError(
+                f"ArbitrationDecision.decision_type must be one of: "
+                + ", ".join(ARBITRATION_DECISION_TYPES)
+            )
+        if self.decision_type in {"refuse", "synthesize"} and self.safe_to_execute:
+            raise SchemaValidationError(
+                f"ArbitrationDecision with decision_type={self.decision_type} "
+                "must have safe_to_execute=False"
+            )
+
+
+@dataclass
+class ArbitrationTrace:
+    """Provenance record for one arbitration event."""
+
+    utterance: str
+    intent_type: str
+    required_capabilities: list[str]
+    missing_handles: list[str]
+    synthesizable_handles: list[str]
+    decision: ArbitrationDecision
+
+    def compact(self) -> dict[str, Any]:
+        return {
+            "utterance": self.utterance,
+            "intent_type": self.intent_type,
+            "required_capabilities": self.required_capabilities,
+            "missing_handles": self.missing_handles,
+            "synthesizable_handles": self.synthesizable_handles,
+            "decision_type": self.decision.decision_type,
+            "safe_to_execute": self.decision.safe_to_execute,
+            "reason": self.decision.reason,
         }
 
 
@@ -512,6 +1154,108 @@ def memory_updates_json_schema() -> dict[str, Any]:
             }
         },
         "required": ["updates"],
+        "additionalProperties": False,
+    }
+
+
+def operator_intent_json_schema() -> dict[str, Any]:
+    target_schema = {
+        "type": ["object", "null"],
+        "properties": {
+            "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
+            "object_type": {"type": ["string", "null"], "enum": [*OPERATOR_OBJECT_TYPES, None]},
+        },
+        "required": ["color", "object_type"],
+        "additionalProperties": False,
+    }
+    target_selector_schema = {
+        "type": ["object", "null"],
+        "properties": {
+            "object_type": {"type": ["string", "null"], "enum": [*OPERATOR_OBJECT_TYPES, None]},
+            "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
+            "exclude_colors": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(OPERATOR_COLORS)},
+                "description": "Colors to exclude. Use [] when no exclusion. Supports multiple: ['purple', 'yellow'].",
+            },
+            "relation": {"type": ["string", "null"], "enum": [*OPERATOR_SELECTOR_RELATIONS, None]},
+            "distance_metric": {"type": ["string", "null"], "enum": [*OPERATOR_DISTANCE_METRICS, None]},
+            "distance_reference": {
+                "type": ["string", "null"],
+                "enum": [*OPERATOR_DISTANCE_REFERENCES, None],
+            },
+        },
+        "required": [
+            "object_type",
+            "color",
+            "exclude_colors",
+            "relation",
+            "distance_metric",
+            "distance_reference",
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "intent_type": {"type": "string", "enum": list(OPERATOR_INTENT_TYPES)},
+            "canonical_instruction": {"type": ["string", "null"]},
+            "task_type": {"type": ["string", "null"], "enum": [*OPERATOR_TASK_TYPES, None]},
+            "target": target_schema,
+            "knowledge_update": {
+                "type": ["object", "null"],
+                "properties": {
+                    "delivery_target": target_schema,
+                },
+                "required": ["delivery_target"],
+                "additionalProperties": False,
+            },
+            "reference": {"type": ["string", "null"], "enum": [*OPERATOR_REFERENCES, None]},
+            "status_query": {
+                "type": ["string", "null"],
+                "enum": [*OPERATOR_STATUS_QUERIES, None],
+            },
+            "claim_reference": {
+                "type": ["string", "null"],
+                "enum": [*OPERATOR_CLAIM_REFERENCES, None],
+            },
+            "control": {"type": ["string", "null"], "enum": [*OPERATOR_CONTROLS, None]},
+            "target_selector": target_selector_schema,
+            "capability_status": {
+                "type": "string",
+                "enum": list(OPERATOR_CAPABILITY_STATUSES),
+            },
+            "required_capabilities": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Exact capability handles this intent requires. List every handle "
+                    "needed, including any not yet in the registry — the station will "
+                    "classify missing ones as missing_skills. No weakening: do not "
+                    "substitute a broader capability for a specific one."
+                ),
+            },
+            "clear_memory": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reason": {"type": "string"},
+        },
+        "required": [
+            "intent_type",
+            "canonical_instruction",
+            "task_type",
+            "target",
+            "knowledge_update",
+            "reference",
+            "status_query",
+            "claim_reference",
+            "control",
+            "target_selector",
+            "capability_status",
+            "required_capabilities",
+            "clear_memory",
+            "confidence",
+            "reason",
+        ],
         "additionalProperties": False,
     }
 

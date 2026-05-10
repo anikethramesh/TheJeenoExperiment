@@ -48,7 +48,8 @@ flowchart LR
   Actuators[("Actuation / Control<br>env.step / Nav2 / PX4 / MoveIt / BTs")]
 
   U <--> L
-  L <--> CS
+  L --> IV["Intent Verifier<br>utterance signal extraction<br>semantic signal → required_capabilities injection<br>proactive, deterministic, substrate-independent"]
+  IV --> CS
 
   CS --- M
   CS --- R

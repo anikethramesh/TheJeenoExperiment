@@ -15,12 +15,14 @@ from .schemas import (
     ExecutionContract,
     ExecutionContext,
     MemoryUpdate,
+    OperatorIntent,
     ProcedureRecipe,
     SchemaValidationError,
     SensePlanTemplate,
     SkillPlanTemplate,
     TaskRequest,
     memory_updates_json_schema,
+    operator_intent_json_schema,
     procedure_recipe_json_schema,
     sense_plan_json_schema,
     skill_plan_json_schema,
@@ -111,6 +113,17 @@ class CompilerBackend(ABC):
         trace,
         memory,
     ) -> list[MemoryUpdate]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def compile_operator_intent(
+        self,
+        utterance: str,
+        memory,
+        scene_summary: dict[str, Any] | None = None,
+        capability_manifest: dict[str, Any] | None = None,
+        active_claims_summary: dict[str, Any] | None = None,
+    ) -> OperatorIntent:
         raise NotImplementedError
 
 
@@ -371,6 +384,339 @@ class SmokeTestCompiler(CompilerBackend):
         )
         return updates
 
+    def compile_operator_intent(
+        self,
+        utterance: str,
+        memory,
+        scene_summary: dict[str, Any] | None = None,
+        capability_manifest: dict[str, Any] | None = None,
+        active_claims_summary: dict[str, Any] | None = None,
+    ) -> OperatorIntent:
+        self.record_call(
+            method_name="compile_operator_intent",
+            backend=self.name,
+            success=True,
+            used_fallback=False,
+        )
+        normalized = " ".join(utterance.lower().strip().split())
+        color_pattern = r"red|green|blue|yellow|purple|grey|gray"
+        door_match = re.search(
+            rf"\b(?:go to|go the|reach|find|get to|head to|navigate to)\s+"
+            rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door)\b",
+            normalized,
+        )
+        _SUPERLATIVE_TERMS = frozenset([
+            "farthest", "furthest", "most distant", "most far",
+            "farthest away", "furthest away", "maximum distance",
+        ])
+        metric = (
+            "euclidean" if "euclidean" in normalized
+            else "manhattan"
+        )
+        if any(t in normalized for t in _SUPERLATIVE_TERMS) and "door" in normalized:
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="ground_target",
+                target_selector={
+                    "object_type": "door",
+                    "color": None,
+                    "exclude_colors": [],
+                    "relation": "closest",
+                    "distance_metric": metric,
+                    "distance_reference": "agent",
+                },
+                capability_status="missing_skills",
+                required_capabilities=[f"grounding.farthest_door.{metric}.agent"],
+                confidence=0.85,
+                reason="Farthest-door grounding is not implemented.",
+            )
+
+        if any(
+            phrase in normalized
+            for phrase in ("next closest", "next one", "next door", "another door")
+        ):
+            return OperatorIntent(
+                intent_type="claim_reference",
+                claim_reference="next_closest",
+                target_selector=None,
+                required_capabilities=[],
+                confidence=0.85,
+                reason="Deterministic operator-intent fallback parsed a next-closest claim reference.",
+            )
+
+        if any(
+            phrase in normalized
+            for phrase in ("other door", "remaining door", "other one", "the other")
+        ):
+            return OperatorIntent(
+                intent_type="claim_reference",
+                claim_reference="other_door",
+                target_selector=None,
+                required_capabilities=[],
+                confidence=0.85,
+                reason="Deterministic operator-intent fallback parsed an other-door claim reference.",
+            )
+
+        is_ranked_query = any(
+            phrase in normalized
+            for phrase in (
+                "in order", "in descending order", "in ascending order",
+                "ranked", "ranking", "rank them", "list them",
+                "all doors", "all of them", "list all",
+            )
+        )
+
+        if is_ranked_query and "door" in normalized:
+            metric = (
+                "euclidean"
+                if "euclidean" in normalized
+                else "manhattan"
+                if "manhattan" in normalized
+                else "manhattan"
+            )
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="ground_target",
+                target_selector={
+                    "object_type": "door",
+                    "color": None,
+                    "exclude_colors": [],
+                    "relation": "closest",
+                    "distance_metric": metric,
+                    "distance_reference": "agent",
+                },
+                capability_status="missing_skills",
+                required_capabilities=[f"grounding.ranked_doors.{metric}.agent"],
+                confidence=0.85,
+                reason="Ranked listing requires grounding.ranked_doors — not closest.",
+            )
+
+        if ("closest" in normalized or "nearest" in normalized or "shortest" in normalized) and "door" in normalized:
+            metric = (
+                "euclidean"
+                if "euclidean" in normalized
+                else "manhattan"
+                if "manhattan" in normalized
+                else None
+            )
+            if is_ranked_query:
+                metric_suffix = metric or "manhattan"
+                return OperatorIntent(
+                    intent_type="status_query",
+                    status_query="ground_target",
+                    target_selector={
+                        "object_type": "door",
+                        "color": None,
+                        "exclude_colors": [],
+                        "relation": "closest",
+                        "distance_metric": metric,
+                        "distance_reference": "agent" if metric is not None else None,
+                    },
+                    capability_status="missing_skills",
+                    required_capabilities=[f"grounding.ranked_doors.{metric_suffix}.agent"],
+                    confidence=0.85,
+                    reason="Ranked listing requires grounding.ranked_doors — not the same as closest.",
+                )
+            return OperatorIntent(
+                intent_type=(
+                    "knowledge_update"
+                    if "delivery target" in normalized or "make" in normalized
+                    else "task_instruction"
+                    if re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
+                    else "status_query"
+                ),
+                task_type=(
+                    "go_to_object"
+                    if re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
+                    else None
+                ),
+                knowledge_update=(
+                    {"delivery_target": None}
+                    if "delivery target" in normalized or "make" in normalized
+                    else None
+                ),
+                status_query=(
+                    None
+                    if re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
+                    or "delivery target" in normalized
+                    or "make" in normalized
+                    else "ground_target"
+                ),
+                target_selector={
+                    "object_type": "door",
+                    "color": None,
+                    "exclude_colors": [],
+                    "relation": "closest",
+                    "distance_metric": metric,
+                    "distance_reference": "agent" if metric is not None else None,
+                },
+                capability_status=(
+                    "synthesizable"
+                    if metric == "euclidean"
+                    else "needs_clarification"
+                    if metric is None
+                    else "executable"
+                ),
+                required_capabilities=(
+                    ["grounding.closest_door.euclidean.agent"]
+                    if metric == "euclidean"
+                    else ["grounding.closest_door.manhattan.agent"]
+                    if metric == "manhattan"
+                    else []
+                ),
+                confidence=0.85,
+                reason="Deterministic operator-intent fallback parsed a closest-door selector.",
+            )
+
+        not_color_matches = re.findall(
+            rf"\b(?:not|other than|except|neither|nor)\s+(?:the )?({color_pattern})\b",
+            normalized,
+        )
+        if not_color_matches:
+            # Also capture colors joined with "or"/"nor" (e.g. "not purple or yellow")
+            extra = re.findall(
+                rf"\b(?:or|nor)\s+(?:the )?({color_pattern})\b",
+                normalized,
+            )
+            not_color_matches.extend(extra)
+        if "door" in normalized and not_color_matches:
+            exclude_colors = [
+                "grey" if c == "gray" else c
+                for c in not_color_matches
+            ]
+            return OperatorIntent(
+                intent_type="task_instruction",
+                task_type="go_to_object",
+                target_selector={
+                    "object_type": "door",
+                    "color": None,
+                    "exclude_colors": exclude_colors,
+                    "relation": "unique",
+                    "distance_metric": None,
+                    "distance_reference": None,
+                },
+                capability_status="executable",
+                required_capabilities=[
+                    "grounding.unique_door.color_filter",
+                    "task.go_to_object.door",
+                ],
+                confidence=0.85,
+                reason="Deterministic operator-intent fallback parsed an excluded-color door selector.",
+            )
+
+        if door_match:
+            color = "grey" if door_match.group("color") == "gray" else door_match.group("color")
+            return OperatorIntent(
+                intent_type="task_instruction",
+                canonical_instruction=f"go to the {color} door",
+                task_type="go_to_object",
+                target={"color": color, "object_type": "door"},
+                target_selector=None,
+                required_capabilities=["task.go_to_object.door"],
+                confidence=1.0,
+                reason="Deterministic operator-intent fallback parsed a door navigation task.",
+            )
+
+        delivery_match = re.search(
+            rf"\b(?P<color>{color_pattern}) (?P<object_type>door)\b.*\bdelivery target\b",
+            normalized,
+        )
+        if delivery_match:
+            color = "grey" if delivery_match.group("color") == "gray" else delivery_match.group("color")
+            return OperatorIntent(
+                intent_type="knowledge_update",
+                knowledge_update={
+                    "delivery_target": {"color": color, "object_type": "door"}
+                },
+                target_selector=None,
+                required_capabilities=[],
+                confidence=1.0,
+                reason="Deterministic operator-intent fallback parsed delivery target knowledge.",
+            )
+
+        if "same" in normalized or "again" in normalized:
+            return OperatorIntent(
+                intent_type="task_instruction",
+                task_type="go_to_object",
+                reference="last_target",
+                target_selector=None,
+                required_capabilities=["task.go_to_object.door"],
+                confidence=0.8,
+                reason="Deterministic operator-intent fallback parsed a last-target reference.",
+            )
+
+        if "delivery target" in normalized and self._looks_like_question(normalized):
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="delivery_target",
+                target_selector=None,
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback parsed a delivery-target query.",
+            )
+
+        if (
+            "what do you see" in normalized
+            or "what can you see" in normalized
+            or "look around" in normalized
+            or "around you" in normalized
+        ):
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="scene",
+                target_selector=None,
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback parsed a scene query.",
+            )
+
+        if (
+            "what can you do" in normalized
+            or "capabilit" in normalized
+            or "what are you able" in normalized
+            or "overview" in normalized
+        ):
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="help",
+                target_selector=None,
+                confidence=0.8,
+                reason="Deterministic operator-intent fallback parsed a capability query.",
+            )
+
+        if "last" in normalized or "previous" in normalized:
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="last_run",
+                target_selector=None,
+                confidence=0.7,
+                reason="Deterministic operator-intent fallback parsed a last-run query.",
+            )
+
+        return OperatorIntent(
+            intent_type="unsupported",
+            target_selector=None,
+            confidence=0.0,
+            reason="Deterministic operator-intent fallback could not resolve utterance.",
+        )
+
+    def _looks_like_question(self, normalized_utterance: str) -> bool:
+        return (
+            normalized_utterance.endswith("?")
+            or normalized_utterance.startswith(
+                (
+                    "what",
+                    "whats",
+                    "what's",
+                    "which",
+                    "who",
+                    "where",
+                    "when",
+                    "why",
+                    "how",
+                    "and",
+                )
+            )
+        )
+
     def _validate_primitive_names(self, names, available_primitives, label: str) -> None:
         allowed = set(available_primitives)
         for name in names:
@@ -381,6 +727,7 @@ class SmokeTestCompiler(CompilerBackend):
 class LLMCompiler(CompilerBackend):
     name = "llm_compiler"
     DEFAULT_METHOD_MAX_TOKENS = {
+        "compile_operator_intent": 256,
         "compile_task": 256,
         "compile_procedure": 512,
         "compile_sense_plan": 384,
@@ -454,6 +801,127 @@ class LLMCompiler(CompilerBackend):
             user_payload=payload,
             fallback_call=lambda: self.fallback.compile_task(
                 instruction, available_task_primitives, memory
+            ),
+        )
+
+    def compile_operator_intent(
+        self,
+        utterance: str,
+        memory,
+        scene_summary: dict[str, Any] | None = None,
+        capability_manifest: dict[str, Any] | None = None,
+        active_claims_summary: dict[str, Any] | None = None,
+    ) -> OperatorIntent:
+        payload = {
+            "utterance": utterance,
+            "knowledge": memory.knowledge,
+            "episodic_memory": memory.episodic_memory,
+            "scene_summary": scene_summary,
+            "capability_manifest": capability_manifest,
+            "active_claims_summary": active_claims_summary,
+            "supported": {
+                "intent_types": [
+                    "task_instruction",
+                    "knowledge_update",
+                    "status_query",
+                    "cache_query",
+                    "claim_reference",
+                    "reset",
+                    "quit",
+                    "unsupported",
+                    "ambiguous",
+                ],
+                "task_types": ["go_to_object"],
+                "object_types": ["door"],
+                "colors": ["red", "green", "blue", "yellow", "purple", "grey"],
+                "references": ["delivery_target", "last_target", "last_task"],
+                "status_queries": [
+                    "status",
+                    "scene",
+                    "help",
+                    "last_run",
+                    "last_target",
+                    "delivery_target",
+                    "ground_target",
+                    "cache",
+                ],
+            },
+        }
+        return self._compile_or_fallback(
+            method_name="compile_operator_intent",
+            schema_name="jeenom_operator_intent",
+            schema=operator_intent_json_schema(),
+            parser=OperatorIntent.from_dict,
+            system_prompt=(
+                "You are the JEENOM operator intent compiler. Convert the operator utterance "
+                "into one typed OperatorIntent. You only describe intent; you do not update "
+                "memory, execute tasks, or call tools. Current executable task scope is only "
+                "go_to_object for door targets. For unsupported, ambiguous, non-door, pickup, "
+                "open, unlock, exploration, correction, or replan requests, emit unsupported "
+                "or ambiguous and do not fabricate a supported intent. Knowledge updates are "
+                "narrowly limited to delivery_target. Question-shaped utterances must be "
+                "status_query intents, not knowledge_update intents. Scene questions such as "
+                "'what do you see around you' map to status_query=scene. Delivery-target "
+                "questions map to status_query=delivery_target only when the utterance "
+                "explicitly mentions delivery target. Capability or help questions such as "
+                "'what can you do', 'what are your capabilities', or 'give me an overview "
+                "of your capabilities' map to status_query=help and should be answered "
+                "from the capability_manifest by the station. "
+                "Relational target questions such as "
+                "'what is the closest door to you', 'which door is nearest', or 'shortest "
+                "distance to a door' must map to status_query=ground_target with a "
+                "target_selector, never status_query=delivery_target. For relational target "
+                "requests such as closest or not-yellow doors, emit a target_selector. Do not "
+                "choose the closest object yourself; the station will ground the selector "
+                "using current scene data. "
+                "Use the capability_manifest to decide whether a request is executable, "
+                "needs clarification, unsupported, or missing a primitive. Set "
+                "capability_status explicitly: executable when the manifest says the needed "
+                "primitive is implemented; needs_clarification when the request is supported "
+                "but a slot like distance_metric is missing; synthesizable when the manifest "
+                "says a missing primitive is safe_to_synthesize; missing_skills when a "
+                "required primitive is missing and not synthesizable; unsupported when the "
+                "request is outside the manifest. Closest-door Manhattan grounding is "
+                "implemented. Closest-door Euclidean grounding is missing but marked safe to "
+                "synthesize later; emit capability_status=synthesizable with "
+                "distance_metric=euclidean rather than unsupported. If closest is requested "
+                "without a metric, emit capability_status=needs_clarification and a closest "
+                "selector with null distance fields so the station can ask a clarification. "
+                "Example: utterance='I see. What is the closest door to you' -> "
+                "intent_type=status_query, capability_status=needs_clarification, "
+                "status_query=ground_target, target_selector={object_type: door, "
+                "relation: closest, distance_metric: null, distance_reference: null}. "
+                "If active_claims_summary is provided in the payload, the operator may be "
+                "referring to a prior grounding result. Phrases like 'the next closest', "
+                "'next one', 'the next door', 'the other door', 'the remaining door', or "
+                "'another door' should be classified as intent_type=claim_reference. Set "
+                "claim_reference=next_closest for sequential references (next one, next "
+                "closest, next door) and claim_reference=other_door for residual references "
+                "(the other door, the remaining door). Do NOT choose the object yourself; "
+                "the station resolves claim references deterministically from active_claims. "
+                "REQUIRED_CAPABILITIES: Every intent must include a required_capabilities "
+                "field listing the exact capability handles needed. Use the handle names "
+                "exactly as they appear in the capability_manifest (e.g. "
+                "'grounding.closest_door.manhattan.agent', 'task.go_to_object.door'). "
+                "Include any handle the intent needs even if it is NOT in the manifest — the "
+                "station's CapabilityMatcher will classify it as missing_skills. "
+                "No weakening: grounding.closest_door does NOT satisfy grounding.ranked_doors; "
+                "grounding.closest_door does NOT satisfy grounding.nth_closest_door; "
+                "task.go_to_object does NOT satisfy task.pickup. "
+                "A request for ranked or ordered listing of objects (e.g. 'all doors in "
+                "order', 'list doors by distance', 'doors closest to me ranked') requires "
+                "'grounding.ranked_doors.manhattan.agent' — this is NOT the same as "
+                "grounding.closest_door.manhattan.agent and must be listed separately. "
+                "For status queries and claim references with no grounding or task "
+                "requirements, emit required_capabilities=[]."
+            ),
+            user_payload=payload,
+            fallback_call=lambda: self.fallback.compile_operator_intent(
+                utterance,
+                memory,
+                scene_summary=scene_summary,
+                capability_manifest=capability_manifest,
+                active_claims_summary=active_claims_summary,
             ),
         )
 

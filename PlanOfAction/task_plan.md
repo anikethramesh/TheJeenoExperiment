@@ -4,20 +4,40 @@
 Status: done.
 Prove MiniGrid wrapper, observe/act/render, and simple task execution.
 
+Technical debt:
+- Rendering and episode lifecycle are still MiniGrid-specific.
+- GUI responsiveness is fragile during compile/prewarm unless the station keeps the preview alive.
+- No abstraction yet for transferring observe/act/render semantics to a robot or simulator backend.
+
 ### Phase 1 — Minimal JEENOM vertical slice
 Status: done.
 Implement CorticalSchema contracts, Cortex, Sense, Spine, WorldModelSample, OperationalEvidence, Percepts, ExecutionContract, ExecutionReport.
+
+Technical debt:
+- Contracts are still shaped around the current GoToDoor loop and need pressure from more task families.
+- Error and readiness reporting are usable but not yet rich enough for complex failure recovery.
+- Cortex/Sense/Spine boundaries work, but primitive registration is still not fully dynamic.
 
 ### Phase 2 — LLM compiler boundary
 Status: done.
 LLM compiles typed schema objects. Runtime validates and executes deterministic primitives.
 
+Technical debt:
+- Some LLM structured-output schemas still need provider-hardening; compile_memory_updates has shown OpenRouter/Azure schema rejection.
+- Fallback behavior is useful for tests but can hide provider/schema issues unless evals explicitly require live LLM use.
+- Prompt/schema drift remains a risk until each compiler method has live-provider probes.
+
 ### Phase 3 — JIT template caching + prewarm
 Status: done.
 Cache ProcedureRecipe, SensePlanTemplate, SkillPlanTemplate. Prewarm before render. No LLM calls or cache misses during rendered control loop.
 
+Technical debt:
+- Cache keys and invalidation are still simple and may not survive richer primitive/version changes.
+- Prewarm can add visible startup or handoff latency.
+- Cache introspection is adequate for debugging but not yet a full operator-facing readiness report.
+
 ### Phase 3.5 — Regression/golden test
-Status: next.
+Status: done.
 Freeze the current success case:
 - instruction: "go to the red door"
 - compiler: llm
@@ -27,23 +47,1173 @@ Freeze the current success case:
 - cache_miss_during_render=0
 - final action=done
 
+Technical debt:
+- Golden path covers one instruction, one object family, and one known-good seed.
+- It proves the cached runtime invariant, not broad task competence.
+- Human render is patched/headless in test, so visual behavior still needs manual smoke checks.
+
 ### Phase 4 — Bigger same-task stress test
-Status: next.
+Status: done.
 Run larger GoToDoor environment. Same task, same recipe, longer path. No Q/A yet.
 
+Goal:
+Run the same "go to the red door" task in a larger GoToDoor environment with the same LLM compiler + prewarm + cached runtime pattern.
+
+Success criteria:
+- same instruction: "go to the red door"
+- bigger GoToDoor env
+- compiler=llm
+- prewarm enabled
+- task_complete=True
+- runtime_llm_calls_during_render=0
+- cache_miss_during_render=0
+- final action/skill is done
+- Phase 3.5 golden eval still passes
+
+Implemented:
+- env: MiniGrid-GoToDoor-16x16-v0
+- seed: 42
+- loop_count=8
+- final skill_plan=['done']
+- runtime_llm_calls_during_render=0
+- cache_miss_during_render=0
+
+Technical debt:
+- Still same task family and no blocked-path/replan pressure.
+- Larger grids expose startup/prewarm/render latency but do not solve it.
+- The test starts a fresh episode per run; it does not prove continuous-world task chaining.
+
+
 ### Phase 5 — CLI operator interface
-Status: planned.
-Support interactive instruction/correction loop. CLI only.
+Status: done.
+Support interactive natural-language operator loop. CLI only.
 
-### Phase 6 — Few-shot memory reuse
-Status: planned.
-Run 1 stores knowledge. Run 2 uses it, e.g. "go there again."
+Implemented:
+- OperatorStationSession owns env_id, seed, compiler, OperationalMemory, PlanCache, render_mode, and last_result.
+- run_operator_station.py starts an interactive READY prompt.
+- Operator utterances are classified without command prefixes:
+  - task_instruction
+  - knowledge_update
+  - status_query
+  - cache_query
+  - reset
+  - quit
+- Supported knowledge updates:
+  - delivery_target is the canonical operator target fact
+  - target_color and target_type are kept synchronized internally for runtime compatibility
+  - accepted variants include "the red door is the delivery target", "your delivery target is the red door", "target is the red door", "remember the red door", and "set delivery target to the red door"
+- Supported task phrasing includes "go to the red door", "go to red door", "reach the red door", "find the red door", "head to the red door", and "navigate to the red door".
+- Task instructions use the existing JEENOM pipeline with task-specific prewarm before render.
+- Target-absent failures report available targets and return to READY without follow-up Q/A.
+- Reset clears episodic state and last_result while keeping durable knowledge by default.
+- Phase 3.5 and Phase 4 regression guarantees still pass.
 
-### Phase 7 — GoToObject/general object variant
-Status: planned.
-Test same recipe over non-door objects.
+Technical debt:
+- The interface is operational rather than conversational; responses are readable but not naturally dialogic.
+- Startup/prewarm transparency is still log-style, not a polished operator experience.
+- Interactive render windows still restart between task episodes by design.
+- Natural-language coverage depends on the Phase 7 LLM path and remains constrained by typed schemas.
 
-### Phase 8 — Readiness-only transfer demo
+### Phase 6 — Memory-Grounded Reference Resolution
+
+Status: done.
+
+Goal:
+Let the operator refer to remembered task targets without restating the full instruction.
+
+Examples:
+- the green door is the delivery target
+- go to the delivery target
+- go there again
+- go to the same door
+- repeat the last task
+- what was the last target?
+
+Scope:
+- still doors only
+- still GoToDoor / go_to_object-shaped task
+- no continuous-world semantics
+- each task can still start from a fresh MiniGrid episode
+
+Success criteria:
+- After a successful "go to the red door", "go there again" resolves to "go to the red door".
+- "repeat the last task" resolves to the last canonical task instruction.
+- "what was the last target?" prints the last target color/type.
+- If no previous target exists, reference commands fail safely without asking follow-up questions.
+- "go to the delivery target" continues to use durable delivery_target.
+- Phase 3.5, Phase 4, and Phase 5 tests still pass.
+
+Implemented:
+- Added episodic reference fields:
+  - last_target
+  - last_task
+  - last_successful_instruction
+- "go there again" and "go to the same door" resolve from episodic last_target.
+- "repeat the last task" resolves from episodic last_successful_instruction / last_task.
+- "what was the last target?" reports color, object_type, and canonical instruction.
+- Missing reference memory fails safely and returns to READY without follow-up Q/A.
+- Successful task completion updates reference memory.
+- Failed runs do not overwrite reference memory.
+- Explicit reset clears episodic reference context and last_result.
+- Durable delivery_target still works after reset.
+- clear memory / forget everything clears durable target knowledge.
+
+Technical debt:
+- Episodic memory is shallow: last target/task only, not a structured event timeline.
+- References are resolved against fresh-episode semantics, not current physical position.
+- Failed or partial tasks do not yet produce useful recoverable memory beyond preserving the last successful target.
+
+### Phase 6.5 — Operator Session Semantics
+Status: done.
+
+Goal:
+Make the station behave coherently across multiple operator turns.
+
+Decision:
+- Each task starts a fresh MiniGrid episode for now.
+- reset clears episodic state and last_result.
+- reset keeps durable delivery_target.
+- clear memory / forget everything clears durable target knowledge.
+- last_result persists until reset, clear memory, or the next task overwrites it.
+- last_target persists until reset, clear memory, or the next successful task overwrites it.
+- failed runs do not overwrite last_target.
+- durable delivery_target persists across station restarts.
+
+Implemented:
+- reset clears last_result and episodic reference context.
+- reset keeps durable delivery_target available for "go to the delivery target".
+- clear memory / forget everything clears delivery_target, target_color, and target_type.
+- delivery_target persists through OperationalMemory disk reload.
+- task onboarding clears per-episode runtime state while preserving reference context between turns.
+
+Technical debt:
+- Fresh-episode semantics remain surprising in an operator station because "again" does not mean continue from the current rendered location.
+- Durable and episodic stores are still minimal and need clearer inspection/export tools.
+- There is no multi-session audit trail for what was remembered, forgotten, or inferred.
+
+### Phase 7 — LLM-Grounded Operator Understanding
+Status: done.
+
+Goal:
+Replace brittle operator string matching with a typed, validated LLM intent compiler, while preserving deterministic fast paths and no runtime LLM calls during render.
+
+Scope:
+- classify natural operator utterances
+- extract structured task, knowledge, status, control, and memory-reference intent
+- emit a typed OperatorIntent schema
+- support the current door/go_to_object task family
+- keep regex/string parser as fast path and fallback
+- allow LLM calls only before task execution/render
+- validate all LLM outputs before acting
+- invalid or unsupported LLM outputs must fail safely or fall back to deterministic parser
+- the station, not the LLM, performs memory updates, readiness, prewarm, and runtime execution
+
+Success criteria:
+- "can you please head over to the blue door" resolves to go_to_object blue door
+- "that red door is our delivery target" updates durable delivery_target
+- "go back to the same one" resolves through episodic last_target
+- "what did I ask you to do last time?" resolves to last task/status query
+- invalid/ambiguous LLM parse does not execute unsafe behavior
+- runtime_llm_calls_during_render remains 0
+- cache_miss_during_render remains 0
+- Phase 3.5, 4, 5, 6, and 6.5 guardrails still pass
+
+Out of scope:
+- continuous-world execution
+- clarification Q/A
+- mid-run operator correction
+- open/unlock/pickup
+- exploration/replan
+- non-door object families
+
+Implemented:
+- Added typed OperatorIntent schema with:
+  - intent_type
+  - canonical_instruction
+  - task_type
+  - target
+  - narrowly typed knowledge_update
+  - reference
+  - status_query
+  - control
+  - clear_memory
+  - confidence
+  - reason
+- Added LLMCompiler.compile_operator_intent with typed schema validation and smoke-test fallback.
+- Deterministic parser is now the exact-match fast path.
+- Fuzzy/operator-natural utterances can route through the LLM intent compiler before execution.
+- LLM output must validate as OperatorIntent before conversion to OperatorCommand.
+- Unsupported and ambiguous LLM intents fail safely and do not execute.
+- Station still owns memory updates, readiness, prewarm, and runtime execution.
+- Supported fuzzy examples now covered:
+  - "can you please head over to the blue door"
+  - "that red door is our delivery target"
+  - "go back to the same one"
+  - "what did I ask you to do last time?"
+- Fuzzy scene/status queries are covered:
+  - "what do you see around you" maps to status_query=scene.
+- Delivery-target questions are covered:
+  - "and the delivery target?" maps to status_query=delivery_target.
+- Question-shaped utterances cannot mutate memory even if the LLM incorrectly returns a knowledge_update intent.
+- Verbose mode logs validated OperatorIntent type, confidence, and reason.
+- Unsupported capability examples such as pickup/key requests do not execute.
+
+Technical debt:
+- The LLM can classify into typed intents, but it only understands what the schema and capability manifest let it express.
+- Unsupported or underspecified requests can still feel blunt because open-ended dialogue is out of scope.
+- Provider behavior must be continuously checked with live evals, not only fake transport tests.
+- The memory-update compiler schema needs cleanup because OpenRouter/Azure rejected one structured output shape.
+
+
+### Phase 7.5 — Typed Target Selector Grounding
+Status: done.
+
+Goal:
+Ground fully specified relational target requests against the current MiniGrid scene using typed selectors and deterministic scene primitives. No clarification loop yet.
+
+Scope:
+- The LLM emits a TargetSelector.
+- The station validates the selector before use.
+- Scene grounding deterministically resolves the selector against current scene data.
+- Only a grounded target is converted into an existing go_to_object task.
+- The LLM must not choose the closest object itself.
+- Door-only support:
+  - closest door by Manhattan distance from agent
+  - unique door matching include/exclude color constraints
+  - visible door list/status queries
+
+TargetSelector:
+- object_type: door
+- color: supported color | None
+- exclude_color: supported color | None
+- relation: closest | unique | None
+- distance_metric: manhattan | euclidean | None
+- distance_reference: agent | None
+
+Validation:
+- unsupported object type rejected
+- unsupported color rejected
+- unsupported relation rejected
+- closest execution requires a registry-supported distance_metric and distance_reference
+- ambiguous selector does not execute
+- no-match selector does not execute
+
+Examples:
+- which doors are visible?
+- which door is closest by Manhattan distance?
+- go to the closest door using Manhattan distance
+- go to the door that is not yellow
+- make the closest door by Manhattan distance the delivery target
+
+Implemented:
+- Added TargetSelector schema and OperatorIntent.target_selector.
+- Added station-side selector validation before grounding.
+- Added deterministic MiniGrid scene grounding for door selectors.
+- Added grounded target status output with target color/type/location and distance.
+- Added closest-door grounding by Manhattan distance from the agent.
+- Added selector-based go_to_object execution after grounding.
+- Added selector-based delivery_target knowledge updates.
+- Added exact visible-door query support.
+- Added safety checks so implicit closest without a metric, ambiguous selectors, unsupported selectors, no-match selectors, and LLM-chosen closest targets do not execute.
+- Phase 3.5, Phase 4, and operator-station guardrails still pass.
+
+Out of scope:
+- implicit closest without metric
+- non-door object families
+- left/right/front/behind
+- continuous-world execution
+- exploration/replan
+- pickup/open/unlock
+- clarification Q/A
+
+Technical debt:
+- Selector grounding is deterministic and narrow: doors, color filters, and closest-by-supported-metric only.
+- The LLM proposes selectors, but the station still needs explicit selector schema fields for every relation we want to ground.
+- Unsupported relations like facing-direction, left/right, occlusion, or semantic categories will not work until represented in the selector/capability layer.
+
+### Phase 7.55 — Capability Registry and Primitive Manifest
+Status: done.
+
+Goal:
+Stop patching operator language with regex. Give the LLM and station a typed capability substrate.
+
+The registry should describe available task, grounding, sensing, and action primitives, including their input/output schemas, side effects, implementation status, and whether they are safe to synthesize.
+
+Do not add primitive synthesis yet.
+Do not add Euclidean distance implementation yet.
+Do not add new object families.
+Do not change runtime execution.
+
+Implementation:
+- Add PrimitiveManifest / PrimitiveSpec schema.
+- Add CapabilityRegistry.
+- Load MiniGrid primitive manifest from a YAML/JSON/Python dict.
+- Expose compact manifest summary to compile_operator_intent.
+- Make OperatorIntent validation check requested task/selectors against the registry.
+- Make readiness report:
+  executable
+  missing_primitive
+  unsupported
+  synthesizable_missing_primitive
+- Keep exact deterministic fast path only for trivial commands.
+- Do not patch fuzzy phrases with regex.
+
+Success criteria:
+- manifest lists current door/go_to_object, scene, sensing, and action primitives
+- "closest door by Manhattan distance" maps to implemented primitive
+- "closest door by Euclidean distance" maps to missing but synthesizable grounding primitive
+- "pick up the key" maps to unsupported/missing action primitive and does not execute
+- LLM receives manifest summary before compiling OperatorIntent
+- invalid requests fail safely
+- Phase 3.5 through Phase 7 guardrails still pass
+- runtime_llm_calls_during_render remains 0
+- cache_miss_during_render remains 0
+
+Implemented:
+- Added PrimitiveSpec and PrimitiveManifest schemas.
+- Added CapabilityRegistry with MiniGrid primitive manifest.
+- Manifest lists task, grounding, sensing, and action primitives with inputs, outputs, side effects, implementation status, and safe_to_synthesize.
+- compile_operator_intent receives compact capability_manifest summary.
+- Station checks selector readiness against CapabilityRegistry before grounding/execution.
+- Readiness statuses include:
+  - executable
+  - missing_primitive
+  - unsupported
+  - synthesizable_missing_primitive
+- Manhattan closest-door grounding maps to implemented primitive grounding.closest_door.manhattan.agent.
+- Euclidean closest-door grounding maps to missing but synthesizable primitive grounding.closest_door.euclidean.agent and does not execute.
+- Pickup/key action maps to unsupported action primitive and does not execute.
+- Fuzzy closest/not-yellow operator language now routes through LLM intent compilation with the manifest instead of station regex patches.
+- Exact deterministic fast path is kept for trivial commands only.
+- Added evals/operator_intent_probe.py to verify live LLM clarification arbitration.
+- Full JEENOM suite passes.
+
+Live LLM clarification eval:
+- Command:
+  python evals/operator_intent_probe.py --utterance "I see. What is the closest door to you"
+- Passing result requires:
+  - used_live_llm
+  - intent_type=status_query
+  - capability_status=needs_clarification
+  - status_query=ground_target
+  - target_selector.object_type=door
+  - target_selector.relation=closest
+  - target_selector.distance_metric=None
+  - target_selector.distance_reference=None
+- Do not use --allow-fallback as proof; that only sanity-checks the script without OpenRouter.
+
+Station-level clarification eval:
+- Command:
+  python evals/operator_clarification_probe.py
+- This is the real clarification-loop proof, not just intent inspection.
+- Passing result requires:
+  - used_live_llm
+  - station_returned_clarify
+  - clarify_mentions_closest
+  - clarify_mentions_distance_metric
+  - clarify_lists_manhattan
+  - pending_clarification_created
+  - pending_type_missing_field
+  - pending_missing_field_distance_metric
+  - pending_supports_manhattan
+  - no_result_before_answer
+  - "manhattan" answer clears the pending clarification
+  - closest target query returns GROUNDED TARGET with target and distance
+  - closest task request returns RUN COMPLETE
+  - task_complete=True
+  - runtime_llm_calls_during_render=0
+  - cache_miss_during_render=0
+  - final_skill_plan=["done"]
+- You may run with --allow-fallback only to sanity-check eval wiring. It must show FAIL used_live_llm and does not prove live LLM clarification.
+
+Technical debt:
+- The manifest is currently a Python-defined MiniGrid manifest, not a discovered or generated registry.
+- Capability statuses are useful, but readiness language still needs to be unified across compiler, station, and primitive registry.
+- Missing-but-synthesizable primitives are detected but not synthesized until Phase 7.7.
+- Manifest summaries must stay compact enough for LLM use while retaining enough detail for good arbitration.
+
+### Phase 7.56 — Registry Unification
+Status: done.
+
+Goal:
+Unify CapabilityRegistry with the actual primitive substrate. The registry must derive from or faithfully mirror primitive_library.py so the LLM sees the same task/sensing/action capabilities that the runtime can actually validate and execute.
+
+This is not a new architecture. It is the implementation of the existing Readiness + Sensing Primitive Library + Action Primitive Library architecture.
+
+Source of truth:
+- primitive_library.py remains the source of truth for implemented runtime primitives.
+- CapabilityRegistry is a typed view/index over that source.
+- Do not create a second independent manifest that can drift from runtime.
+
+Registry must expose:
+- all TASK_PRIMITIVES
+- all SENSING_PRIMITIVES
+- all ACTION_PRIMITIVES
+- grounding/selector primitives
+- implementation_status: implemented | unsupported | synthesizable | planned
+- consumes
+- produces
+- side_effects
+- runtime_binding
+- layer: task | grounding | sensing | action
+
+Implemented:
+- Extended primitive_library.PrimitiveSpec with implementation_status, safe_to_synthesize, side_effects, and runtime binding metadata.
+- Added GROUNDING_PRIMITIVES to primitive_library.py for selector/query grounding primitives:
+  - visible_doors
+  - closest_door.manhattan.agent
+  - closest_door.euclidean.agent
+  - unique_door.color_filter
+- CapabilityRegistry now builds its MiniGrid registry from:
+  - TASK_PRIMITIVES
+  - GROUNDING_PRIMITIVES
+  - SENSING_PRIMITIVES
+  - ACTION_PRIMITIVES
+  - top-level task capability declarations such as task.go_to_object.door
+- Compact registry summaries include layer, status, consumes/inputs, produces/outputs, side effects, runtime binding, and synthesis safety.
+- Operator intent compilation continues to receive the compact registry summary.
+- Help/capability queries now answer from CapabilityRegistry instead of a hardcoded "Try: ..." string.
+- Readiness distinguishes task, grounding, sensing, and action layers in its report.
+
+Success criteria:
+- registry lists all TASK_PRIMITIVES, SENSING_PRIMITIVES, ACTION_PRIMITIVES from primitive_library.py
+- registry marks each as implemented / unsupported / synthesizable / planned
+- registry exposes consumes / produces / side effects / runtime binding
+- LLM operator-intent prompt uses compact registry summary
+- capability/help queries answer from registry, not hardcoded strings
+- readiness can explain missing task vs sensing vs grounding vs action primitive
+- no change to runtime execution behavior
+- golden path still passes
+- Phase 3.5 through Phase 7.5 guardrails still pass
+- runtime_llm_calls_during_render remains 0
+- cache_miss_during_render remains 0
+
+Eval:
+- Command:
+  python evals/capability_registry_probe.py
+- Passing result requires:
+  - all task/sensing/action primitives from primitive_library.py appear in the registry
+  - grounding primitives appear in the registry
+  - action.plan_grid_path exposes consumes, produces, and runtime_binding
+  - Euclidean closest-door grounding is reported as synthesizable missing primitive
+  - pickup key is reported as an unsupported task capability
+  - "what can you do" returns a CAPABILITIES report from the registry
+
+Out of scope:
+- primitive synthesis
+- Euclidean implementation
+- new object families
+- new robot actions
+- changing Sense/Spine execution semantics
+- replacing PlanCache
+
+Technical debt:
+- Top-level task capabilities such as task.go_to_object.door are still declared beside the primitive dictionaries because Understanding recipes are not yet stored as first-class registry primitives.
+- Capability help is registry-grounded but still formatted as a compact text report, not a natural conversational explanation.
+- Sensing/action runtime bindings are indexed, but dynamic binding/discovery is still future work.
+
+
+### Phase 7.57 — Persistent Scene Model
+Status: done.
+
+Goal:
+Project WorldModelSample into a typed, active SceneModel after every sense tick. Grounding and scene queries use SceneModel directly — no live env resets to answer current-scene questions.
+
+Core rule:
+SceneModel is projected from WorldModelSample. It is not a second sensing path.
+
+Source of truth:
+- MiniGridSense.execute_plan() produces WorldModelSample (unchanged).
+- After each tick, WorldModelSample is distilled into SceneModel and stored in OperationalMemory.
+- Grounding queries read from SceneModel.
+- If SceneModel is absent, one idle sense pass is performed against the existing adapter.
+
+Implemented:
+- Added SceneObject and SceneModel dataclasses to schemas.py.
+  - SceneModel.from_world_model_sample() is the only construction path.
+  - SceneModel.find() filters by object_type, color, exclude_color.
+  - SceneModel.manhattan_distance_from_agent() computes distance from agent pose.
+- Added OperationalMemory.scene_model slot and update_scene_model() method.
+- SceneModel is cleared in reset_episode() (both operator reset and task onboard).
+- Added MiniGridSense.sense_idle_scene(): builds SceneModel from a live observation
+  using the existing parse_grid_objects + get_agent_pose primitives.
+  source="idle_sense". Stored in memory.scene_model.
+- MiniGridSense.execute_plan() projects to SceneModel after every tick.
+  source="task_sense". Stored in memory.scene_model.
+- Added OperatorStationSession._ensure_scene_model():
+  - Returns memory.scene_model if already set.
+  - Otherwise calls sense_idle_scene() against the live adapter.
+  - Falls back to a temporary env only if no adapter exists (initial cold start).
+  - Never resets an existing adapter.
+- Replaced ground_target_selector() to use _ensure_scene_model() + SceneModel.find() + SceneModel.manhattan_distance_from_agent().
+- Removed _scene_adapter() and _agent_pose() from grounding paths.
+- Replaced scene_summary() to read from SceneModel. Now includes agent pose and source.
+- unique_door.color_filter now produces distance in addition to grounded_target.
+  Distance is computed as Manhattan distance from agent pose.
+- Added _scene_object_to_dict() helper for grounding return values.
+- Added evals/scene_model_probe.py.
+
+Success criteria:
+- SceneModel is populated after a task sense tick.
+- SceneModel is populated by idle sense before any task if an operator asks a scene query.
+- "which doors are visible?" answers from SceneModel.
+- "which door is closest by Manhattan distance?" answers from SceneModel.
+- After a task completes, scene queries use the final sensed agent pose, not spawn.
+- No grounding query calls adapter.reset(seed=...) or equivalent.
+- unique_door grounding returns distance.
+- Phase 3.5 through 7.56 guardrails still pass.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+
+Eval:
+- Command:
+  python evals/scene_model_probe.py
+- Passing result requires:
+  - scene_model_populated_after_task
+  - scene_model_source_task_sense
+  - scene_model_has_agent_pose
+  - scene_model_has_door_objects
+  - idle_sense_populates_scene_model
+  - idle_sense_source_is_idle_sense
+  - closest_grounding_ok
+  - closest_grounding_returns_distance
+  - grounding_did_not_call_adapter_reset
+  - unique_grounding_ok
+  - unique_grounding_returns_distance
+  - scene_summary_has_agent
+  - scene_summary_has_source
+  - scene_summary_has_doors
+  - scene_model_cleared_on_reset
+  - scene_model_rebuilt_after_reset
+
+Out of scope:
+- continuous-world task execution
+- replan
+- clarification loop
+- Euclidean primitive synthesis
+- non-door object families
+- pickup/open/unlock
+
+Technical debt:
+- SceneModel persists the last observed scene within an episode but does not accumulate across episodes.
+- Idle sense uses a temporary env reset only on the first cold-start query; after any task or startup, the live adapter is always used.
+- env_id and seed are not yet stored on SceneModel when built from the task sense path.
+
+### Phase 7.58 — Active Situational Awareness (Inter-Turn Claims)
+Status: done.
+
+Goal:
+Give the station a queryable, session-scoped Claims layer that persists grounding results
+across READY turns. Grounding queries write typed Claims. Subsequent operator turns can
+reference prior Claims in natural language without re-grounding from scratch.
+
+Problem this solves:
+Phase 7.57 gave the station a persistent SceneModel — it knows where things are. But
+grounding results are returned as printed strings and immediately forgotten. The next
+operator turn has no record of what was answered:
+
+  operator: "which door is closest?"
+  station:  GROUNDED TARGET — purple door@(4,0) distance=5
+  operator: "and the next closest?"
+  station:  [asks for distance metric again — has no memory of the prior answer]
+
+The station answered correctly but cannot reason about its own prior output. This is not
+a TargetSelector schema gap (adding rank=2 would be a spot fix). It is a missing
+projection: grounding results must write into an active Claims layer, just as Sense
+writes into Claims during task execution. Then "next closest" resolves against the
+existing ranked_doors Claim, not a fresh grounding query.
+
+Architecture mapping:
+The workflow diagram already has this layer: Claims in the Active Operational Model.
+During task execution, Cortex.claims is populated by Sense evidence. Between tasks,
+Claims are empty. Phase 7.58 extends Claims to cover inter-turn scene awareness.
+
+  grounding result → Claim (typed, named, session-scoped)
+  operator reference ("the next one", "from there", "is it closer than the red one?")
+    → resolved against active Claims, not re-grounded
+
+This is the correct substrate for:
+  - "and the next closest door?" → Claims["ranked_scene_doors"][1]
+  - "go to the closer of the two" → execute against a ranked Claim
+  - "how far is the red door from the purple one?" → inter-Claim distance query
+  - "is the blue door further than the red one?" → compare two distance Claims
+
+Scope:
+- Session-scoped Claims store in OperatorStationSession (not OperationalMemory — not durable).
+- Claims written by grounding queries:
+  - last_grounded_target: the most recently grounded SceneObject + distance
+  - ranked_scene_doors: full sorted list of doors with distances at time of grounding
+  - last_grounding_query: the selector that produced the last result
+- Claim references resolved by the LLM intent compiler before grounding:
+  - "the next one" / "and the next closest" → ranked_scene_doors[last_rank + 1]
+  - "the other door" / "the remaining one" → ranked_scene_doors excluding last_grounded_target
+  - "from there" / "from where you are" → use agent pose from SceneModel (already have this)
+- Claims survive across READY turns within a session.
+- Claims are cleared on reset.
+- Claims are cleared when a new task runs (task execution starts fresh).
+- Claims do not write to durable OperationalMemory.
+- No new LLM calls to resolve Claim references — resolution is deterministic against the
+  Claims store; the LLM classifies the intent type, the station resolves the reference.
+
+Implementation constraints:
+- Do not add Claim resolution to the task execution render loop.
+- Do not change Cortex.claims (task-execution Claims are separate from inter-turn Claims).
+- Do not change SceneModel.
+- Do not add a new sensing path.
+- Claims are typed dataclasses, not a raw dict blob.
+- LLM intent compiler receives a compact Claims summary (active_claims) so it can
+  classify "the next one" as a Claim reference intent rather than a new grounding query.
+
+Success criteria:
+- After "which door is closest?", Claims["last_grounded_target"] = purple door, Claims["ranked_scene_doors"] = [purple@5, yellow@6, ...]
+- "and the next closest door?" resolves to yellow door from ranked_scene_doors[1] without re-grounding or asking for distance metric.
+- "the other door" resolves from ranked_scene_doors excluding last_grounded_target.
+- Claims are cleared on reset.
+- Claims are cleared when a new task instruction runs.
+- No grounding query re-runs when a Claim reference can answer the question.
+- Phase 3.5 through 7.57 guardrails still pass.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+
+Out of scope:
+- Claim persistence across sessions (durable memory).
+- Inter-Claim distance queries ("how far is the red door from the purple one?") — future phase.
+- Claim provenance tracking — future phase.
+- Non-door object families.
+- Continuous-world execution.
+- Euclidean synthesis.
+
+Implemented:
+- schemas.py: GroundedDoorEntry dataclass (color, x, y, distance, as_dict()).
+- schemas.py: StationActiveClaims dataclass (scene_fingerprint, ranked_scene_doors,
+  last_grounded_target, last_grounded_rank, last_grounding_query).
+  Methods: is_valid_for(scene), next_ranked(), other_doors(), compact_summary().
+- schemas.py: OPERATOR_CLAIM_REFERENCES = ("next_closest", "other_door").
+- schemas.py: OperatorIntent.claim_reference field + JSON schema + from_dict() parsing.
+- schemas.py: "claim_reference" added to OPERATOR_INTENT_TYPES.
+- operator_station.py: self.active_claims: StationActiveClaims | None added to session.
+- operator_station.py: _write_ranked_claims() — builds and stores StationActiveClaims after
+  closest-relation grounding; fingerprints against current SceneModel.
+- operator_station.py: _resolve_claim_reference(ref_type) — checks fingerprint validity;
+  returns next_closest (rank+1) or other_door (remaining doors) deterministically.
+- operator_station.py: claim_reference_summary(ref_type) — formatted output for the operator.
+- operator_station.py: handle_utterance() — claim_reference branch dispatches to
+  claim_reference_summary before the task_instruction path.
+- operator_station.py: active_claims cleared on reset() and at start of run_task().
+- operator_station.py: command_from_llm_intent() passes active_claims_summary to compiler.
+- llm_compiler.py: CompilerBackend ABC, SmokeTestCompiler, LLMCompiler all accept
+  active_claims_summary: dict | None = None in compile_operator_intent().
+- llm_compiler.py: SmokeTestCompiler detects "next closest" / "next one" → claim_reference=next_closest
+  and "other door" / "remaining door" → claim_reference=other_door before the closest-door branch.
+- llm_compiler.py: LLMCompiler includes active_claims_summary in payload; system prompt
+  explains claim_reference intent type and OPERATOR_CLAIM_REFERENCES.
+- llm_compiler.py: LLMCompiler fallback call passes active_claims_summary through.
+- llm_compiler.py: "claim_reference" added to supported.intent_types payload.
+- tests/test_jeenom_minigrid.py: TestStationActiveClaims — 10 tests covering claims written
+  after closest grounding, rank-0 invariant, next_closest resolution, reset clearing,
+  stale fingerprint failure, compact_summary shape, is_valid_for() behavior.
+- evals/active_claims_probe.py: 17 checks — all PASS.
+- evals/scene_model_probe.py: 16 checks still PASS (no regression).
+- Full test suite: 101 tests PASS.
+
+### Phase 7.59 — Intent Readiness Requirement Matching
+Status: done.
+
+Goal:
+Introduce a deterministic CapabilityMatcher that independently verifies whether a compiled
+OperatorIntent can be fulfilled against the current CapabilityRegistry — before any execution
+is attempted. This replaces the LLM's self-assessed capability_status with an authoritative,
+substrate-independent verdict.
+
+Problem this solves:
+The LLM currently does two jobs: parsing operator intent (what the operator wants) and
+assessing whether the station can fulfill it (capability_status). These are different jobs and
+the second one is not reliable. When the LLM finds a partial match — a capability that covers
+most of the intent but not all of it — it silently degrades the query rather than emitting
+missing_skills. The station has no independent check to catch this:
+
+  operator: "tell me the doors closest to you in descending order using manhattan distance"
+  LLM: finds grounding.closest_door.manhattan → capability_status=executable
+  station: runs closest-door grounding, returns rank=0 only
+  result: "in descending order" (a ranked-listing requirement) is silently dropped
+
+capability_status never fired because the LLM thought it was doing something executable.
+The station had no independent view of what the intent actually required. This is the same
+class of failure that the task-execution readiness check was built to prevent — but the
+readiness check only runs at procedure-execution time, not at intent time.
+
+Architecture mapping:
+Task-execution readiness (existing) answers: "do I have the actions and evidence to run
+this procedure step?" Intent readiness (new) answers: "do I have the capabilities to
+attempt what this intent requires at all?" Both are deterministic checks against the registry.
+Neither is the LLM's opinion. Together they form a two-level readiness gate:
+
+  Level 1 — Intent Readiness (Phase 7.59):
+    OperatorIntent → extract required capability handles
+    → CapabilityMatcher.check(intent, registry)
+    → verdict: executable | needs_clarification | synthesizable | missing_skills
+    → overrides LLM's capability_status
+
+  Level 2 — Procedure Readiness (existing):
+    ProcedureRecipe → check actions and evidence
+    → ExecutionReadiness (already implemented)
+
+Design principles:
+- CapabilityMatcher is layer-independent. It operates on structured capability handles
+  (e.g., "grounding.ranked_doors", "sensing.get_agent_pose", "actuation.move_base") and
+  CapabilityRegistry entries. It has no knowledge of MiniGrid, ROS, or any substrate.
+- Intent requirements are declared by the LLM compiler as structured handles in
+  `required_capabilities`, not inferred post-hoc. The LLM declares what it requires; the
+  matcher checks whether it exists.
+- The LLM capability_status field is retained but demoted to a hint. If the LLM says
+  capability_status=executable but the matcher returns missing_skills or synthesizable,
+  the matcher wins. Always.
+- CapabilityMatcher runs after LLM compilation, before command dispatch, every turn.
+- When a required handle is missing from the registry, the matcher emits missing_skills
+  with the specific missing handle — not a generic error. This enables the station to give
+  the operator a precise response: "I can find the closest door but do not have a ranked
+  listing primitive."
+- synthesizable is not executable. A synthesizable result means the capability is absent
+  but marked safe to generate. The station reports this; actual synthesis is Phase 7.7.
+  synthesizable does not unblock execution in this phase.
+- When multiple handles are required and some are missing, the matcher identifies all gaps
+  at once, not just the first.
+- No weakening. The matcher enforces exact handle matching:
+  - grounding.closest_door does NOT satisfy grounding.ranked_doors
+  - grounding.closest_door does NOT satisfy grounding.nth_closest_door
+  - task.go_to_object does NOT satisfy task.pickup
+  - grounding.visible_doors does NOT satisfy grounding.ranked_doors
+  A broader capability never silently covers a more specific requirement.
+
+Scope:
+- Add `required_capabilities: list[str] | None` field to OperatorIntent — structured
+  capability handles the intent needs to be fulfilled. Emitted by the LLM compiler. The
+  LLM declares "I need these capabilities"; the matcher checks whether they exist.
+- Add CapabilityMatcher class (new module: jeenom/capability_matcher.py):
+  - match(intent: OperatorIntent, registry: CapabilityRegistry) -> CapabilityMatchResult
+  - CapabilityMatchResult: verdict, matched, missing, synthesizable_handles fields
+  - Pure function over typed inputs — no env, no sense, no memory, no substrate imports.
+- Integrate into command_from_operator_intent — matcher runs before any execution branch.
+- LLM system prompt updated to emit `required_capabilities` as a list of handles from the
+  manifest. If the intent needs a handle not in the manifest, include it anyway — the
+  matcher will classify it as missing_skills.
+- SmokeTestCompiler updated to emit `required_capabilities` deterministically for each
+  parsed intent type.
+- CapabilityRegistry gains a `lookup(handle: str) -> CapabilityEntry | None` method.
+- OperatorCommand gains a `capability_match: CapabilityMatchResult | None` field so the
+  station can report precisely what was missing to the operator.
+
+What this does NOT do:
+- Does not add new grounding, actuation, or sensing primitives — the matcher surfaces gaps,
+  it does not fill them. Adding new capabilities is Phase 7.7.
+- Does not change the task-execution readiness check.
+- Does not change SceneModel or StationActiveClaims.
+- Does not add substrate-specific readiness contracts for actuation or sensing — those are
+  a later phase. This phase covers the matching layer; the contracts come next.
+
+Portability:
+CapabilityMatcher is the same code whether the substrate is MiniGrid, a ROS robot arm, or
+a simulated warehouse. The registry entries differ; the matcher logic does not. When porting
+to robotics: register the robot's actual capability handles (e.g.,
+"sensing.lidar_occupancy_grid", "actuation.move_base", "grounding.nearest_object.euclidean")
+and the matcher immediately tells you what any operator intent requires vs. what the robot
+can do. No environment-specific code in the matching layer.
+
+Success criteria:
+- "tell me the doors in descending order by manhattan distance" → required_capabilities
+  includes grounding.ranked_doors.manhattan; not in registry → verdict=missing_skills,
+  missing=["grounding.ranked_doors.manhattan"]. Station responds with the specific gap.
+- "go to the closest door" → required_capabilities=["grounding.closest_door.manhattan",
+  "task.go_to_object"]; both present → verdict=executable, proceeds as before.
+- "go to the closest door using euclidean distance" → required_capabilities includes
+  grounding.closest_door.euclidean; registry marks it synthesizable →
+  verdict=synthesizable, station reports it but does NOT execute.
+- LLM says capability_status=executable for ranked_doors; matcher returns missing_skills;
+  matcher wins; station reports missing_skills.
+- CapabilityMatcher imports nothing from minigrid, gymnasium, or any sense/execution module.
+- Phase 3.5 through 7.58 guardrails still pass.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+
+Out of scope:
+- Generating or synthesizing missing primitives (Phase 7.7).
+- Substrate-specific readiness contracts for actuation and sensing primitives.
+- Multi-robot capability federation.
+- Capability versioning or deprecation.
+
+Implemented:
+- jeenom/capability_matcher.py: new module — CapabilityMatcher, CapabilityMatchResult,
+  verdict constants (executable, missing_skills, synthesizable, skipped, unsupported).
+  Pure function over typed inputs. No minigrid, gymnasium, sense, spine, or env imports.
+  Verified by AST import analysis in probe.
+- CapabilityMatcher.match(intent, registry) → CapabilityMatchResult.
+  Exact handle lookup via registry.lookup() — no prefix relaxation, no weakening.
+  All missing handles reported at once. synthesizable ≠ executable.
+- jeenom/capability_registry.py: added lookup(handle) → PrimitiveSpec | None.
+  Exact dict lookup — no subsumption, no fuzzy matching.
+- jeenom/schemas.py: added required_capabilities: list[str] field to OperatorIntent.
+  Parsed in from_dict(); included in JSON schema with description enforcing no-weakening.
+- jeenom/operator_station.py: CapabilityMatcher runs at the top of
+  command_from_operator_intent every turn. matcher verdict gates all execution branches.
+  If verdict=missing_skills or unsupported → kind=missing_skills command with specific handles.
+  If verdict=synthesizable → kind=synthesizable command, does not unblock execution.
+  LLM's capability_status field is now a hint only; matcher wins on conflict.
+  Added missing_skills and synthesizable branches to handle_utterance dispatch.
+- jeenom/operator_station.py: OperatorCommand gains capability_match field.
+- jeenom/llm_compiler.py: SmokeTestCompiler emits required_capabilities for every parsed
+  intent type. Ranked-listing queries detected before closest branch; emit
+  grounding.ranked_doors.manhattan.agent as missing handle — not degraded to closest.
+- jeenom/llm_compiler.py: LLMCompiler system prompt instructs LLM to emit
+  required_capabilities with exact handles. No-weakening rule stated explicitly.
+  grounding.ranked_doors distinguished from grounding.closest_door.
+- evals/capability_matcher_probe.py: 27 checks — all PASS.
+- evals/scene_model_probe.py, active_claims_probe.py: all prior checks still PASS.
+- Full test suite: 101 tests PASS.
+
+### Phase 7.595 — Proactive Intent Signal Verification
+Status: done.
+
+Goal:
+Add an IntentVerifier that deterministically extracts semantic signals from the operator's
+utterance and injects the correct required_capabilities into the compiled OperatorIntent
+before the CapabilityMatcher fires — regardless of what the LLM declared. Stops intent
+inversion and silent degradation before they reach execution.
+
+Problem this solves:
+The CapabilityMatcher (Phase 7.59) only fires when the LLM populates required_capabilities.
+When the LLM silently degrades or inverts intent — finding a nearby executable capability
+and substituting it — required_capabilities stays empty and the matcher defers:
+
+  operator: "go to the farthest door"
+  LLM: finds closest_door (executable) → substitutes, emits task_instruction
+  CapabilityMatcher: required_capabilities=[] → verdict=skipped
+  station: executes closest-door task — agent moves to wrong location
+
+  operator: "what is the distance of all the doors from you"
+  LLM: emits unique selector → clarification for single door
+  CapabilityMatcher: skipped
+  station: asks which single door — completely wrong response
+
+These are not edge cases. Any time the LLM finds a partial match it may degrade.
+For a physical robot this means actuation in the wrong direction with no warning.
+Blueprint Rule 9 prohibits this. Intent inversion must be a hard stop.
+
+Architecture:
+IntentVerifier sits between the LLM compiler output and the CapabilityMatcher.
+It is proactive — it acts on the utterance text directly, not on what the LLM said.
+
+  utterance + compiled OperatorIntent
+    → IntentVerifier.verify(utterance, intent) → list[IntentSignal]
+    → IntentVerifier.inject_required_capabilities(intent, signals) → enriched intent
+    → CapabilityMatcher.match(enriched_intent, registry) → verdict
+    → station acts on verdict
+
+IntentSignal carries: signal_type, detected_term, required_handle.
+The required_handle is injected into required_capabilities if not already present.
+The CapabilityMatcher then fires on the enriched intent — the mechanism is unchanged.
+
+Signal classes (substrate-independent):
+- SUPERLATIVE: farthest, furthest, most distant, longest way
+  → requires grounding.farthest_door.{metric}.agent (missing → missing_skills)
+- CARDINALITY: all/every/each + object, distance of all, sort/rank/list + objects
+  → requires grounding.ranked_doors.{metric}.agent (missing → missing_skills)
+- ORDINAL: second/third/2nd/3rd + closest/nearest
+  → requires grounding.nth_closest_door.{metric}.agent (missing → missing_skills)
+
+Metric is inferred from utterance when specified; defaults to manhattan otherwise.
+Signal detection is case-insensitive, whitespace-normalised, order-independent.
+
+Design:
+- IntentVerifier is a pure class: no env, no sense, no memory, no LLM, no substrate imports.
+- Verified by AST analysis in probe (same check as CapabilityMatcher).
+- Injected handles are logged so the operator can see what signal was detected.
+- If the LLM already correctly declared required_capabilities, no injection occurs
+  (no double-injection — set union).
+- IntentVerifier does not change intent_type or any other field — only enriches
+  required_capabilities. The CapabilityMatcher decides the verdict.
+
+Scope:
+- New module jeenom/intent_verifier.py: IntentSignal, IntentVerifier.
+- Integration in operator_station.command_from_operator_intent: runs before CapabilityMatcher.
+- SmokeTestCompiler updated to detect superlative and cardinality patterns natively
+  (belt-and-suspenders — IntentVerifier is the safety net; SmokeTestCompiler catches early).
+- CapabilityMatcher unchanged — IntentVerifier enriches the input, not the matcher.
+- Tests and probe.
+
+Success criteria:
+- "go to the farthest door" → IntentVerifier detects SUPERLATIVE signal "farthest",
+  injects grounding.farthest_door.manhattan.agent → missing_skills → no task executed.
+- "what is the distance of all the doors" → CARDINALITY signal "all the doors",
+  injects grounding.ranked_doors.manhattan.agent → missing_skills.
+- "sort the doors by distance" → CARDINALITY signal, missing_skills.
+- "go to the second closest door" → ORDINAL signal, missing_skills.
+- "go to the closest door" → no signals → CapabilityMatcher proceeds as before → executable.
+- "go to the red door" → no signals → task executes as before → golden path preserved.
+- IntentVerifier has no substrate imports (verified by AST).
+- Phase 3.5 through 7.59 guardrails still pass.
+- runtime_llm_calls_during_render remains 0.
+
+Out of scope:
+- Implementing farthest/ranked/ordinal grounding — that is Phase 7.7.
+- Semantic similarity matching beyond keyword signals.
+- Multi-language signal detection.
+
+Implemented:
+- blueprint.md: Rule 9 added — intent semantic preservation is mandatory. Intent
+  inversion and silent degradation are hard stops. IntentVerifier is the enforcement.
+- workflow_diagram.mmd: IV (Intent Verifier) node added between L (LLM Interface) and
+  CS (CorticalSchema). Utterance signal extraction sits in the architecture diagram.
+- jeenom/intent_verifier.py: new module. IntentSignal, IntentVerificationResult,
+  IntentVerifier. Pure class, no substrate imports (verified by AST analysis).
+  Three signal classes: SUPERLATIVE (farthest/furthest/most distant),
+  CARDINALITY (all doors/sort/rank/list by distance), ORDINAL (second/third closest).
+  enrich(utterance, intent) → (enriched_intent, result): primary API.
+  Metric inferred from utterance (euclidean if specified, manhattan otherwise).
+  No double-injection: set union with existing required_capabilities.
+- jeenom/operator_station.py: default_verifier.enrich() runs before CapabilityMatcher
+  in command_from_operator_intent every turn. Injected handles logged.
+- jeenom/llm_compiler.py: SmokeTestCompiler detects superlative terms (farthest/furthest
+  etc.) before closest/ranked branches and emits required_capabilities=[farthest handle].
+- evals/intent_verifier_probe.py: 29 checks — all PASS.
+  Verified: farthest→missing_skills+no task, all_doors→missing_skills, sort→missing_skills,
+  second_closest→missing_skills, golden path unaffected.
+- All prior probes still PASS. Full test suite: 101 tests PASS.
+
+### Phase 7.596 — Capability Arbitrator
+Status: done.
+
+Goal:
+Replace the hard-coded "MISSING CAPABILITIES" dead end with a typed, LLM-capable
+arbitration layer that reasons about what to do when a capability gap is detected.
+
+Problem this solves:
+When CapabilityMatcher or IntentVerifier detects a gap, the station currently returns
+a blunt "MISSING CAPABILITIES" message with no reasoning. The operator cannot tell
+whether the station could substitute a different capability, ask for clarification,
+synthesize the missing primitive, or genuinely has no path forward. The LLM should
+reason about this decision — not regex rules. This is the architectural premise:
+"use LLMs to arbitrate about these decisions about whether we need a new type of
+primitive or not, whether to render new code, whether the capability registry is
+adequate or not."
+
+Architecture:
+  CapabilityMatcher detects gap (verdict=missing_skills/synthesizable)
+    → CapabilityArbitrator.arbitrate(utterance, intent, cap_match)
+    → ArbitrationDecision (typed, validated)
+    → ArbitrationTrace (provenance)
+    → Station acts on decision (refuse/clarify/substitute/synthesize)
+
+Hard rules (Blueprint Rule 9):
+  - refuse/synthesize decisions are never safe_to_execute.
+  - substitute requires safe_to_execute=True and a concrete suggested_handle.
+  - Intent inversion (closest for farthest) is never a valid substitute.
+  - Silent degradation (closest for ranked_doors) is never a valid substitute.
+
+Scope:
+  - ArbitrationDecision schema with typed decision_types and validation.
+  - ArbitrationTrace for provenance recording.
+  - ArbitratorBackend ABC — no substrate imports.
+  - SmokeTestArbitrator — deterministic rule-based arbitration, no LLM.
+  - LLMArbitrator — makes a compile-time reasoning call, falls back to smoke.
+  - build_arbitrator(compiler_name) factory.
+  - OperatorStationSession.arbitrator and last_arbitration_trace.
+  - TargetSelector.exclude_color (str) → exclude_colors (list[str]).
+  - Migration helper _migrate_exclude_color for legacy LLM responses.
+  - SceneModel.find() updated to exclude_colors list.
+  - SmokeTestCompiler updated to emit exclude_colors lists.
+  - Multi-exclusion parsing: "not purple or yellow" → exclude_colors=["purple", "yellow"].
+  - JSON schema updated: exclude_colors array type instead of exclude_color string.
+
+Success criteria:
+  - CapabilityArbitrator has no substrate imports (verified by AST).
+  - SmokeTestArbitrator refuses missing handles with MISSING SKILLS message.
+  - ArbitrationDecision refuses/synthesize are safe_to_execute=False (validated).
+  - ArbitrationTrace records utterance, intent_type, handles, decision.
+  - LLMArbitrator falls back to smoke when no API key.
+  - Farthest-door session sets last_arbitration_trace=refuse.
+  - Golden-path "go to the red door" sets no arbitration trace.
+  - exclude_colors multi-exclusion works: "not purple or yellow" → list of two.
+  - Legacy exclude_color migrated to exclude_colors correctly.
+  - SceneModel.find(exclude_colors=["purple","yellow"]) filters both.
+  - Phase 3.5 through 7.595 guardrails still pass.
+  - 101 tests pass.
+
+Implemented:
+  - schemas.py: ARBITRATION_DECISION_TYPES constant.
+  - schemas.py: ArbitrationDecision dataclass with __post_init__ validation.
+  - schemas.py: ArbitrationTrace dataclass with compact() method.
+  - schemas.py: TargetSelector.exclude_color → exclude_colors: list[str].
+  - schemas.py: _migrate_exclude_color helper — migrates legacy dict in-place.
+  - schemas.py: _ensure_target_selector validates exclude_colors as list.
+  - schemas.py: operator_intent_json_schema() uses exclude_colors array type.
+  - schemas.py: SceneModel.find() updated to exclude_colors: list[str] | None.
+  - jeenom/capability_arbitrator.py: ArbitratorBackend ABC, SmokeTestArbitrator,
+    LLMArbitrator (with fallback), build_arbitrator factory, default_arbitrator.
+  - jeenom/capability_arbitrator.py: arbitration_decision_json_schema() for LLM.
+  - jeenom/capability_arbitrator.py: _parse_arbitration_decision() with hard-rule
+    enforcement (refuse/synthesize cannot be safe_to_execute=True).
+  - operator_station.py: imports ArbitrationTrace, build_arbitrator.
+  - operator_station.py: self.arbitrator and self.last_arbitration_trace.
+  - operator_station.py: _arbitrate_gap() — fires arbitrator on gap, records trace,
+    acts on decision (refuse/clarify/substitute/synthesize).
+  - operator_station.py: command_from_operator_intent routes missing_skills/
+    synthesizable/unsupported through _arbitrate_gap instead of returning directly.
+  - operator_station.py: exclude_color → exclude_colors in ground_target_selector.
+  - llm_compiler.py: all target_selector dicts use exclude_colors: [] instead of
+    exclude_color: None.
+  - llm_compiler.py: not_color_match → not_color_matches (list); supports multi-exclusion
+    via "not X or Y" pattern. Parses "or <color>" as additional exclusions.
+  - evals/capability_arbitrator_probe.py: 32 checks — all PASS.
+  - All prior probes still PASS. Full test suite: 101 tests PASS.
+
+Out of scope:
+  - LLM arbitration for substitute decision with re-routing.
+  - Persistent arbitration trace across sessions.
+  - Synthesis of missing primitives (Phase 7.7).
+
+Technical debt:
+  - substitute decision type is parsed and validated but does not yet re-route
+    execution through the substitute handle — the station still returns missing_skills.
+    Full substitute execution requires re-building the intent with the new handle.
+  - LLMArbitrator replicates transport code from LLMCompiler. Extracting a shared
+    transport module is a cleanup opportunity.
+  - Arbitration traces are not yet surfaced to the operator or stored in episodic memory.
+
+
+### Phase 7.6 — Operator Clarification Loop For Grounding
+Status: done.
+
+Goal:
+When a grounding request is underspecified or ambiguous but potentially supported, the station should produce a structured clarification, remember the pending grounding intent, accept the answer, then continue safely.
+
+Example:
+- operator: "go to the closest door"
+- station: asks which distance metric to use
+- operator: "manhattan"
+- station: completes the selector as distance_metric=manhattan and distance_reference=agent
+- station: grounds the target using Phase 7.5 selector grounding
+- station: runs the existing go_to_object pipeline
+- operator: "go to the door that is not yellow"
+- station: grounds multiple matching candidates and asks which one to use
+- operator: "red"
+- station: selects the red candidate and runs the existing go_to_object pipeline
+
+Scope:
+- session-local pending clarification state
+- no durable memory writes for pending clarification
+- one outstanding clarification at a time
+- clarify missing selector fields and ambiguous candidate sets
+- support missing distance_metric for closest-door selectors
+- support candidate choice for ambiguous door selectors
+- accept answers like "manhattan", "use manhattan", "manhattan distance", and "by manhattan distance"
+- accept candidate answers like "red", "the red one", and "red door"
+- unsupported answers such as "euclidean" must not execute yet
+- status/cache queries can still be answered while a clarification is pending
+- reset/cancel clears pending clarification
+- a new task instruction while pending cancels the pending clarification and runs the new instruction
+
+Success criteria:
+- "go to the closest door" does not execute immediately.
+- station prints a CLARIFY prompt asking for the distance metric.
+- pending clarification is stored in session state.
+- "manhattan" completes the selector and executes the grounded task.
+- "go to the door that is not yellow" asks which matched door to use when multiple candidates exist.
+- "red" selects the red candidate and executes the grounded task.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+- final_skill_plan == ["done"].
+- "euclidean" does not execute and reports unsupported metric until Phase 7.7.
+- "cancel" clears pending clarification without running a task.
+- reset clears pending clarification.
+- status/cache queries work while keeping pending clarification.
+- new task while pending cancels pending clarification and runs.
+- Phase 3.5, 4, 5, 6, 7, and 7.5 guardrails still pass.
+
+Implemented:
+- Added PendingClarification session state to OperatorStationSession.
+- Added an exact deterministic selector fast path for "go to the closest door".
+- Added an exact deterministic selector fast path for "go to the door that is not yellow".
+- Added missing_required_clarifiable / invalid_unsupported / ambiguous / no_match selector grounding statuses.
+- Ambiguous grounding results now carry candidate doors into the clarification contract.
+- "go to the closest door" now asks for a distance metric instead of executing or hard-failing.
+- "manhattan" completes the pending selector with distance_metric=manhattan and distance_reference=agent.
+- "go to the door that is not yellow" now asks which candidate to use when multiple non-yellow doors match.
+- Candidate answers such as "red" resume the pending grounding and execute the selected task.
+- Completed selectors re-enter Phase 7.5 grounding and then run the existing go_to_object path.
+- "euclidean" reports "I cannot use Euclidean distance yet. Supported: manhattan." and clears pending clarification.
+- cancel and reset clear pending clarification.
+- status/cache queries work while leaving pending clarification intact.
+- new task instructions cancel pending clarification and run normally.
+- Full JEENOM suite passes.
+
+Out of scope:
+- primitive synthesis
+- Euclidean distance implementation
+- multiple simultaneous clarifications
+- open-ended Q/A
+- ambiguous references like "the one on the left"
+- non-door object families
+- continuous-world execution
+
+Technical debt:
+- Clarification is solved for modeled grounding gaps only: missing distance_metric and ambiguous candidate choice.
+- It is not a general Socratic/operator-dialogue engine yet.
+- If the request needs an unmodeled relation, object type, metric, or missing primitive, the station should fail safely or mark it synthesizable; it will not invent a useful clarification unless that gap is represented.
+- Broad clarification requires the capability registry plus future primitive synthesis/readiness machinery, not more phrase patches.
+
+
+### Phase 7.7 — Validated Grounding Primitive Synthesis
+Status: planned.
+
+Goal:
+Generate missing pure scene/query primitives when a grounded operator request requires a deterministic primitive that does not exist yet.
+
+Example:
+- operator: "go to the closest door using Euclidean distance"
+- LLM emits a validated TargetSelector with distance_metric=euclidean
+- station detects that Euclidean ranking/selection is not available
+- system synthesizes a pure scene/query primitive
+- system tests the primitive against a contract and fixture scenes
+- system registers the primitive
+- station grounds the target using the new primitive
+- existing go_to_object execution runs after grounding
+
+Scope:
+- pure deterministic grounding/query primitives only
+- no robot actuation primitives
+- no unsafe filesystem/runtime mutation without validation
+- generated primitive must be inspectable and testable
+- primitive must have an explicit input/output contract
+- primitive must pass unit tests before registration
+- failed synthesis or failed validation must not execute the task
+
+Success criteria:
+- "go to the closest door using Euclidean distance" detects missing Euclidean grounding support.
+- A candidate Euclidean ranking primitive is generated.
+- The candidate is validated with deterministic tests.
+- The primitive is registered only after validation.
+- The selector is grounded through the registered primitive.
+- The final task still uses the existing go_to_object pipeline.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+- Phase 3.5, 4, 5, 6, 7, and 7.5 guardrails still pass.
+
+Out of scope:
+- motion-control primitive synthesis
+- pickup/open/unlock synthesis
+- non-door object families unless already supported by the scene schema
+- continuous-world execution
+- exploration/replan
+- clarification Q/A
+
+### Phase 8 — GoToObject/general object variant
+Status: planned.
+
+Goal:
+Extend the existing go_to_object recipe beyond doors to supported MiniGrid object types.
+
+
+### Phase 8.5 — Readiness-only transfer demo
 Status: planned.
 Same Understanding, different primitive set. MiniGrid executable; Jackal/Nav2 partial/executable depending primitives.
 

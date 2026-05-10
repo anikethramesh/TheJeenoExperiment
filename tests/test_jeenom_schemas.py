@@ -3,11 +3,14 @@ from __future__ import annotations
 import unittest
 
 from jeenom.schemas import (
+    OperatorIntent,
+    PrimitiveManifest,
     PrimitiveCall,
     ProcedureRecipe,
     SchemaValidationError,
     SensePlanTemplate,
     SkillPlanTemplate,
+    TargetSelector,
     TaskRequest,
     primitive_params_json_schema,
 )
@@ -95,6 +98,201 @@ class JeenomSchemaTests(unittest.TestCase):
                     },
                 }
             )
+
+    def test_operator_intent_from_dict_accepts_typed_task_intent(self):
+        intent = OperatorIntent.from_dict(
+            {
+                "intent_type": "task_instruction",
+                "canonical_instruction": "go to the blue door",
+                "task_type": "go_to_object",
+                "target": {"color": "blue", "object_type": "door"},
+                "target_selector": None,
+                "capability_status": "executable",
+                "knowledge_update": None,
+                "reference": None,
+                "status_query": None,
+                "control": None,
+                "clear_memory": False,
+                "confidence": 0.9,
+                "reason": "Parsed task.",
+            }
+        )
+
+        self.assertEqual(intent.intent_type, "task_instruction")
+        self.assertEqual(intent.target["color"], "blue")
+        self.assertIsInstance(intent.confidence, float)
+
+    def test_operator_intent_rejects_unsupported_object_type(self):
+        with self.assertRaises(SchemaValidationError):
+            OperatorIntent.from_dict(
+                {
+                    "intent_type": "task_instruction",
+                    "canonical_instruction": "go to the red key",
+                    "task_type": "go_to_object",
+                    "target": {"color": "red", "object_type": "key"},
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.8,
+                    "reason": "Unsupported object.",
+                }
+            )
+
+    def test_operator_intent_rejects_broad_knowledge_update(self):
+        with self.assertRaises(SchemaValidationError):
+            OperatorIntent.from_dict(
+                {
+                    "intent_type": "knowledge_update",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": {"target_color": "red"},
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.8,
+                    "reason": "Broad memory write.",
+                }
+            )
+
+    def test_operator_intent_accepts_delivery_target_status_query(self):
+        intent = OperatorIntent.from_dict(
+            {
+                "intent_type": "status_query",
+                "canonical_instruction": None,
+                "task_type": None,
+                "target": None,
+                "target_selector": None,
+                "capability_status": "executable",
+                "knowledge_update": None,
+                "reference": None,
+                "status_query": "delivery_target",
+                "control": None,
+                "clear_memory": False,
+                "confidence": 0.9,
+                "reason": "Question about delivery target.",
+            }
+        )
+
+        self.assertEqual(intent.status_query, "delivery_target")
+
+    def test_target_selector_accepts_closest_door_with_manhattan_agent_reference(self):
+        selector = TargetSelector.from_dict(
+            {
+                "object_type": "door",
+                "color": None,
+                "exclude_color": None,
+                "relation": "closest",
+                "distance_metric": "manhattan",
+                "distance_reference": "agent",
+            }
+        )
+
+        self.assertEqual(selector.object_type, "door")
+        self.assertEqual(selector.relation, "closest")
+        self.assertEqual(selector.distance_metric, "manhattan")
+
+    def test_target_selector_rejects_unsupported_object_type(self):
+        with self.assertRaises(SchemaValidationError):
+            TargetSelector.from_dict(
+                {
+                    "object_type": "key",
+                    "color": "red",
+                    "exclude_color": None,
+                    "relation": "unique",
+                    "distance_metric": None,
+                    "distance_reference": None,
+                }
+            )
+
+    def test_target_selector_accepts_closest_with_missing_metric_for_clarification(self):
+        selector = TargetSelector.from_dict(
+            {
+                "object_type": "door",
+                "color": None,
+                "exclude_color": None,
+                "relation": "closest",
+                "distance_metric": None,
+                "distance_reference": "agent",
+            }
+        )
+
+        self.assertEqual(selector.relation, "closest")
+        self.assertIsNone(selector.distance_metric)
+
+    def test_target_selector_accepts_euclidean_metric_for_registry_arbitration(self):
+        selector = TargetSelector.from_dict(
+            {
+                "object_type": "door",
+                "color": None,
+                "exclude_color": None,
+                "relation": "closest",
+                "distance_metric": "euclidean",
+                "distance_reference": "agent",
+            }
+        )
+
+        self.assertEqual(selector.distance_metric, "euclidean")
+
+    def test_primitive_manifest_from_dict_accepts_typed_primitive_specs(self):
+        manifest = PrimitiveManifest.from_dict(
+            {
+                "name": "test_manifest",
+                "primitives": [
+                    {
+                        "name": "grounding.example",
+                        "primitive_type": "grounding",
+                        "layer": "grounding",
+                        "description": "Example grounding primitive.",
+                        "inputs": ["scene"],
+                        "outputs": ["target"],
+                        "side_effects": [],
+                        "implementation_status": "implemented",
+                        "safe_to_synthesize": False,
+                        "runtime_binding": {"kind": "python", "value": "example"},
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(manifest.name, "test_manifest")
+        self.assertEqual(manifest.primitives[0].primitive_type, "grounding")
+
+    def test_operator_intent_accepts_ground_target_status_query(self):
+        intent = OperatorIntent.from_dict(
+            {
+                "intent_type": "status_query",
+                "canonical_instruction": None,
+                "task_type": None,
+                "target": None,
+                "target_selector": {
+                    "object_type": "door",
+                    "color": None,
+                    "exclude_color": None,
+                    "relation": "closest",
+                    "distance_metric": "manhattan",
+                    "distance_reference": "agent",
+                },
+                "capability_status": "executable",
+                "knowledge_update": None,
+                "reference": None,
+                "status_query": "ground_target",
+                "control": None,
+                "clear_memory": False,
+                "confidence": 0.9,
+                "reason": "Question about closest door.",
+            }
+        )
+
+        self.assertEqual(intent.status_query, "ground_target")
+        self.assertEqual(intent.target_selector["relation"], "closest")
 
 
 if __name__ == "__main__":

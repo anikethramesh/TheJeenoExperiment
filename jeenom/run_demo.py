@@ -15,7 +15,15 @@ from .minigrid_envs import ensure_custom_minigrid_envs_registered
 from .minigrid_adapter import MiniGridAdapter
 from .plan_cache import PlanCache, procedure_key
 from .primitive_library import TASK_PRIMITIVES
-from .schemas import EvidenceFrame, ExecutionContext, ExecutionContract, ExecutionReport, Percepts
+from .schemas import (
+    EvidenceFrame,
+    ExecutionContext,
+    ExecutionContract,
+    ExecutionReport,
+    Percepts,
+    ProcedureRecipe,
+    TaskRequest,
+)
 from .sense import MiniGridSense
 from .spine import MiniGridSpine
 
@@ -60,9 +68,10 @@ def _assemble_result(
     prewarm_summary,
     runtime_llm_calls_during_render: int,
     cache_miss_during_render: int,
+    render_adapter=None,
 ):
     compiler_usage = compiler.usage_summary()
-    return {
+    result = {
         "compiler_backend": compiler.active_backend,
         "compiler_logs": list(compiler.logs),
         "compiler_usage": compiler_usage,
@@ -88,6 +97,9 @@ def _assemble_result(
         "runtime_llm_calls_during_render": runtime_llm_calls_during_render,
         "cache_miss_during_render": cache_miss_during_render,
     }
+    if render_adapter is not None:
+        result["_render_adapter"] = render_adapter
+    return result
 
 
 def _probe_requested_target(env_id: str, seed: int, task_request) -> dict[str, object] | None:
@@ -114,7 +126,15 @@ def _probe_requested_target(env_id: str, seed: int, task_request) -> dict[str, o
         probe_adapter.close()
 
 
-def prewarm_jit_cache(task_request, procedure_recipe, cortex, sense, spine, plan_cache):
+def prewarm_jit_cache(
+    task_request,
+    procedure_recipe,
+    cortex,
+    sense,
+    spine,
+    plan_cache,
+    progress_callback=None,
+):
     compiled_templates: list[dict[str, str]] = []
 
     if plan_cache.enabled:
@@ -216,6 +236,11 @@ def prewarm_jit_cache(task_request, procedure_recipe, cortex, sense, spine, plan
         if label in seen_sense_labels:
             continue
         seen_sense_labels.add(label)
+        if progress_callback is not None:
+            progress_callback(
+                "prewarm_template",
+                {"template_type": "sense", "label": label},
+            )
         _, meta = sense._resolve_template(
             evidence_frame=evidence_frame,
             execution_context=execution_context,
@@ -265,6 +290,11 @@ def prewarm_jit_cache(task_request, procedure_recipe, cortex, sense, spine, plan
         if label in seen_skill_labels:
             continue
         seen_skill_labels.add(label)
+        if progress_callback is not None:
+            progress_callback(
+                "prewarm_template",
+                {"template_type": "skill", "label": label},
+            )
         _, meta = spine._resolve_template(
             execution_contract=contract,
             percepts=dummy_percepts,
@@ -297,10 +327,18 @@ def run_episode(
     print_cache: bool = False,
     prewarm: bool = True,
     compiler: CompilerBackend | None = None,
+    memory: OperationalMemory | None = None,
+    plan_cache: PlanCache | None = None,
+    keep_render_open: bool = False,
+    render_adapter: MiniGridAdapter | None = None,
+    progress_callback=None,
+    task_override: TaskRequest | None = None,
+    procedure_override: ProcedureRecipe | None = None,
 ):
     compiler = compiler or build_compiler(compiler_name)
-    memory = OperationalMemory(root=memory_root)
-    plan_cache = PlanCache(enabled=use_cache)
+    memory = memory or OperationalMemory(root=memory_root)
+    plan_cache = plan_cache or PlanCache(enabled=use_cache)
+    cache_enabled = plan_cache.enabled
     cortex = Cortex(memory, compiler, plan_cache=plan_cache)
     sense = MiniGridSense(memory, compiler, plan_cache=plan_cache)
     spine = MiniGridSpine(memory, None, compiler, plan_cache=plan_cache)
@@ -312,24 +350,35 @@ def run_episode(
     cache_miss_during_render = 0
     target_probe = None
     aligned_target = None
-    env = None
-    adapter = None
+    env = render_adapter.env if render_adapter is not None else None
+    adapter = render_adapter
     adapter_closed = False
 
     try:
         observation = None
         if instruction is None:
-            env = build_env(env_id, render_mode)
-            adapter = MiniGridAdapter(env)
+            if adapter is None:
+                env = build_env(env_id, render_mode)
+                adapter = MiniGridAdapter(env)
             observation = adapter.reset(seed=seed)
             operator_instruction = observation.raw.get("mission") or "Find the goal."
         else:
             operator_instruction = instruction
-        task = compiler.compile_task(
-            operator_instruction,
-            available_task_primitives=TASK_PRIMITIVES,
-            memory=memory,
-        )
+        if task_override is not None:
+            task = task_override
+        else:
+            if progress_callback is not None:
+                progress_callback(
+                    "task_compile_started",
+                    {"instruction": operator_instruction},
+                )
+            task = compiler.compile_task(
+                operator_instruction,
+                available_task_primitives=TASK_PRIMITIVES,
+                memory=memory,
+            )
+        if progress_callback is not None:
+            progress_callback("task_compiled", {"task": asdict(task)})
 
         procedure_cache_key = procedure_key(task)
         procedure_entry = plan_cache.lookup(procedure_cache_key)
@@ -337,19 +386,39 @@ def run_episode(
             procedure = procedure_entry.template
             procedure_cache_status = "hit"
             procedure_source = "cache"
+        elif procedure_override is not None:
+            procedure = procedure_override
+            procedure_cache_status = "override"
+            procedure_source = procedure.source
         else:
+            if progress_callback is not None:
+                progress_callback(
+                    "procedure_compile_started",
+                    {"task_type": task.task_type, "params": dict(task.params)},
+                )
             procedure = compiler.compile_procedure(
                 task,
                 available_task_primitives=TASK_PRIMITIVES,
                 memory=memory,
             )
             procedure_cache_status = "disabled"
-            if plan_cache.enabled:
+            if cache_enabled:
                 procedure_cache_status = "miss"
             procedure_source = procedure.source
+        if progress_callback is not None:
+            progress_callback(
+                "procedure_ready",
+                {
+                    "procedure": asdict(procedure),
+                    "cache_status": procedure_cache_status,
+                    "cache_key": procedure_cache_key,
+                },
+            )
 
         readiness = cortex.onboard_task(task, procedure)
-        if procedure_entry is None and plan_cache.enabled and readiness.status == "executable":
+        if progress_callback is not None:
+            progress_callback("readiness_checked", {"readiness": asdict(readiness)})
+        if procedure_entry is None and cache_enabled and readiness.status == "executable":
             plan_cache.store(
                 key=procedure_cache_key,
                 template_type="procedure",
@@ -411,11 +480,13 @@ def run_episode(
         should_prewarm = (
             prewarm
             and render_mode == "human"
-            and use_cache
+            and cache_enabled
             and _is_llm_compiler(compiler)
             and readiness.status == "executable"
         )
         if should_prewarm:
+            if progress_callback is not None:
+                progress_callback("prewarm_started", {"procedure": list(procedure.steps)})
             prewarm_summary = prewarm_jit_cache(
                 task_request=task,
                 procedure_recipe=procedure,
@@ -423,6 +494,7 @@ def run_episode(
                 sense=sense,
                 spine=spine,
                 plan_cache=plan_cache,
+                progress_callback=progress_callback,
             )
             jit_prewarm = True
             print("JIT PREWARM")
@@ -431,21 +503,25 @@ def run_episode(
             print("cache entries:")
             pprint(prewarm_summary["cache_entries"])
             print()
+            if progress_callback is not None:
+                progress_callback("prewarm_finished", dict(prewarm_summary))
 
         if adapter is None:
             env = build_env(env_id, render_mode)
             adapter = MiniGridAdapter(env)
-            observation = adapter.reset(seed=seed)
+        observation = adapter.reset(seed=seed)
         if aligned_target is not None:
             adapter.retarget_to_object(aligned_target)
             observation = adapter.observe()
         spine.adapter = adapter
+        if progress_callback is not None:
+            progress_callback("runtime_started", {"render_mode": render_mode})
 
         execution_context = ExecutionContext(
             active_skill="idle",
             params=dict(cortex.resolved_task_params),
         )
-        allow_runtime_llm = not (render_mode == "human" and use_cache and _is_llm_compiler(compiler))
+        allow_runtime_llm = not (render_mode == "human" and cache_enabled and _is_llm_compiler(compiler))
 
         for loop_idx in range(max_loops):
             evidence_frame = cortex.make_evidence_frame()
@@ -519,8 +595,11 @@ def run_episode(
                 break
 
         if adapter is not None and render_mode == "human":
-            adapter.close()
-            adapter_closed = True
+            if keep_render_open:
+                adapter_closed = True
+            else:
+                adapter.close()
+                adapter_closed = True
 
         memory_updates = cortex.finalize()
         return _assemble_result(
@@ -540,6 +619,7 @@ def run_episode(
             prewarm_summary=prewarm_summary,
             runtime_llm_calls_during_render=runtime_llm_calls_during_render,
             cache_miss_during_render=cache_miss_during_render,
+            render_adapter=adapter if keep_render_open and render_mode == "human" else None,
         )
     finally:
         if adapter is not None and not adapter_closed:

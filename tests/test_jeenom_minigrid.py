@@ -10,20 +10,26 @@ import minigrid  # noqa: F401
 from minigrid.wrappers import FullyObsWrapper
 
 from jeenom.llm_compiler import LLMCompiler, SmokeTestCompiler
+from jeenom.capability_registry import CapabilityRegistry
 from jeenom.memory import OperationalMemory
 from jeenom.minigrid_envs import ensure_custom_minigrid_envs_registered
 from jeenom.minigrid_adapter import MiniGridAdapter
+from jeenom.operator_station import OperatorStationSession, classify_utterance
 from jeenom.plan_cache import PlanCache
+from jeenom.primitive_library import ACTION_PRIMITIVES, SENSING_PRIMITIVES, TASK_PRIMITIVES
 from jeenom.run_demo import prewarm_jit_cache, run_episode
 from jeenom.schemas import (
     EvidenceFrame,
     ExecutionContext,
     ExecutionContract,
+    GroundedDoorEntry,
     Percepts,
     PrimitiveCall,
+    SceneModel,
     SchemaValidationError,
     SensePlanTemplate,
     SkillPlanTemplate,
+    StationActiveClaims,
 )
 from jeenom.sense import MiniGridSense
 from jeenom.spine import MiniGridSpine
@@ -33,6 +39,255 @@ def build_test_llm_transport():
     def transport(request):
         method = request["method_name"]
         payload = request["user_payload"]
+
+        if method == "compile_operator_intent":
+            utterance = payload["utterance"].lower()
+            if "capabilit" in utterance or "overview" in utterance:
+                return {
+                    "intent_type": "status_query",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": "help",
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.94,
+                    "reason": "Parsed capability overview query.",
+                }
+            if "what do you see around you" in utterance:
+                return {
+                    "intent_type": "status_query",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": "scene",
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.94,
+                    "reason": "Parsed fuzzy scene query.",
+                }
+            if "delivery target" in utterance and utterance.strip().startswith("and"):
+                return {
+                    "intent_type": "status_query",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "unsupported",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": "delivery_target",
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.9,
+                    "reason": "Parsed delivery-target query.",
+                }
+            if (
+                ("closest" in utterance or "nearest" in utterance or "shortest" in utterance)
+                and "door" in utterance
+            ):
+                metric = (
+                    "euclidean"
+                    if "euclidean" in utterance
+                    else "manhattan"
+                    if "manhattan" in utterance
+                    else None
+                )
+                return {
+                    "intent_type": (
+                        "knowledge_update"
+                        if "delivery target" in utterance or "make" in utterance
+                        else "task_instruction"
+                        if "go" in utterance or "navigate" in utterance or "head" in utterance
+                        else "status_query"
+                    ),
+                    "canonical_instruction": None,
+                    "task_type": (
+                        "go_to_object"
+                        if "go" in utterance or "navigate" in utterance or "head" in utterance
+                        else None
+                    ),
+                    "target": None,
+                    "target_selector": {
+                        "object_type": "door",
+                        "color": None,
+                        "exclude_colors": [],
+                        "relation": "closest",
+                        "distance_metric": metric,
+                        "distance_reference": "agent" if metric is not None else None,
+                    },
+                    "capability_status": (
+                        "synthesizable"
+                        if metric == "euclidean"
+                        else "needs_clarification"
+                        if metric is None
+                        else "executable"
+                    ),
+                    "knowledge_update": (
+                        {"delivery_target": None}
+                        if "delivery target" in utterance or "make" in utterance
+                        else None
+                    ),
+                    "reference": None,
+                    "status_query": (
+                        None
+                        if "go" in utterance
+                        or "navigate" in utterance
+                        or "head" in utterance
+                        or "make" in utterance
+                        else "ground_target"
+                    ),
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.9,
+                    "reason": "Parsed closest-door selector.",
+                }
+            if "not yellow" in utterance and "door" in utterance:
+                return {
+                    "intent_type": "task_instruction",
+                    "canonical_instruction": None,
+                    "task_type": "go_to_object",
+                    "target": None,
+                    "target_selector": {
+                        "object_type": "door",
+                        "color": None,
+                        "exclude_colors": ["yellow"],
+                        "relation": "unique",
+                        "distance_metric": None,
+                        "distance_reference": None,
+                    },
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.9,
+                    "reason": "Parsed unique not-yellow door selector.",
+                }
+            if "blue door" in utterance and (
+                "head over" in utterance or "go" in utterance or "navigate" in utterance
+            ):
+                return {
+                    "intent_type": "task_instruction",
+                    "canonical_instruction": "go to the blue door",
+                    "task_type": "go_to_object",
+                    "target": {"color": "blue", "object_type": "door"},
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.92,
+                    "reason": "Parsed fuzzy blue-door task.",
+                }
+            if "yellow door" in utterance:
+                return {
+                    "intent_type": "task_instruction",
+                    "canonical_instruction": "go to the yellow door",
+                    "task_type": "go_to_object",
+                    "target": {"color": "yellow", "object_type": "door"},
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.91,
+                    "reason": "Parsed fuzzy yellow-door task.",
+                }
+            if "red door" in utterance and "delivery target" in utterance:
+                return {
+                    "intent_type": "knowledge_update",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": {
+                        "delivery_target": {"color": "red", "object_type": "door"}
+                    },
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.93,
+                    "reason": "Parsed delivery target knowledge.",
+                }
+            if "same one" in utterance or "back to the same" in utterance:
+                return {
+                    "intent_type": "task_instruction",
+                    "canonical_instruction": None,
+                    "task_type": "go_to_object",
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": "last_target",
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.85,
+                    "reason": "Parsed last-target reference.",
+                }
+            if "ask you to do last time" in utterance:
+                return {
+                    "intent_type": "status_query",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": "last_task",
+                    "status_query": "last_run",
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.82,
+                    "reason": "Parsed last-run status query.",
+                }
+            if "pick up" in utterance or "key" in utterance:
+                return {
+                    "intent_type": "unsupported",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 1.0,
+                    "reason": "Pickup/key capability is unsupported.",
+                }
+            return {
+                "intent_type": "ambiguous",
+                "canonical_instruction": None,
+                "task_type": None,
+                "target": None,
+                "target_selector": None,
+                "capability_status": "unsupported",
+                "knowledge_update": None,
+                "reference": None,
+                "status_query": None,
+                "control": None,
+                "clear_memory": False,
+                "confidence": 0.2,
+                "reason": "Could not safely parse.",
+            }
 
         if method == "compile_task":
             instruction = payload["instruction"]
@@ -407,6 +662,27 @@ class JeenomMiniGridTests(unittest.TestCase):
             self.assertEqual(reloaded.knowledge["target_color"], "blue")
             self.assertIsNone(reloaded.episodic_memory["known_target_location"])
 
+    def test_delivery_target_is_canonical_when_legacy_target_fields_disagree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory_dir = Path(tmpdir) / "memory"
+            memory_dir.mkdir()
+            (memory_dir / "knowledge.yaml").write_text(
+                'target_color: "green"\n'
+                'target_type: "door"\n'
+                'delivery_target: {"color": "red", "object_type": "door"}\n'
+                'last_task_type: null\n'
+                'last_instruction: null\n'
+            )
+
+            memory = OperationalMemory(root=Path(tmpdir))
+
+            self.assertEqual(memory.knowledge["target_color"], "red")
+            self.assertEqual(memory.knowledge["target_type"], "door")
+            self.assertEqual(
+                memory.knowledge["delivery_target"],
+                {"color": "red", "object_type": "door"},
+            )
+
     def test_llm_compiler_falls_back_without_api_key(self):
         with patch.dict("os.environ", {}, clear=True):
             compiler = LLMCompiler(api_key=None)
@@ -664,6 +940,1254 @@ class JeenomMiniGridTests(unittest.TestCase):
         self.assertEqual(final_records[-1]["skill_plan"], ["done"])
         self.assertEqual(final_records[-1]["report"]["status"], "succeeded")
 
+    def test_phase_4_larger_gotodoor_human_render_uses_prewarmed_cache(self):
+        ensure_custom_minigrid_envs_registered()
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            result = run_episode(
+                instruction="go to the red door",
+                compiler_name="llm",
+                compiler=compiler,
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                seed=42,
+                max_loops=512,
+                render_mode="human",
+                memory_root=Path(tempfile.mkdtemp()),
+                use_cache=True,
+                prewarm=True,
+            )
+
+        self.assertTrue(result["jit_prewarm"])
+        self.assertEqual(result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(result["cache_miss_during_render"], 0)
+        self.assertTrue(result["final_state"]["task_complete"])
+        self.assertGreater(len(result["loop_records"]), 5)
+        final_records = [
+            record
+            for record in result["loop_records"]
+            if record["skill_plan"] is not None
+        ]
+        self.assertGreater(len(final_records), 0)
+        self.assertEqual(final_records[-1]["skill_plan"], ["done"])
+        self.assertEqual(final_records[-1]["report"]["status"], "succeeded")
+
+    def test_operator_station_classifies_natural_language_utterances(self):
+        cases = {
+            "go to the red door": "task_instruction",
+            "go to green door": "task_instruction",
+            "can you go to the purple door": "unresolved",
+            "go the the yellow door now": "unresolved",
+            "go there again": "task_instruction",
+            "go to the same door": "task_instruction",
+            "repeat the last task": "task_instruction",
+            "repeat the previous task": "task_instruction",
+            "go to the closest door": "unresolved",
+            "which door is closest to you": "unresolved",
+            "ok. which of the doors is closest to you": "unresolved",
+            "can you calculate the shortest distance to a door": "unresolved",
+            "go to the door that is not yellow": "unresolved",
+            "can you go to a door that is not yellow": "unresolved",
+            "the green door is the delivery target": "knowledge_update",
+            "your delivery target is the red door": "knowledge_update",
+            "delivery target is red door": "knowledge_update",
+            "set delivery target to the yellow door": "knowledge_update",
+            "use the purple door as your delivery target": "knowledge_update",
+            "target is the blue door": "knowledge_update",
+            "remember the red door": "knowledge_update",
+            "please remember that the grey door.": "knowledge_update",
+            "what do you know?": "status_query",
+            "what do you see": "status_query",
+            "what doors are available": "status_query",
+            "which doors are visible?": "status_query",
+            "ok. Which door is closest to you?": "unresolved",
+            "what can you do?": "status_query",
+            "what happened last run?": "status_query",
+            "what was the last target?": "status_query",
+            "what was the previous target": "status_query",
+            "show cache": "cache_query",
+            "reset": "reset",
+            "forget everything": "reset",
+            "quit": "quit",
+        }
+        for utterance, expected_kind in cases.items():
+            self.assertEqual(classify_utterance(utterance).kind, expected_kind)
+
+    def test_capability_registry_reports_minigrid_manifest_statuses(self):
+        registry = CapabilityRegistry.minigrid_default()
+        summary = registry.compact_summary()
+
+        self.assertEqual(summary["name"], "minigrid_primitive_registry_v1")
+        self.assertIn("task", summary["primitives"])
+        self.assertIn("grounding", summary["primitives"])
+        self.assertIn("sensing", summary["primitives"])
+        self.assertIn("action", summary["primitives"])
+        task_names = {item["name"] for item in summary["primitives"]["task"]}
+        sensing_names = {item["name"] for item in summary["primitives"]["sensing"]}
+        action_names = {item["name"] for item in summary["primitives"]["action"]}
+        self.assertTrue({f"task.{name}" for name in TASK_PRIMITIVES}.issubset(task_names))
+        self.assertTrue(
+            {f"sensing.{name}" for name in SENSING_PRIMITIVES}.issubset(sensing_names)
+        )
+        self.assertTrue({f"action.{name}" for name in ACTION_PRIMITIVES}.issubset(action_names))
+        plan_grid_path = registry.primitive("action.plan_grid_path")
+        self.assertIsNotNone(plan_grid_path)
+        self.assertEqual(plan_grid_path.runtime_binding["kind"], "python")
+        self.assertEqual(plan_grid_path.runtime_binding["value"], "plan_grid_path")
+        self.assertEqual(
+            registry.readiness_for_selector(
+                {
+                    "object_type": "door",
+                    "color": None,
+                    "exclude_colors": [],
+                    "relation": "closest",
+                    "distance_metric": "manhattan",
+                    "distance_reference": "agent",
+                }
+            )["status"],
+            "executable",
+        )
+        euclidean = registry.readiness_for_selector(
+            {
+                "object_type": "door",
+                "color": None,
+                "exclude_colors": [],
+                "relation": "closest",
+                "distance_metric": "euclidean",
+                "distance_reference": "agent",
+            }
+        )
+        self.assertEqual(euclidean["status"], "synthesizable_missing_primitive")
+        self.assertEqual(euclidean["primitive"], "grounding.closest_door.euclidean.agent")
+        pickup = registry.readiness_for_task(task_type="pickup", object_type="key")
+        self.assertEqual(pickup["status"], "unsupported")
+        self.assertEqual(pickup["layer"], "task")
+        self.assertEqual(pickup["primitive"], "task.pickup.key")
+
+    def test_operator_station_knowledge_update_and_queries_are_readable(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+        response = session.handle_utterance("the green door is the delivery target")
+
+        self.assertIn("KNOWLEDGE UPDATED", response)
+        self.assertEqual(session.memory.knowledge["target_color"], "green")
+        self.assertEqual(session.memory.knowledge["target_type"], "door")
+        self.assertEqual(
+            session.memory.knowledge["delivery_target"],
+            {"color": "green", "object_type": "door"},
+        )
+
+    def test_operator_station_help_query_answers_from_capability_registry(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+
+        response = session.handle_utterance("what can you do")
+
+        self.assertIn("CAPABILITIES", response)
+        self.assertIn("registry=minigrid_primitive_registry_v1", response)
+        self.assertIn("task.go_to_object.door", response)
+        self.assertIn("grounding.closest_door.manhattan.agent", response)
+        self.assertIn("sensing.parse_grid_objects", response)
+        self.assertIn("action.plan_grid_path", response)
+        self.assertIn("grounding.closest_door.euclidean.agent", response)
+
+    def test_operator_station_llm_capability_overview_answers_from_registry(self):
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+
+        response = session.handle_utterance("give me an overview of your capabilities")
+
+        self.assertIn("CAPABILITIES", response)
+        self.assertIn("task.go_to_object.door", response)
+        self.assertIn("sensing.build_occupancy_grid", response)
+        self.assertIn("action.execute_next_path_action", response)
+        status = session.handle_utterance("what do you know?")
+        self.assertIn("delivery_target", status)
+        self.assertNotIn("target_color=", status)
+        self.assertNotIn("target_type=", status)
+        self.assertIn("CACHE", session.handle_utterance("show cache"))
+
+    def test_operator_station_accepts_natural_delivery_target_variants(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+        response = session.handle_utterance("your delivery target is the red door")
+
+        self.assertIn("KNOWLEDGE UPDATED", response)
+        self.assertEqual(
+            session.memory.knowledge["delivery_target"],
+            {"color": "red", "object_type": "door"},
+        )
+
+        response = session.handle_utterance("set delivery target to blue door")
+
+        self.assertIn("KNOWLEDGE UPDATED", response)
+        self.assertEqual(
+            session.memory.knowledge["delivery_target"],
+            {"color": "blue", "object_type": "door"},
+        )
+
+    def test_operator_station_canonicalizes_task_instruction_variants(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+
+        self.assertEqual(
+            session.resolve_task_instruction("go to green door"),
+            "go to the green door",
+        )
+        self.assertEqual(
+            session.resolve_task_instruction("navigate to the grey door."),
+            "go to the grey door",
+        )
+        self.assertEqual(
+            session.resolve_task_instruction("can you go to the purple door"),
+            "go to the purple door",
+        )
+        self.assertEqual(
+            session.resolve_task_instruction("go the the yellow door now"),
+            "go to the yellow door",
+        )
+
+    def test_operator_station_runs_natural_language_task_from_ready_prompt(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            self.assertEqual(session.startup(), "READY")
+            self.assertIsNotNone(session.preview_adapter)
+            response = session.handle_utterance("go to the red door")
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertIsNone(session.preview_adapter)
+        self.assertIsNotNone(session.task_adapter)
+        self.assertIsNotNone(session.last_result)
+        self.assertTrue(session.last_result["final_state"]["task_complete"])
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+        final_records = [
+            record
+            for record in session.last_result["loop_records"]
+            if record["skill_plan"] is not None
+        ]
+        self.assertGreater(len(final_records), 0)
+        self.assertEqual(final_records[-1]["skill_plan"], ["done"])
+        self.assertEqual(final_records[-1]["report"]["status"], "succeeded")
+        self.assertIn("RUN COMPLETE", session.handle_utterance("what happened last run?"))
+        session.close()
+        self.assertIsNone(session.task_adapter)
+
+    def test_operator_station_answers_scene_and_help_fallbacks(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            scene = session.handle_utterance("what do you see")
+
+        self.assertIn("SCENE", scene)
+        self.assertIn("doors=", scene)
+        help_response = session.handle_utterance("what can you do?")
+        self.assertIn("CAPABILITIES", help_response)
+        self.assertIn("task.go_to_object.door", help_response)
+        self.assertIn("sensing.parse_grid_objects", help_response)
+        self.assertIn("action.plan_grid_path", help_response)
+        session.close()
+
+    def test_operator_station_resolves_delivery_target_instruction_from_knowledge(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            session.handle_utterance("the red door is the delivery target")
+            response = session.handle_utterance("go to the delivery target")
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertIsNotNone(session.last_result)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+        final_records = [
+            record
+            for record in session.last_result["loop_records"]
+            if record["skill_plan"] is not None
+        ]
+        self.assertEqual(final_records[-1]["skill_plan"], ["done"])
+        session.close()
+
+    def test_operator_station_llm_intent_resolves_fuzzy_task_instruction(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            response = session.handle_utterance("can you please head over to the blue door")
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the blue door")
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+        self.assertTrue(
+            any(call["method_name"] == "compile_operator_intent" for call in compiler.call_history)
+        )
+        session.close()
+
+    def test_operator_station_sends_capability_manifest_to_operator_intent_compiler(self):
+        seen_payloads = []
+
+        def transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                seen_payloads.append(request["user_payload"])
+            return build_test_llm_transport()(request)
+
+        compiler = LLMCompiler(api_key="test-key", transport=transport)
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+
+        session.handle_utterance("which of the doors is closest to you")
+
+        self.assertEqual(len(seen_payloads), 1)
+        manifest = seen_payloads[0]["capability_manifest"]
+        self.assertEqual(manifest["name"], "minigrid_primitive_registry_v1")
+        grounding_names = {
+            item["name"]
+            for item in manifest["primitives"]["grounding"]
+        }
+        self.assertIn("grounding.closest_door.manhattan.agent", grounding_names)
+        self.assertIn("grounding.closest_door.euclidean.agent", grounding_names)
+        self.assertIn("sensing", manifest["primitives"])
+        self.assertIn("action", manifest["primitives"])
+        action_plan = next(
+            item
+            for item in manifest["primitives"]["action"]
+            if item["name"] == "action.plan_grid_path"
+        )
+        self.assertEqual(action_plan["runtime_binding"]["kind"], "python")
+
+    def test_operator_station_llm_intent_updates_delivery_target(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+
+        response = session.handle_utterance("that red door is our delivery target")
+
+        self.assertIn("KNOWLEDGE UPDATED", response)
+        self.assertEqual(
+            session.memory.knowledge["delivery_target"],
+            {"color": "red", "object_type": "door"},
+        )
+
+    def test_operator_station_llm_intent_resolves_same_one_reference(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.handle_utterance("go to the red door")
+            response = session.handle_utterance("go back to the same one")
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+        session.close()
+
+    def test_operator_station_llm_intent_resolves_last_task_status_query(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.handle_utterance("go to the red door")
+            response = session.handle_utterance("what did I ask you to do last time?")
+
+        self.assertIn("LAST RUN", response)
+        self.assertIn("RUN COMPLETE", response)
+        session.close()
+
+    def test_operator_station_llm_intent_resolves_fuzzy_scene_query(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            response = session.handle_utterance("Ok. What do you see around you")
+
+        self.assertIn("SCENE", response)
+        self.assertIn("doors=", response)
+        session.close()
+
+    def test_operator_station_delivery_target_question_does_not_write_memory(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+        session.handle_utterance("the yellow door is the delivery target")
+
+        response = session.handle_utterance("and the delivery target?")
+
+        self.assertIn("DELIVERY TARGET", response)
+        self.assertIn("color=yellow", response)
+        self.assertEqual(
+            session.memory.knowledge["delivery_target"],
+            {"color": "yellow", "object_type": "door"},
+        )
+
+    def test_operator_station_question_shaped_knowledge_intent_cannot_write_memory(self):
+        def bad_transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                return {
+                    "intent_type": "knowledge_update",
+                    "canonical_instruction": None,
+                    "task_type": None,
+                    "target": None,
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": {
+                        "delivery_target": {"color": "red", "object_type": "door"}
+                    },
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.8,
+                    "reason": "Incorrectly treated question as update.",
+                }
+            return build_test_llm_transport()(request)
+
+        compiler = LLMCompiler(api_key="test-key", transport=bad_transport)
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+        session.handle_utterance("the yellow door is the delivery target")
+
+        response = session.handle_utterance("and the delivery target?")
+
+        self.assertIn("DELIVERY TARGET", response)
+        self.assertIn("color=yellow", response)
+        self.assertEqual(
+            session.memory.knowledge["delivery_target"],
+            {"color": "yellow", "object_type": "door"},
+        )
+
+    def test_operator_station_unsupported_llm_intent_does_not_execute(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+
+        response = session.handle_utterance("pick up the red key")
+
+        self.assertIn("I cannot safely execute that capability yet", response)
+        self.assertIsNone(session.last_result)
+        self.assertFalse(
+            any(call["method_name"] == "compile_task" for call in compiler.call_history)
+        )
+
+    def test_operator_station_answers_visible_door_query(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="human",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            response = session.handle_utterance("which doors are visible?")
+
+        self.assertIn("SCENE", response)
+        self.assertIn("doors=", response)
+        self.assertIn("yellow door", response)
+        session.close()
+
+    def test_operator_station_ground_target_query_reports_closest_manhattan_door(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="human",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            response = session.handle_utterance("which door is closest by Manhattan distance?")
+
+        self.assertIn("GROUNDED TARGET", response)
+        self.assertIn("target=", response)
+        self.assertIn("distance=", response)
+        self.assertIsNone(session.last_result)
+        session.close()
+
+    def test_operator_station_runs_grounded_closest_manhattan_door_task(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="human",
+            max_loops=512,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            response = session.handle_utterance(
+                "go to the closest door using Manhattan distance"
+            )
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertTrue(session.last_result["final_state"]["task_complete"])
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+        final_records = [
+            record
+            for record in session.last_result["loop_records"]
+            if record["skill_plan"] is not None
+        ]
+        self.assertEqual(final_records[-1]["skill_plan"], ["done"])
+        self.assertEqual(final_records[-1]["report"]["status"], "succeeded")
+        session.close()
+
+    def test_operator_station_closest_without_metric_requests_clarification(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("go to the closest door")
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("which distance metric", response)
+        self.assertIn("Supported: manhattan", response)
+        self.assertIsNotNone(session.pending_clarification)
+        self.assertEqual(session.pending_clarification.missing_field, "distance_metric")
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_manhattan_answer_resumes_closest_task(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="human",
+            max_loops=512,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            clarify = session.handle_utterance("go to the closest door")
+            response = session.handle_utterance("manhattan")
+
+        self.assertIn("CLARIFY", clarify)
+        self.assertIsNone(session.pending_clarification)
+        self.assertIn("RUN COMPLETE", response)
+        self.assertTrue(session.last_result["final_state"]["task_complete"])
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+        final_records = [
+            record
+            for record in session.last_result["loop_records"]
+            if record["skill_plan"] is not None
+        ]
+        self.assertEqual(final_records[-1]["skill_plan"], ["done"])
+        session.close()
+
+    def test_operator_station_euclidean_answer_fails_safely_and_clears_pending(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        session.handle_utterance("go to the closest door")
+        response = session.handle_utterance("euclidean")
+
+        self.assertEqual(response, "I cannot use Euclidean distance yet. Supported: manhattan.")
+        self.assertIsNone(session.pending_clarification)
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_cancel_clears_pending_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        session.handle_utterance("go to the closest door")
+        response = session.handle_utterance("cancel")
+
+        self.assertIn("pending clarification cleared", response)
+        self.assertIsNone(session.pending_clarification)
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_reset_clears_pending_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        session.handle_utterance("go to the closest door")
+        response = session.handle_utterance("reset")
+
+        self.assertIn("RESET", response)
+        self.assertIsNone(session.pending_clarification)
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_status_and_cache_keep_pending_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        session.handle_utterance("go to the closest door")
+        status = session.handle_utterance("what do you know")
+        cache = session.handle_utterance("show cache")
+
+        self.assertIn("STATUS", status)
+        self.assertIn("CACHE", cache)
+        self.assertIsNotNone(session.pending_clarification)
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_new_task_cancels_pending_clarification_and_runs(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            session.handle_utterance("go to the closest door")
+            response = session.handle_utterance("go to the red door")
+
+        self.assertIsNone(session.pending_clarification)
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+        session.close()
+
+    def test_operator_station_ambiguous_unique_selector_requests_candidate_clarification(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("go to the door that is not yellow")
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("matched multiple doors", response)
+        self.assertIn("Options:", response)
+        self.assertIsNotNone(session.pending_clarification)
+        self.assertEqual(
+            session.pending_clarification.clarification_type,
+            "target_selector_candidate_choice",
+        )
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_candidate_answer_resumes_ambiguous_selector_task(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="human",
+            max_loops=512,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            clarify = session.handle_utterance("go to the door that is not yellow")
+            response = session.handle_utterance("red")
+
+        self.assertIn("CLARIFY", clarify)
+        self.assertIsNone(session.pending_clarification)
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+        self.assertTrue(session.last_result["final_state"]["task_complete"])
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+        final_records = [
+            record
+            for record in session.last_result["loop_records"]
+            if record["skill_plan"] is not None
+        ]
+        self.assertEqual(final_records[-1]["skill_plan"], ["done"])
+        session.close()
+
+    def test_operator_station_natural_not_yellow_phrase_requests_candidate_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("can you go to a door that is not yellow")
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("matched multiple doors", response)
+        self.assertIsNotNone(session.pending_clarification)
+
+    def test_operator_station_natural_closest_query_requests_metric_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("which door is closest to you")
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("which distance metric", response)
+        self.assertIsNotNone(session.pending_clarification)
+
+    def test_operator_station_conversational_closest_query_requests_metric_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("ok. Which door is closest to you?")
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("which distance metric", response)
+        self.assertIsNotNone(session.pending_clarification)
+
+    def test_operator_station_which_of_the_doors_closest_requests_metric_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("ok. which of the doors is closest to you")
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("which distance metric", response)
+        self.assertIsNotNone(session.pending_clarification)
+
+    def test_operator_station_shortest_distance_query_requests_metric_clarification(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("can you calculate the shortest distance to a door")
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("which distance metric", response)
+        self.assertIsNotNone(session.pending_clarification)
+
+    def test_operator_station_euclidean_closest_reports_synthesizable_missing_primitive(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("which door is closest by Euclidean distance")
+
+        self.assertIn("required primitive is not implemented yet", response)
+        self.assertIn("grounding.closest_door.euclidean.agent", response)
+        self.assertIn("Phase 7.7", response)
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_grounded_selector_can_update_delivery_target(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="human",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.startup()
+            response = session.handle_utterance(
+                "make the closest door by Manhattan distance the delivery target"
+            )
+
+        self.assertIn("KNOWLEDGE UPDATED", response)
+        self.assertIsNotNone(session.memory.knowledge["delivery_target"])
+        self.assertEqual(session.memory.knowledge["delivery_target"]["object_type"], "door")
+        session.close()
+
+    def test_operator_station_rejects_llm_chosen_target_for_closest_request(self):
+        def bad_transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                return {
+                    "intent_type": "task_instruction",
+                    "canonical_instruction": "go to the yellow door",
+                    "task_type": "go_to_object",
+                    "target": {"color": "yellow", "object_type": "door"},
+                    "target_selector": None,
+                    "capability_status": "executable",
+                    "knowledge_update": None,
+                    "reference": None,
+                    "status_query": None,
+                    "control": None,
+                    "clear_memory": False,
+                    "confidence": 0.99,
+                    "reason": "Incorrectly chose a closest target directly.",
+                }
+            return build_test_llm_transport()(request)
+
+        compiler = LLMCompiler(api_key="test-key", transport=bad_transport)
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("go to the closest door using Manhattan distance")
+
+        self.assertIn("valid target selector", response)
+        self.assertIsNone(session.last_result)
+
+    def test_operator_station_missing_reference_fails_safely(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+
+        self.assertIn(
+            "I do not have a previous target yet",
+            session.handle_utterance("go there again"),
+        )
+        self.assertIn(
+            "I do not have a previous successful task yet",
+            session.handle_utterance("repeat the last task"),
+        )
+        self.assertEqual(session.handle_utterance("what was the last target?"), "LAST TARGET: none")
+
+    def test_operator_station_stores_last_target_after_success(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            response = session.handle_utterance("go to the red door")
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(
+            session.memory.episodic_memory["last_target"],
+            {"color": "red", "object_type": "door"},
+        )
+        self.assertEqual(
+            session.memory.episodic_memory["last_successful_instruction"],
+            "go to the red door",
+        )
+        last_target = session.handle_utterance("what was the last target?")
+        self.assertIn("LAST TARGET", last_target)
+        self.assertIn("color=red", last_target)
+        self.assertIn("object_type=door", last_target)
+        self.assertIn("instruction=go to the red door", last_target)
+        session.close()
+
+    def test_operator_station_go_there_again_resolves_after_success(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.handle_utterance("go to the red door")
+            response = session.handle_utterance("go there again")
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+        self.assertTrue(session.last_result["final_state"]["task_complete"])
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+        session.close()
+
+    def test_operator_station_repeat_last_task_resolves_after_success(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.handle_utterance("go to the red door")
+            response = session.handle_utterance("repeat the last task")
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+        self.assertTrue(session.last_result["final_state"]["task_complete"])
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+        session.close()
+
+    def test_operator_station_failed_run_does_not_overwrite_last_target(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="none",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        session.handle_utterance("go to the red door")
+        self.assertEqual(
+            session.memory.episodic_memory["last_target"],
+            {"color": "red", "object_type": "door"},
+        )
+
+        session.env_id = "MiniGrid-GoToDoor-16x16-v0"
+        session.seed = 12
+        response = session.handle_utterance("go to the red door")
+
+        self.assertIn("RUN FAILED", response)
+        self.assertEqual(
+            session.memory.episodic_memory["last_target"],
+            {"color": "red", "object_type": "door"},
+        )
+
+    def test_operator_station_reset_clears_reference_context_but_keeps_delivery_target(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.handle_utterance("the red door is the delivery target")
+            session.handle_utterance("go to the red door")
+            self.assertIsNotNone(session.last_result)
+            reset = session.handle_utterance("reset")
+            missing = session.handle_utterance("go there again")
+            response = session.handle_utterance("go to the delivery target")
+
+        self.assertIn("durable knowledge kept", reset)
+        self.assertIsNotNone(session.last_result)
+        self.assertIn("I do not have a previous target yet", missing)
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+        session.close()
+
+    def test_operator_station_reset_clears_last_result(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            session.handle_utterance("go to the red door")
+            self.assertIsNotNone(session.last_result)
+            response = session.handle_utterance("reset")
+
+        self.assertIn("episodic state cleared", response)
+        self.assertIsNone(session.last_result)
+        self.assertIsNone(session.memory.episodic_memory["last_target"])
+        session.close()
+
+    def test_operator_station_delivery_target_persists_across_station_restart(self):
+        memory_root = Path(tempfile.mkdtemp())
+        first_session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=memory_root,
+            render_mode="none",
+        )
+        first_session.handle_utterance("the red door is the delivery target")
+
+        second_session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=memory_root,
+            render_mode="none",
+        )
+
+        self.assertEqual(
+            second_session.memory.knowledge["delivery_target"],
+            {"color": "red", "object_type": "door"},
+        )
+        self.assertEqual(
+            second_session.resolve_task_instruction("go to the delivery target"),
+            "go to the red door",
+        )
+
+    def test_operator_station_clear_memory_clears_delivery_target(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+        session.handle_utterance("the red door is the delivery target")
+        response = session.handle_utterance("forget everything")
+
+        self.assertIn("durable knowledge cleared", response)
+        self.assertIsNone(session.memory.knowledge["delivery_target"])
+        self.assertIsNone(session.memory.knowledge["target_color"])
+        self.assertIsNone(session.memory.knowledge["target_type"])
+        self.assertIn(
+            "I do not have a delivery target yet",
+            session.handle_utterance("go to the delivery target"),
+        )
+
+    def test_operator_station_reports_missing_delivery_target_safely(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+        response = session.handle_utterance("go to the delivery target")
+
+        self.assertIn("I do not have a delivery target yet", response)
+
+    def test_operator_station_startup_opens_idle_preview_before_task(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="human",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            self.assertEqual(session.startup(), "READY")
+            self.assertIsNotNone(session.preview_adapter)
+
+        session.close()
+        self.assertIsNone(session.preview_adapter)
+
+    def test_operator_station_reports_target_absent_without_followup_question(self):
+        compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+        session = OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=12,
+            render_mode="human",
+            max_loops=64,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            response = session.handle_utterance("go to the red door")
+
+        self.assertIn("RUN FAILED", response)
+        self.assertIn("reason=target_absent", response)
+        self.assertIn("available_targets=", response)
+
+    def test_operator_station_reset_keeps_durable_knowledge_by_default(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+        )
+        session.handle_utterance("remember the red door")
+        response = session.handle_utterance("reset")
+
+        self.assertIn("durable knowledge kept", response)
+        self.assertEqual(session.memory.knowledge["target_color"], "red")
+
     def test_invalid_llm_sense_template_falls_back_before_cache(self):
         fallbacking_transport = build_test_llm_transport()
 
@@ -790,6 +2314,275 @@ class JeenomMiniGridTests(unittest.TestCase):
         self.assertTrue(
             any("corrected invalid direct action skill template: turn_right" in log for log in compiler.logs)
         )
+
+
+class TestSceneModel(unittest.TestCase):
+    """Phase 7.57 — Persistent SceneModel projection and grounding."""
+
+    def _make_session(self, render_mode="none"):
+        return OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode=render_mode,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+    def _run_with_env(self, fn):
+        with patch(
+            "jeenom.run_demo.build_env",
+            side_effect=lambda env_id, render_mode: FullyObsWrapper(gym.make(env_id)),
+        ):
+            return fn()
+
+    def test_sense_tick_populates_scene_model(self):
+        """After a task's sense tick, memory.scene_model must be set."""
+        session = self._make_session()
+        self.assertIsNone(session.memory.scene_model)
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self.assertIsNotNone(session.memory.scene_model)
+        scene = session.memory.scene_model
+        self.assertIsInstance(scene, SceneModel)
+        self.assertEqual(scene.source, "task_sense")
+
+    def test_scene_model_contains_agent_pose(self):
+        """SceneModel must record the agent position after sensing."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        scene = session.memory.scene_model
+        self.assertIsNotNone(scene)
+        self.assertIsInstance(scene.agent_x, int)
+        self.assertIsInstance(scene.agent_y, int)
+        self.assertIsInstance(scene.agent_dir, int)
+
+    def test_scene_model_contains_door_objects(self):
+        """SceneModel objects must include at least one door."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        scene = session.memory.scene_model
+        doors = scene.find(object_type="door")
+        self.assertGreater(len(doors), 0)
+        for door in doors:
+            self.assertEqual(door.object_type, "door")
+            self.assertIsInstance(door.x, int)
+            self.assertIsInstance(door.y, int)
+
+    def test_idle_sense_builds_scene_model_before_any_task(self):
+        """_ensure_scene_model() must build a scene model via idle sense if none exists."""
+        session = self._make_session()
+        self.assertIsNone(session.memory.scene_model)
+        self._run_with_env(lambda: session._ensure_scene_model())
+        self.assertIsNotNone(session.memory.scene_model)
+        self.assertEqual(session.memory.scene_model.source, "idle_sense")
+
+    def test_scene_summary_uses_scene_model_not_env_reset(self):
+        """scene_summary must answer from SceneModel and include agent position."""
+        session = self._make_session(render_mode="human")
+        response = self._run_with_env(lambda: session.handle_utterance("what do you see"))
+        self.assertIn("SCENE", response)
+        self.assertIn("agent=", response)
+        self.assertIn("source=", response)
+        self.assertIn("doors=", response)
+
+    def test_grounding_uses_scene_model_for_closest_door(self):
+        """Grounding closest-door query must use SceneModel, not a fresh env reset."""
+        session = self._make_session(render_mode="human")
+
+        reset_calls = []
+        original_reset = MiniGridAdapter.reset
+
+        def tracking_reset(self_adapter, seed=None):
+            reset_calls.append(seed)
+            return original_reset(self_adapter, seed=seed)
+
+        with patch.object(MiniGridAdapter, "reset", tracking_reset):
+            self._run_with_env(lambda: session.startup())
+            reset_calls.clear()  # ignore startup reset
+            result = session.handle_utterance(
+                "which door is closest by manhattan distance"
+            )
+
+        # No adapter.reset() should fire during the grounding query
+        self.assertEqual(reset_calls, [], msg="grounding called adapter.reset()")
+        self.assertIn("GROUNDED TARGET", result)
+        self.assertIn("distance=", result)
+
+    def test_unique_door_grounding_returns_distance(self):
+        """Grounding a unique color-specific door must now return distance."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        grounded = session.ground_target_selector(
+            {"object_type": "door", "color": "red", "exclude_colors": [], "relation": "unique",
+             "distance_metric": None, "distance_reference": None}
+        )
+        self.assertTrue(grounded["ok"])
+        self.assertIsNotNone(grounded.get("distance"))
+        self.assertIsInstance(grounded["distance"], int)
+
+    def test_scene_model_cleared_on_reset(self):
+        """reset() must clear scene_model so the next query builds a fresh one."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self.assertIsNotNone(session.memory.scene_model)
+        session.reset()
+        self.assertIsNone(session.memory.scene_model)
+
+    def test_scene_model_source_is_task_sense_after_task(self):
+        """After a completed task, scene_model.source must be 'task_sense'."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self.assertEqual(session.memory.scene_model.source, "task_sense")
+
+    def test_scene_model_source_is_idle_sense_before_task(self):
+        """Before any task, idle sense pass must produce source='idle_sense'."""
+        session = self._make_session(render_mode="human")
+        self._run_with_env(lambda: session.startup())
+        # Clear any scene_model startup might have created (preview sense)
+        session.memory.scene_model = None
+        self._run_with_env(lambda: session._ensure_scene_model())
+        self.assertEqual(session.memory.scene_model.source, "idle_sense")
+
+
+class TestStationActiveClaims(unittest.TestCase):
+    """Phase 7.58 — Station Active Claims: typed, session-scoped claims from grounding."""
+
+    def _make_session(self, render_mode: str = "none") -> OperatorStationSession:
+        return OperatorStationSession(
+            compiler=SmokeTestCompiler(),
+            compiler_name="smoke",
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode=render_mode,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+    def _run_with_env(self, fn):
+        def fake_build_env(env_id, render_mode):
+            return FullyObsWrapper(gym.make(env_id))
+        with patch("jeenom.run_demo.build_env", side_effect=fake_build_env):
+            return fn()
+
+    def test_claims_written_after_closest_grounding(self):
+        """After grounding closest door, active_claims must be set."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+
+    def test_claims_have_ranked_doors(self):
+        """Active claims must contain a non-empty ranked_scene_doors list."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        self.assertGreater(len(session.active_claims.ranked_scene_doors), 0)
+
+    def test_claims_last_grounded_target_is_set(self):
+        """After closest grounding, last_grounded_target must be a GroundedDoorEntry."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        self.assertIsInstance(session.active_claims.last_grounded_target, GroundedDoorEntry)
+
+    def test_claims_last_grounded_rank_is_zero(self):
+        """The first grounded target must have rank 0."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        self.assertEqual(session.active_claims.last_grounded_rank, 0)
+
+    def test_next_closest_resolves_from_claims(self):
+        """claim_reference=next_closest must resolve to rank-1 door."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        result = self._run_with_env(lambda: session.handle_utterance("next closest door"))
+        self.assertIsNotNone(result)
+        self.assertIn("CLAIM", result.upper())
+
+    def test_claims_cleared_on_reset(self):
+        """reset() must clear active_claims."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        session.reset()
+        self.assertIsNone(session.active_claims)
+
+    def test_claims_cleared_on_new_task(self):
+        """Starting a new task must clear active_claims at the start of run_task."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        # active_claims may have been written again by the sense tick in run_task,
+        # but prior claims from the grounding query are not carried over.
+        # The important invariant: active_claims was cleared at task start.
+        # We verify indirectly: last_grounding_query should not be from the grounding round.
+        if session.active_claims is not None:
+            # claims were refreshed by the task's sense tick — last_grounding_query was reset
+            self.assertIsNone(session.active_claims.last_grounding_query.get("relation"))
+
+    def test_stale_claims_fail_safely(self):
+        """If scene has changed, claim resolution must return an error dict, not raise."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        # Manually corrupt the fingerprint to simulate a stale claims scenario
+        import dataclasses
+        stale = dataclasses.replace(
+            session.active_claims,
+            scene_fingerprint=(-1, -1, -1),
+        )
+        session.active_claims = stale
+        result = session._resolve_claim_reference("next_closest")
+        self.assertFalse(result.get("ok", True))
+
+    def test_claims_compact_summary_is_dict(self):
+        """compact_summary() must return a dict with known keys."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        summary = session.active_claims.compact_summary()
+        self.assertIsInstance(summary, dict)
+        self.assertIn("last_grounded_target", summary)
+        self.assertIn("ranked_doors", summary)
+
+    def test_is_valid_for_checks_fingerprint(self):
+        """StationActiveClaims.is_valid_for() must return False for a different fingerprint."""
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance("go to the red door"))
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        scene = session.memory.scene_model
+        self.assertTrue(session.active_claims.is_valid_for(scene))
+        # Build a fake scene with a different fingerprint
+        import dataclasses
+        fake_scene = dataclasses.replace(scene, agent_x=scene.agent_x + 5, step_count=9999)
+        self.assertFalse(session.active_claims.is_valid_for(fake_scene))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ import minigrid  # noqa: F401
 from minigrid.wrappers import FullyObsWrapper
 
 from jeenom.llm_compiler import LLMCompiler
+from jeenom.minigrid_envs import ensure_custom_minigrid_envs_registered
 from jeenom.run_demo import run_episode
 
 
@@ -107,15 +108,34 @@ def build_test_llm_transport():
     return transport
 
 
-def _run_golden(render_mode: str, headless_human: bool):
+PHASE_CONFIGS = {
+    "3.5": {
+        "title": "PHASE 3.5 GOLDEN EVAL REPORT",
+        "env_id": "MiniGrid-GoToDoor-8x8-v0",
+        "seed": 42,
+        "max_loops": 64,
+        "min_loop_count": None,
+    },
+    "4": {
+        "title": "PHASE 4 BIGGER SAME-TASK STRESS EVAL REPORT",
+        "env_id": "MiniGrid-GoToDoor-16x16-v0",
+        "seed": 42,
+        "max_loops": 512,
+        "min_loop_count": 5,
+    },
+}
+
+
+def _run_eval(config: dict[str, object], render_mode: str, headless_human: bool):
     compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
+    ensure_custom_minigrid_envs_registered()
     kwargs = {
         "instruction": "go to the red door",
         "compiler_name": "llm",
         "compiler": compiler,
-        "env_id": "MiniGrid-GoToDoor-8x8-v0",
-        "seed": 42,
-        "max_loops": 64,
+        "env_id": config["env_id"],
+        "seed": config["seed"],
+        "max_loops": config["max_loops"],
         "render_mode": render_mode,
         "memory_root": Path(tempfile.mkdtemp()),
         "use_cache": True,
@@ -132,7 +152,7 @@ def _run_golden(render_mode: str, headless_human: bool):
     return run_episode(**kwargs)
 
 
-def _check_result(result):
+def _check_result(result, config: dict[str, object]):
     final_records = [
         record for record in result["loop_records"] if record["skill_plan"] is not None
     ]
@@ -147,19 +167,30 @@ def _check_result(result):
         "final_report_succeeded": bool(final_record)
         and final_record["report"]["status"] == "succeeded",
     }
+    min_loop_count = config.get("min_loop_count")
+    if min_loop_count is not None:
+        checks["larger_than_phase_3_5_loop_count"] = (
+            len(result["loop_records"]) > min_loop_count
+        )
     return checks, final_record
 
 
-def _print_summary(result, checks, final_record, show_loops: bool) -> None:
-    print("PHASE 3.5 GOLDEN EVAL REPORT")
+def _print_summary(
+    result,
+    checks,
+    final_record,
+    config: dict[str, object],
+    show_loops: bool,
+) -> None:
+    print(config["title"])
     print()
     print("CONFIG")
     pprint(
         {
             "instruction": result["task"]["instruction"],
             "compiler_backend": result["compiler_backend"],
-            "env_id": "MiniGrid-GoToDoor-8x8-v0",
-            "seed": 42,
+            "env_id": config["env_id"],
+            "seed": config["seed"],
             "render_mode": "human",
             "cache_enabled": True,
             "prewarm_enabled": True,
@@ -209,7 +240,13 @@ def _print_summary(result, checks, final_record, show_loops: bool) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Print the Phase 3.5 golden eval report.")
+    parser = argparse.ArgumentParser(description="Print a JEENOM phase eval report.")
+    parser.add_argument(
+        "--phase",
+        choices=sorted(PHASE_CONFIGS),
+        default="3.5",
+        help="Eval phase to run.",
+    )
     parser.add_argument(
         "--show-window",
         action="store_true",
@@ -220,11 +257,38 @@ def main() -> int:
         action="store_true",
         help="Print a compact loop-by-loop timeline.",
     )
+    parser.add_argument(
+        "--env-id",
+        default=None,
+        help="Override the phase env for manual experiments, e.g. MiniGrid-GoToDoor-32x32-v0.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the phase seed for manual experiments.",
+    )
+    parser.add_argument(
+        "--max-loops",
+        type=int,
+        default=None,
+        help="Override the phase loop budget for manual experiments.",
+    )
     args = parser.parse_args()
 
-    result = _run_golden(render_mode="human", headless_human=not args.show_window)
-    checks, final_record = _check_result(result)
-    _print_summary(result, checks, final_record, show_loops=args.show_loops)
+    config = dict(PHASE_CONFIGS[args.phase])
+    if args.env_id is not None:
+        config["title"] = f"{config['title']} (CUSTOM ENV)"
+        config["env_id"] = args.env_id
+        config["min_loop_count"] = None
+    if args.seed is not None:
+        config["seed"] = args.seed
+    if args.max_loops is not None:
+        config["max_loops"] = args.max_loops
+
+    result = _run_eval(config, render_mode="human", headless_human=not args.show_window)
+    checks, final_record = _check_result(result, config)
+    _print_summary(result, checks, final_record, config, show_loops=args.show_loops)
     return 0 if all(checks.values()) else 1
 
 
