@@ -45,6 +45,8 @@ def arbitration_decision_json_schema() -> dict[str, Any]:
             "suggested_handle": {"type": ["string", "null"]},
             "clarification_prompt": {"type": ["string", "null"]},
             "operator_message": {"type": "string"},
+            "proposed_handle": {"type": ["string", "null"]},
+            "proposed_description": {"type": ["string", "null"]},
         },
         "required": [
             "decision_type",
@@ -53,6 +55,8 @@ def arbitration_decision_json_schema() -> dict[str, Any]:
             "suggested_handle",
             "clarification_prompt",
             "operator_message",
+            "proposed_handle",
+            "proposed_description",
         ],
         "additionalProperties": False,
     }
@@ -80,6 +84,8 @@ def _parse_arbitration_decision(data: Any) -> ArbitrationDecision:
         suggested_handle=data.get("suggested_handle"),
         clarification_prompt=data.get("clarification_prompt"),
         operator_message=str(data.get("operator_message", "")),
+        proposed_handle=data.get("proposed_handle") or None,
+        proposed_description=data.get("proposed_description") or None,
     )
 
 
@@ -202,41 +208,73 @@ class LLMArbitrator(ArbitratorBackend):
                 scene_summary=scene_summary,
             )
 
+        scene_api = (
+            "SceneModel API available to synthesized functions:\n"
+            "  scene.agent_x, scene.agent_y  — agent grid position (int)\n"
+            "  scene.agent_dir               — agent facing direction (0=right,1=down,2=left,3=up)\n"
+            "  scene.grid_width, scene.grid_height\n"
+            "  scene.find(object_type, color, exclude_colors) → list[SceneObject]\n"
+            "  scene.manhattan_distance_from_agent(obj) → int\n"
+            "  SceneObject: .object_type, .color, .x, .y\n"
+            "  math module is pre-injected (use math.sqrt etc. directly)\n"
+            "  Standard Python builtins: abs, sorted, min, max, filter, enumerate, zip\n"
+            "  NO imports allowed. NO environment, NO filesystem, NO randomness.\n"
+            "  Signature: fn(scene, selector) → list[tuple[float, SceneObject]]\n"
+            "  selector is a dict with keys: object_type, color, exclude_colors, relation, etc.\n"
+        )
         system_prompt = (
             "You are the JEENOM capability arbitrator. The operator gave an instruction "
             "that requires capabilities not currently available in the registry. "
             "Your task is to reason about what the station should do next.\n\n"
+            + scene_api + "\n"
             "Decision types:\n"
-            "  'clarify'    — USE THIS when an available capability could partially or\n"
-            "                 indirectly address the intent, or when rephrasing would\n"
-            "                 let the station help. Emit a clarification_prompt that\n"
-            "                 honestly names what IS available and offers it.\n"
+            "  'synthesize' — The operator's request can be expressed as a NEW pure Python\n"
+            "                 grounding function using ONLY the SceneModel API above.\n"
+            "                 Use this when:\n"
+            "                   - The request involves a spatial/mathematical computation\n"
+            "                     over visible objects (distance metrics, conditionals,\n"
+            "                     relative direction, thresholds, inter-object distances)\n"
+            "                   - The computation is deterministic and pure (no I/O)\n"
+            "                   - It can be expressed as fn(scene, selector) → ranked list\n"
+            "                 When synthesize:\n"
+            "                   - proposed_handle: a dotted handle name like\n"
+            "                     'grounding.closest_door.euclidean.agent' or\n"
+            "                     'grounding.conditional_target.distance_threshold'\n"
+            "                   - proposed_description: one sentence describing what the\n"
+            "                     function computes (used as the synthesis prompt)\n"
+            "                   - safe_to_execute=false always\n"
+            "                   - suggested_handle=null\n"
+            "                 Examples:\n"
+            "                   - 'euclidean distance to closest door'\n"
+            "                     → proposed_handle='grounding.closest_door.euclidean.agent'\n"
+            "                   - 'go to purple door if less than 6 units away else yellow'\n"
+            "                     → proposed_handle='grounding.conditional_target.distance_threshold'\n"
+            "                   - 'door to my left'\n"
+            "                     → proposed_handle='grounding.closest_door.relative_direction.agent'\n"
+            "                   - 'door closest to the blue box'\n"
+            "                     → proposed_handle='grounding.closest_door.object_reference.scene'\n"
+            "  'clarify'    — An available capability could partially address the intent,\n"
+            "                 OR the request is ambiguous and rephrasing would help.\n"
+            "                 Emit a clarification_prompt naming what IS available.\n"
             "                 When clarifying with grounding.all_doors.ranked.manhattan.agent,\n"
             "                 set suggested_handle to that exact handle.\n"
-            "                 Examples where clarify is correct:\n"
-            "                   - 'farthest door': clarify with 'I can list all visible\n"
-            "                     doors ranked by distance — would that help?'\n"
-            "                     Set suggested_handle='grounding.all_doors.ranked.manhattan.agent'\n"
-            "                   - 'distance of all doors': clarify with 'I can show you\n"
-            "                     all visible doors ranked by Manhattan distance.'\n"
-            "                     Set suggested_handle='grounding.all_doors.ranked.manhattan.agent'\n"
-            "                   - 'second closest door': clarify with 'I can go to the\n"
-            "                     closest door. Do you want that instead?'\n"
-            "  'refuse'     — Use ONLY when no available capability could partially\n"
-            "                 address the intent (e.g. pickup, toggle, unlock).\n"
-            "                 Emit an honest operator_message explaining the gap.\n"
-            "  'substitute' — An available capability is semantically equivalent\n"
-            "                 (not a degraded fallback). safe_to_execute=true ONLY when\n"
-            "                 the substitute truly satisfies the intent without loss.\n"
-            "                 Emit suggested_handle from available_handles_sample.\n"
-            "  'synthesize' — Required capability is absent but synthesizable.\n"
-            "                 Must have safe_to_execute=false.\n\n"
+            "                 Examples:\n"
+            "                   - 'farthest door' (no farthest primitive, but ranked list exists)\n"
+            "                   - 'second closest' (only rank-0 is implemented)\n"
+            "  'substitute' — An available capability is semantically equivalent without loss.\n"
+            "                 safe_to_execute=true only when truly equivalent.\n"
+            "                 Emit suggested_handle from available_handles.\n"
+            "  'refuse'     — The request cannot be expressed as a pure grounding function\n"
+            "                 AND no available capability partially addresses it.\n"
+            "                 Use for: pickup, toggle, unlock, navigation commands,\n"
+            "                 anything requiring env interaction or side effects.\n\n"
             "HARD RULES — Blueprint Rule 9:\n"
-            "  - NEVER substitute 'closest' for 'farthest' — that is intent inversion.\n"
-            "  - NEVER substitute 'closest_door' for ranked/all — that is degradation.\n"
+            "  - NEVER substitute 'closest' for 'farthest' — intent inversion.\n"
+            "  - NEVER substitute 'closest_door' for ranked/all — degradation.\n"
             "  - NEVER set safe_to_execute=true for refuse or synthesize.\n"
-            "  - Prefer clarify over refuse whenever scene data or an available\n"
-            "    primitive could give the operator useful partial information.\n"
+            "  - If the request is a pure spatial/logical computation over scene objects,\n"
+            "    choose synthesize. Do NOT deflect to clarify for computable requests.\n"
+            "  - proposed_handle and proposed_description must be set when synthesize.\n"
             "  - The station may actuate a robot — unintended motion has consequences.\n"
         )
         user_payload: dict[str, Any] = {

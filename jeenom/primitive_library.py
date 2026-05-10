@@ -132,6 +132,17 @@ GROUNDING_PRIMITIVES: dict[str, PrimitiveSpec] = {
         runtime_kind="python",
         runtime_value="ground_all_doors_ranked_manhattan",
     ),
+    "claims.last_grounded_target": PrimitiveSpec(
+        name="claims.last_grounded_target",
+        consumes=("active_claims.last_grounded_target",),
+        produces=("grounded_target",),
+        description=(
+            "Resolve the most recent grounded target from session-scoped ActiveClaims. "
+            "Used for operator references such as 'that' after a grounding answer."
+        ),
+        runtime_kind="claims",
+        runtime_value="last_grounded_target",
+    ),
 }
 
 

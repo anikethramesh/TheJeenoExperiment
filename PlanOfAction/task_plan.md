@@ -1201,6 +1201,9 @@ Implemented:
 - "go to the second closest door" composes ranked[1] into a go_to_object task.
 - "go to the door with a distance of 7" resolves from ranked claims when the match is unique.
 - After a ranked display, "go to the red one" resolves using active claims.
+- After a grounding answer such as "third farthest=purple...", "go to that" resolves to the
+  last grounded target from ActiveClaims through the registered
+  grounding.claims.last_grounded_target handle.
 - Added tests/test_jeenom_minigrid.py::TestGroundingResultComposition.
 - Added evals/grounding_composition_probe.py.
 
@@ -1240,7 +1243,7 @@ Out of scope:
 - blocked-path replan
 
 ### Phase 7.75 — LLM Semantic Query Planner
-Status: next.
+Status: done.
 
 Goal:
 Make the LLM solve the language-understanding part by emitting a typed semantic query plan,
@@ -1279,22 +1282,22 @@ New schema:
   - preserved_constraints: list[str]
 
 Implementation:
-- Add GroundingQueryPlan schema and validation helpers.
-- Extend OperatorIntent with optional grounding_query_plan.
-- Update operator-intent LLM prompt to use the compact CapabilityRegistry and emit
+- Added GroundingQueryPlan schema and validation helpers.
+- Extended OperatorIntent with optional grounding_query_plan.
+- Updated operator-intent LLM prompt to use the compact CapabilityRegistry and emit
   grounding_query_plan for grounding/status/task requests.
-- Update SmokeTestCompiler only as a deterministic fixture for tests; do not grow it into the
+- Updated SmokeTestCompiler only as a deterministic fixture for tests; do not grow it into the
   production parser.
-- Add validation that the plan preserves important operator constraints:
+- Added validation that the plan preserves important operator constraints:
   - ordinal words such as second/third must appear as ordinal values.
   - farthest/furthest/least close must produce descending ranking semantics.
   - closest/nearest must produce ascending ranking semantics.
   - explicit colors and exclusions must be preserved.
   - explicit metrics must be preserved.
-- Convert valid GroundingQueryPlan into the existing Phase 7.7 composition path.
+- Converted valid GroundingQueryPlan into the existing Phase 7.7 composition path.
 - If the plan needs a missing/synthesizable primitive, route through capability matching and
   arbitration; do not execute.
-- Keep runtime execution unchanged.
+- Kept runtime execution unchanged.
 
 Success criteria:
 - "can you navigate to the second farthest door" produces a plan with:
@@ -1304,6 +1307,8 @@ Success criteria:
   - ordinal=2
   - tie_policy=clarify
 - "which door is closest and which is farthest?" produces an answer plan over the ranked handle.
+- "which door is closest and second closest?" produces a multi-answer ranked plan with
+  answer_fields=["closest", "second_closest"] rather than collapsing the second constraint.
 - "how far is the red door?" produces a distance answer plan using the ranked/scene grounding
   substrate, not delivery_target status.
 - "is there a green door?" produces a filter/answer plan and returns yes/no from SceneModel.
@@ -1326,6 +1331,81 @@ Test plan:
   language variants.
 - Station integration tests proving valid query plans compose through Phase 7.7.
 
+Implemented:
+- jeenom/schemas.py:
+  - GroundingQueryPlan dataclass.
+  - grounding_query_plan field on OperatorIntent.
+  - JSON schema support for structured LLM query-plan output.
+- jeenom/llm_compiler.py:
+  - LLM prompt now asks for grounding_query_plan for door/distance/ranked/ordinal queries.
+  - LLM prompt now instructs multi-answer ranked queries such as closest+second_closest to use
+    typed answer_fields instead of a single degraded ordinal.
+  - LLM prompt now maps clear/delete/forget delivery-target requests to a narrow
+    knowledge_update with delivery_target=null.
+  - SmokeTestCompiler emits query plans for:
+    - second/farthest ordinal requests
+    - closest/farthest answer requests
+    - color-specific distance questions
+    - color-specific existence questions
+    - distance-value selection
+    - ranked door displays
+    - closest + second closest multi-answer displays
+    - active-claim references such as "go to that"
+- jeenom/operator_station.py:
+  - Validated grounding_query_plan is now the primary path before regex/verifier fallback.
+  - Query plans route through CapabilityMatcher and CapabilityRegistry.
+  - Valid plans compose through Phase 7.7 ranked claims and existing go_to_object execution.
+  - Constraint-preservation validation rejects dropped ordinals, flipped closest/farthest
+    semantics, dropped explicit colors, and dropped explicit metrics.
+  - If a typed semantic grounding plan needs a distance metric but omits it, the station stores
+    a pending clarification and resumes the original query after the operator answers
+    "manhattan".
+  - Multi-answer fields such as closest, farthest, second_closest, and second_farthest are
+    composed from ranked ActiveClaims.
+  - LLM-emitted delivery_target=null updates clear durable target knowledge instead of being
+    treated as unsupported.
+- jeenom/primitive_library.py:
+  - Added grounding.claims.last_grounded_target as an implemented grounding handle over
+    session-scoped ActiveClaims.
+- tests/test_jeenom_schemas.py:
+  - GroundingQueryPlan schema tests.
+  - OperatorIntent accepts grounding_query_plan.
+  - Invalid ranked plan shape is rejected.
+- tests/test_jeenom_minigrid.py:
+  - TestLLMSemanticQueryPlanner covers fake-LLM query plans for second farthest,
+    bad dropped-ordinal plans, red-door distance, green-door existence, and distance-value
+    execution.
+  - Tests cover semantic metric clarification/resume and closest+second_closest answer
+    composition.
+- evals/operator_query_plan_probe.py:
+  - Prints raw query plans from the operator-intent compiler.
+  - By default this is a live OpenRouter probe; --allow-fallback only verifies eval wiring.
+  - Includes a closest+second_closest case.
+
+Proved:
+- A typed plan can drive "second farthest" without relying on pattern-only composition.
+- A bad LLM plan that turns "second farthest" into ordinal=1 is rejected before execution.
+- "how far is the red door" is answered from SceneModel/ranked grounding, not from
+  delivery_target status.
+- "is there a green door" is answered from SceneModel/ranked grounding.
+- "go to the door with distance 7" can execute from a typed distance-value plan.
+- Follow-up navigation such as "go to that" resolves through the most recent grounded
+  ActiveClaims target instead of stale durable delivery-target knowledge.
+- "go to that" is no longer handled by a local pronoun regex shortcut; the compiler emits
+  primitive_handle=grounding.claims.last_grounded_target and the station resolves that handle.
+- A missing metric in a semantic ranked query is now a real pending clarification, so an answer
+  like "use manhattan distance" can resume the original query.
+- "which door is closest and second closest?" composes both answers from the ranked grounding
+  claim instead of failing validation or dropping the second constraint.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+- Full JEENOM suite passes.
+
+Validation:
+- python evals/operator_query_plan_probe.py --allow-fallback
+- python -m pytest -q tests/test_jeenom_minigrid.py -k "LLMSemanticQueryPlanner or GroundingResultComposition"
+- python -m pytest -q tests/test_jeenom_schemas.py tests/test_jeenom_minigrid.py
+
 Out of scope:
 - Primitive synthesis
 - Euclidean implementation
@@ -1337,7 +1417,7 @@ Out of scope:
 - removing the verifier entirely; it remains a safety backstop until the planner is proven.
 
 ### Phase 7.8 — Validated Grounding Primitive Synthesis
-Status: planned.
+Status: done.
 
 Goal:
 Generate missing pure scene/query primitives when a grounded operator request requires a
@@ -1362,6 +1442,38 @@ Scope:
 - primitive must pass unit tests before registration
 - failed synthesis or failed validation must not execute the task
 
+Implemented:
+- jeenom/primitive_synthesizer.py: SynthesizerBackend ABC, SmokeTestSynthesizer (always
+  refuses), LLMSynthesizer (calls OpenRouter, falls back on missing API key).
+  - Rejects generated code with disallowed imports (only math and typing permitted).
+  - No substrate imports (AST-verified by probe).
+  - build_synthesizer(compiler_name) factory; default_synthesizer = SmokeTestSynthesizer.
+- jeenom/primitive_validator.py: PrimitiveValidator, ValidationFixture, ValidationResult.
+  - Executes generated code in a restricted namespace (no env, no MiniGrid, no numpy).
+  - EUCLIDEAN_FIXTURES: 7 deterministic SceneModel fixture tests covering empty scene,
+    single door, ordering correctness, color filter, exclude_color, and the critical
+    "distance_is_euclidean_not_manhattan" fixture that catches Manhattan masquerading as Euclidean.
+  - default_validator = PrimitiveValidator().
+  - No substrate imports (AST-verified by probe).
+- jeenom/capability_registry.py: register_synthesized(handle, fn) promotes a synthesizable
+  spec to implemented in-place; get_synthesized_callable(handle) returns the callable.
+- jeenom/operator_station.py:
+  - self.synthesizer and self.validator added to session state.
+  - _arbitrate_gap: when decision=synthesize and spec.safe_to_synthesize=True, calls
+    _try_synthesize_primitive before falling back to the synthesize refusal message.
+  - _try_synthesize_primitive: synthesize → validate → register → re-route to
+    _execute_synthesized_grounding. On validation failure, returns an honest operator
+    message without executing. On synthesis refusal, returns None (falls through).
+  - _execute_synthesized_grounding: calls the registered callable, writes ranked claims,
+    then either returns task_instruction (go_to_object) or a display result.
+  - ground_target_selector: checks get_synthesized_callable before refusing unknown metrics.
+  - _ground_with_synthesized_callable: runs a synthesized fn against current SceneModel,
+    writes ranked claims, returns a grounded dict result compatible with existing paths.
+- evals/primitive_synthesis_probe.py: 20 checks covering AST imports, SmokeTest refusal,
+  LLM fallback, validator pass/reject/import-reject, registry promotion, synthesized
+  callable output, end-to-end session synthesis with fake transport, second-call reuse,
+  and golden-path preservation.
+
 Success criteria:
 - "go to the closest door using Euclidean distance" detects missing Euclidean grounding support.
 - A candidate Euclidean ranking primitive is generated.
@@ -1373,6 +1485,20 @@ Success criteria:
 - cache_miss_during_render remains 0.
 - Phase 3.5 through 7.7 guardrails still pass.
 
+Validation:
+- python evals/primitive_synthesis_probe.py
+
+Technical debt:
+- LLMSynthesizer replicates transport code from LLMArbitrator and LLMCompiler; a shared
+  transport module should be extracted.
+- Synthesized primitives are registered in-memory per session; they do not persist across
+  restarts. A durable synthesis cache would allow re-use without re-synthesis.
+- FIXTURE_SETS only covers closest_door.euclidean.agent; new primitive types need their
+  own fixture sets added to primitive_validator.py.
+- Synthesis is triggered only from the arbitration path (synthesize decision). The
+  GroundingQueryPlan path (Phase 7.75) does not yet trigger synthesis when the required
+  primitive is synthesizable.
+
 Out of scope:
 - motion-control primitive synthesis
 - pickup/open/unlock synthesis
@@ -1380,6 +1506,106 @@ Out of scope:
 - continuous-world execution
 - exploration/replan
 - clarification Q/A
+
+### Phase 7.9 — Collaborative Capability Composition
+Status: planned.
+
+Goal:
+Close the capability gap through dialogue. When the system detects a missing primitive that
+could be composed from existing ones, it proposes the composition to the operator, waits for
+approval, then synthesizes and registers the new primitive. The operator is the specification;
+the system is the implementer.
+
+Problem this solves:
+Phase 7.8 synthesizes silently — the LLM writes code and the system registers it without
+the operator knowing what was built or why. This is fine for well-defined primitives like
+euclidean distance, but breaks down for anything ambiguous. The operator may want
+"closest non-red door by euclidean distance" composed differently than the system assumes.
+Silent synthesis of the wrong thing is worse than asking.
+
+The collaborative loop:
+1. Arbitrator detects a gap and identifies which existing primitives could cover parts of it.
+2. Instead of synthesizing immediately, the system explains the gap and proposes a composition
+   plan in natural language: "I don't have that capability, but I have X and Y. I can combine
+   them to build Z. Should I?"
+3. Operator approves, rejects, or redirects ("yes", "no", "use euclidean not manhattan").
+4. On approval, synthesis + validation + registration runs as in Phase 7.8.
+5. The new primitive is immediately available for the current and future turns.
+
+Architecture:
+- New pending state: pending_synthesis_proposal — stores the proposed handle, description,
+  and which existing primitives it composes from.
+- Arbitrator emits a new command kind: synthesis_proposal, with a natural-language
+  explanation and the proposed composition.
+- handle_pending_synthesis_proposal() resolves "yes/no/redirect" operator responses.
+- On approval: _try_synthesize_primitive runs as in 7.8.
+- On rejection or redirect: pending state is cleared; operator redirect is fed back into
+  the arbitration loop as a new utterance.
+- The proposal message must name the existing primitives being composed, the new handle
+  being created, and what the validator will test.
+
+Scope:
+- Grounding primitives only. No actuation or sensing synthesis.
+- Composition from primitives already in the registry (implemented or synthesizable).
+- Single-turn approval ("yes") or rejection ("no") or redirect (new utterance).
+- Proposal is one natural-language message — no multi-step negotiation yet.
+
+Out of scope:
+- Multi-turn negotiation over the composition design.
+- Operator-authored fixture specification.
+- Synthesis of action or sensing primitives.
+- Persistent primitive library updates across restarts.
+
+Success criteria:
+- "go to the closest door using euclidean distance" → system proposes composing from
+  existing grounding primitives → operator says "yes" → primitive synthesized, validated,
+  registered → task executes.
+- Operator says "no" → pending state cleared, system returns to READY without executing.
+- Operator redirects (new utterance) → pending cleared, new utterance handled normally.
+- Proposal names the handle being built and similar implemented primitives.
+- Second call after synthesis uses registered primitive directly — no re-proposal.
+- reset clears pending_synthesis_proposal.
+- Golden path "go to the red door" fires no proposal.
+- runtime_llm_calls_during_render remains 0.
+- Phase 3.5 through 7.8 guardrails still pass.
+
+Implemented:
+- jeenom/schemas.py: ArbitrationDecision gains proposed_handle and proposed_description fields.
+  Arbitrator sets these when it determines a new primitive can be synthesized from the SceneModel
+  API — handle need not be pre-declared in the registry.
+- jeenom/capability_arbitrator.py: LLMArbitrator prompt rewritten. Arbitrator now receives the
+  full SceneModel API surface (scene.find, agent_x/y/dir, manhattan_distance_from_agent, math).
+  Instructs LLM to reason: "can this request be expressed as fn(scene, selector) → ranked list?"
+  If yes → synthesize with proposed_handle + proposed_description. No longer limited to
+  synthesizable_handles — any pure spatial/logical computation is synthesizable.
+  arbitration_decision_json_schema updated with proposed_handle/proposed_description fields.
+- jeenom/capability_registry.py: register_dynamic(handle, description, fn) — creates a brand-new
+  registry entry for a handle that was not pre-declared. Used by the dynamic synthesis path.
+- jeenom/operator_station.py: PendingSynthesisProposal dataclass (handle, original_utterance,
+  intent, cap_match, similar_handles, proposed_description).
+- jeenom/operator_station.py: self.pending_synthesis_proposal added to session state.
+- jeenom/operator_station.py: _propose_synthesis() — accepts proposed_description for dynamic
+  handles. Builds SYNTHESIS PROPOSAL message. Sets pending state.
+- jeenom/operator_station.py: _find_similar_implemented() — returns up to 2 implemented
+  primitives in the same layer as the proposed handle.
+- jeenom/operator_station.py: handle_pending_synthesis_proposal() — resolves yes/no/redirect.
+  yes → _try_synthesize_primitive → execute_command on success.
+  no → clears pending, returns refusal message.
+  redirect → clears pending, re-enters handle_utterance with new utterance.
+- jeenom/operator_station.py: _arbitrate_gap synthesize branch prefers arbitrator's
+  proposed_handle/proposed_description; falls back to synthesizable_handles if absent.
+- jeenom/operator_station.py: _try_synthesize_primitive uses register_dynamic for handles
+  not in registry; register_synthesized for pre-declared synthesizable ones.
+- jeenom/operator_station.py: handle_utterance checks pending_synthesis_proposal before
+  pending_clarification. synthesis_proposal added to dispatch. reset() clears proposal.
+- evals/collaborative_synthesis_probe.py: 16 checks covering proposal, yes/no/redirect,
+  second-call, reset, and golden path.
+
+Eval:
+- Command:
+  python evals/collaborative_synthesis_probe.py
+- Requires gymnasium + minigrid environment.
+
 
 ### Phase 8 — GoToObject/general object variant
 Status: planned.

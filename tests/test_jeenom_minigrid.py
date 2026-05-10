@@ -2703,6 +2703,333 @@ class TestGroundingResultComposition(unittest.TestCase):
             "grounding.all_doors.ranked.manhattan.agent",
         )
 
+    def test_go_to_that_uses_last_grounded_answer_not_stale_delivery_target(self):
+        session = self._make_session(seed=2)
+        self._run_with_env(lambda: session.handle_utterance("which door is farthest"))
+        self._run_with_env(lambda: session.handle_utterance("and the second farthest"))
+        third = self._run_with_env(lambda: session.handle_utterance("and the third farthest"))
+        self.assertIn("third farthest=purple door@(0,3) distance=6", third)
+        self.assertIsNotNone(session.active_claims)
+        self.assertEqual(session.active_claims.last_grounded_target.color, "purple")
+
+        response = self._run_with_env(lambda: session.handle_utterance("go to that"))
+
+        self._assert_cached_success(session, response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the purple door")
+
+    def test_closest_and_second_closest_answer_composes_from_ranked_claims(self):
+        session = self._make_session(seed=2)
+        response = self._run_with_env(
+            lambda: session.handle_utterance("which door is the closest and second closest from you")
+        )
+
+        self.assertIn("GROUNDING ANSWER", response)
+        self.assertIn("closest=grey door@(3,0) distance=2", response)
+        self.assertIn("second closest=purple door@(0,3) distance=6", response)
+        self.assertIsNone(session.last_result)
+
+
+class TestLLMSemanticQueryPlanner(unittest.TestCase):
+    """Phase 7.75 — LLM emits typed query plans that drive 7.7 composition."""
+
+    def _run_with_env(self, fn):
+        def fake_build_env(env_id, render_mode):
+            return FullyObsWrapper(gym.make(env_id))
+
+        with patch("jeenom.run_demo.build_env", side_effect=fake_build_env):
+            return fn()
+
+    def _plan(
+        self,
+        *,
+        operation: str,
+        order: str | None = "ascending",
+        ordinal: int | None = None,
+        color: str | None = None,
+        distance_value: int | None = None,
+        answer_fields: list[str] | None = None,
+        required_task: bool = False,
+        preserved: list[str] | None = None,
+    ) -> dict:
+        required = ["grounding.all_doors.ranked.manhattan.agent"]
+        if required_task:
+            required.append("task.go_to_object.door")
+        return {
+            "object_type": "door",
+            "operation": operation,
+            "primitive_handle": "grounding.all_doors.ranked.manhattan.agent",
+            "metric": "manhattan",
+            "reference": "agent",
+            "order": order,
+            "ordinal": ordinal,
+            "color": color,
+            "exclude_colors": [],
+            "distance_value": distance_value,
+            "tie_policy": "clarify" if required_task else "display",
+            "answer_fields": answer_fields or ["target", "distance"],
+            "required_capabilities": required,
+            "preserved_constraints": preserved or [],
+        }
+
+    def _intent_payload(self, **overrides):
+        payload = {
+            "intent_type": "status_query",
+            "canonical_instruction": None,
+            "task_type": None,
+            "target": None,
+            "target_selector": None,
+            "grounding_query_plan": None,
+            "capability_status": "executable",
+            "knowledge_update": None,
+            "reference": None,
+            "status_query": "ground_target",
+            "claim_reference": None,
+            "control": None,
+            "required_capabilities": [],
+            "clear_memory": False,
+            "confidence": 0.97,
+            "reason": "Typed query plan from fake LLM.",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _make_session(self, transport, *, seed: int = 8) -> OperatorStationSession:
+        compiler = LLMCompiler(api_key="test-key", transport=transport)
+        return OperatorStationSession(
+            compiler_name="llm",
+            compiler=compiler,
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=seed,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+            max_loops=512,
+        )
+
+    def test_llm_plan_second_farthest_clarifies_tied_ordinal(self):
+        def transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                plan = self._plan(
+                    operation="select",
+                    order="descending",
+                    ordinal=2,
+                    required_task=True,
+                    preserved=["second", "farthest", "door", "manhattan"],
+                )
+                return self._intent_payload(
+                    intent_type="task_instruction",
+                    task_type="go_to_object",
+                    status_query=None,
+                    grounding_query_plan=plan,
+                    required_capabilities=plan["required_capabilities"],
+                )
+            return build_test_llm_transport()(request)
+
+        session = self._make_session(transport, seed=12)
+        response = self._run_with_env(
+            lambda: session.handle_utterance("can you navigate to the second farthest door")
+        )
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("ordinal falls inside a distance tie", response)
+        self.assertIn("green door@(9,0)", response)
+        self.assertIn("yellow door@(11,2)", response)
+        self.assertIsNone(session.last_result)
+
+    def test_llm_plan_rejected_when_it_drops_second_constraint(self):
+        def transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                plan = self._plan(
+                    operation="select",
+                    order="descending",
+                    ordinal=1,
+                    required_task=True,
+                    preserved=["farthest", "door", "manhattan"],
+                )
+                return self._intent_payload(
+                    intent_type="task_instruction",
+                    task_type="go_to_object",
+                    status_query=None,
+                    grounding_query_plan=plan,
+                    required_capabilities=plan["required_capabilities"],
+                )
+            return build_test_llm_transport()(request)
+
+        session = self._make_session(transport, seed=12)
+        response = self._run_with_env(
+            lambda: session.handle_utterance("can you navigate to the second farthest door")
+        )
+
+        self.assertIn("could not validate the semantic query plan", response)
+        self.assertIn("utterance says second", response)
+        self.assertIsNone(session.last_result)
+
+    def test_llm_plan_missing_metric_requests_semantic_clarification_then_resumes(self):
+        call_count = {"operator_intent": 0}
+
+        def transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                call_count["operator_intent"] += 1
+                if call_count["operator_intent"] == 1:
+                    plan = self._plan(
+                        operation="answer",
+                        order="ascending",
+                        answer_fields=["closest", "second_closest"],
+                        preserved=["closest", "second", "door"],
+                    )
+                    plan["metric"] = None
+                    plan["reference"] = None
+                    plan["primitive_handle"] = None
+                    plan["required_capabilities"] = []
+                    return self._intent_payload(
+                        grounding_query_plan=plan,
+                        required_capabilities=[],
+                    )
+                plan = self._plan(
+                    operation="answer",
+                    order="ascending",
+                    answer_fields=["closest", "second_closest"],
+                    preserved=["closest", "second", "door", "manhattan"],
+                )
+                return self._intent_payload(
+                    grounding_query_plan=plan,
+                    required_capabilities=plan["required_capabilities"],
+                )
+            return build_test_llm_transport()(request)
+
+        session = self._make_session(transport, seed=2)
+        clarify = self._run_with_env(
+            lambda: session.handle_utterance("which door is the closest and second closest from you")
+        )
+        self.assertIn("CLARIFY", clarify)
+        self.assertIn("distance metric", clarify)
+        self.assertIsNotNone(session.pending_clarification)
+
+        response = self._run_with_env(lambda: session.handle_utterance("use manhattan distance"))
+
+        self.assertIn("GROUNDING ANSWER", response)
+        self.assertIn("closest=grey door@(3,0) distance=2", response)
+        self.assertIn("second closest=purple door@(0,3) distance=6", response)
+        self.assertIsNone(session.pending_clarification)
+        self.assertIsNone(session.last_result)
+
+    def test_llm_plan_answers_red_door_distance(self):
+        def transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                plan = self._plan(
+                    operation="answer",
+                    color="red",
+                    answer_fields=["distance"],
+                    preserved=["red", "door", "distance"],
+                )
+                return self._intent_payload(
+                    grounding_query_plan=plan,
+                    required_capabilities=plan["required_capabilities"],
+                )
+            return build_test_llm_transport()(request)
+
+        session = self._make_session(transport, seed=8)
+        response = self._run_with_env(lambda: session.handle_utterance("how far is the red door"))
+
+        self.assertIn("GROUNDING ANSWER", response)
+        self.assertIn("red door@(10,7) distance=8", response)
+        self.assertIsNone(session.last_result)
+
+    def test_llm_plan_answers_green_door_existence(self):
+        def transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                plan = self._plan(
+                    operation="answer",
+                    color="green",
+                    answer_fields=["exists"],
+                    preserved=["green", "door", "exists"],
+                )
+                return self._intent_payload(
+                    grounding_query_plan=plan,
+                    required_capabilities=plan["required_capabilities"],
+                )
+            return build_test_llm_transport()(request)
+
+        session = self._make_session(transport, seed=8)
+        response = self._run_with_env(lambda: session.handle_utterance("is there a green door"))
+
+        self.assertIn("GROUNDING ANSWER", response)
+        self.assertIn("exists=false", response)
+        self.assertIsNone(session.last_result)
+
+    def test_llm_plan_distance_value_executes_unique_target(self):
+        def transport(request):
+            if request["method_name"] == "compile_operator_intent":
+                plan = self._plan(
+                    operation="select",
+                    distance_value=7,
+                    required_task=True,
+                    preserved=["distance", "7", "door"],
+                )
+                return self._intent_payload(
+                    intent_type="task_instruction",
+                    task_type="go_to_object",
+                    status_query=None,
+                    grounding_query_plan=plan,
+                    required_capabilities=plan["required_capabilities"],
+                )
+            return build_test_llm_transport()(request)
+
+        session = self._make_session(transport, seed=8)
+        response = self._run_with_env(
+            lambda: session.handle_utterance("go to the door with distance 7")
+        )
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the yellow door")
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+
+    def test_llm_plan_go_to_that_resolves_last_grounded_target(self):
+        def transport(request):
+            if (
+                request["method_name"] == "compile_operator_intent"
+                and request["user_payload"]["utterance"].strip().lower() == "go to that"
+            ):
+                plan = {
+                    "object_type": "door",
+                    "operation": "select",
+                    "primitive_handle": "grounding.claims.last_grounded_target",
+                    "metric": None,
+                    "reference": None,
+                    "order": None,
+                    "ordinal": None,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "clarify",
+                    "answer_fields": ["target"],
+                    "required_capabilities": [
+                        "grounding.claims.last_grounded_target",
+                        "task.go_to_object.door",
+                    ],
+                    "preserved_constraints": ["that"],
+                }
+                return self._intent_payload(
+                    intent_type="task_instruction",
+                    task_type="go_to_object",
+                    status_query=None,
+                    grounding_query_plan=plan,
+                    required_capabilities=plan["required_capabilities"],
+                )
+            return build_test_llm_transport()(request)
+
+        session = self._make_session(transport, seed=2)
+        self._run_with_env(lambda: session.handle_utterance("which door is farthest"))
+        self._run_with_env(lambda: session.handle_utterance("and the second farthest"))
+        self._run_with_env(lambda: session.handle_utterance("and the third farthest"))
+
+        response = self._run_with_env(lambda: session.handle_utterance("go to that"))
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the purple door")
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

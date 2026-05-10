@@ -133,6 +133,7 @@ class CapabilityRegistry:
     def __init__(self, manifest: PrimitiveManifest) -> None:
         self.manifest = manifest
         self._by_name = {spec.name: spec for spec in manifest.primitives}
+        self._synthesized_callables: dict[str, Any] = {}
 
     @classmethod
     def minigrid_default(cls) -> CapabilityRegistry:
@@ -169,6 +170,87 @@ class CapabilityRegistry:
             for spec in self.manifest.primitives
             if layer is None or spec.layer == layer
         )
+
+    def register_synthesized(self, handle: str, fn: Any) -> bool:
+        """Promote a synthesized primitive from synthesizable to implemented.
+
+        Updates the spec in-place so lookup() and compact_summary() reflect
+        the new status immediately. Stores the callable for dispatch.
+        Returns True if the primitive was known and synthesizable, False otherwise.
+        """
+        spec = self._by_name.get(handle)
+        if spec is None:
+            return False
+        if spec.implementation_status not in {"synthesizable"}:
+            return False
+        from .primitive_library import PrimitiveSpec as RuntimeSpec
+        promoted = RuntimeSpec(
+            name=spec.name,
+            consumes=tuple(spec.inputs),
+            produces=tuple(spec.outputs),
+            description=spec.description + " [synthesized]",
+            side_effects=tuple(spec.side_effects),
+            implementation_status="implemented",
+            safe_to_synthesize=False,
+            runtime_kind="python_synthesized",
+            runtime_value=handle,
+        )
+        from .schemas import PrimitiveSpec as SchemaSpec
+        promoted_schema = SchemaSpec(
+            name=promoted.name,
+            primitive_type=spec.primitive_type,
+            layer=spec.layer,
+            description=promoted.description,
+            inputs=list(promoted.consumes),
+            outputs=list(promoted.produces),
+            side_effects=list(promoted.side_effects),
+            implementation_status="implemented",
+            safe_to_synthesize=False,
+            runtime_binding={"kind": "python_synthesized", "value": handle},
+        )
+        self._by_name[handle] = promoted_schema
+        self._synthesized_callables[handle] = fn
+        # Keep manifest.primitives in sync so compact_summary() and help_text()
+        # immediately reflect the promoted status.
+        for i, p in enumerate(self.manifest.primitives):
+            if p.name == handle:
+                self.manifest.primitives[i] = promoted_schema
+                break
+        return True
+
+    def get_synthesized_callable(self, handle: str) -> Any | None:
+        """Return the validated callable for a synthesized primitive, or None."""
+        return self._synthesized_callables.get(handle)
+
+    def register_dynamic(self, handle: str, description: str, fn: Any) -> bool:
+        """Register a brand-new synthesized primitive that was not pre-declared.
+
+        Unlike register_synthesized, this creates the spec from scratch rather than
+        promoting an existing synthesizable entry. Used when the arbitrator proposes
+        a handle that does not exist in the registry yet.
+        Returns True on success, False if the handle already exists.
+        """
+        if handle in self._by_name:
+            return False
+        from .schemas import PrimitiveSpec as SchemaSpec
+        parts = handle.split(".")
+        layer = parts[0] if parts else "grounding"
+        new_spec = SchemaSpec(
+            name=handle,
+            primitive_type=layer,
+            layer=layer,
+            description=description + " [synthesized]",
+            inputs=["scene.door_candidates", "agent_pose"],
+            outputs=["grounded_target", "distance"],
+            side_effects=[],
+            implementation_status="implemented",
+            safe_to_synthesize=False,
+            runtime_binding={"kind": "python_synthesized", "value": handle},
+        )
+        self._by_name[handle] = new_spec
+        self.manifest.primitives.append(new_spec)
+        self._synthesized_callables[handle] = fn
+        return True
 
     def readiness_for_selector(self, selector: dict[str, Any] | None) -> dict[str, Any]:
         if selector is None:

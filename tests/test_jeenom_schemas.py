@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from jeenom.schemas import (
+    GroundingQueryPlan,
     OperatorIntent,
     PrimitiveManifest,
     PrimitiveCall,
@@ -293,6 +294,94 @@ class JeenomSchemaTests(unittest.TestCase):
 
         self.assertEqual(intent.status_query, "ground_target")
         self.assertEqual(intent.target_selector["relation"], "closest")
+
+    def test_grounding_query_plan_accepts_ranked_second_farthest_plan(self):
+        plan = GroundingQueryPlan.from_dict(
+            {
+                "object_type": "door",
+                "operation": "select",
+                "primitive_handle": "grounding.all_doors.ranked.manhattan.agent",
+                "metric": "manhattan",
+                "reference": "agent",
+                "order": "descending",
+                "ordinal": 2,
+                "color": None,
+                "exclude_colors": [],
+                "distance_value": None,
+                "tie_policy": "clarify",
+                "answer_fields": ["target", "distance"],
+                "required_capabilities": [
+                    "grounding.all_doors.ranked.manhattan.agent",
+                    "task.go_to_object.door",
+                ],
+                "preserved_constraints": ["second", "farthest", "door", "manhattan"],
+            }
+        )
+
+        self.assertEqual(plan.operation, "select")
+        self.assertEqual(plan.order, "descending")
+        self.assertEqual(plan.ordinal, 2)
+
+    def test_operator_intent_accepts_grounding_query_plan(self):
+        intent = OperatorIntent.from_dict(
+            {
+                "intent_type": "status_query",
+                "canonical_instruction": None,
+                "task_type": None,
+                "target": None,
+                "target_selector": None,
+                "grounding_query_plan": {
+                    "object_type": "door",
+                    "operation": "answer",
+                    "primitive_handle": "grounding.all_doors.ranked.manhattan.agent",
+                    "metric": "manhattan",
+                    "reference": "agent",
+                    "order": "ascending",
+                    "ordinal": None,
+                    "color": "red",
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "display",
+                    "answer_fields": ["distance"],
+                    "required_capabilities": ["grounding.all_doors.ranked.manhattan.agent"],
+                    "preserved_constraints": ["red", "door", "distance"],
+                },
+                "capability_status": "executable",
+                "knowledge_update": None,
+                "reference": None,
+                "status_query": "ground_target",
+                "claim_reference": None,
+                "control": None,
+                "required_capabilities": ["grounding.all_doors.ranked.manhattan.agent"],
+                "clear_memory": False,
+                "confidence": 0.9,
+                "reason": "Typed grounding answer plan.",
+            }
+        )
+
+        self.assertEqual(intent.grounding_query_plan["color"], "red")
+        self.assertEqual(intent.grounding_query_plan["answer_fields"], ["distance"])
+
+    def test_grounding_query_plan_rejects_missing_ranked_handle(self):
+        with self.assertRaises(SchemaValidationError):
+            GroundingQueryPlan.from_dict(
+                {
+                    "object_type": "door",
+                    "operation": "select",
+                    "primitive_handle": None,
+                    "metric": "manhattan",
+                    "reference": "agent",
+                    "order": "descending",
+                    "ordinal": 2,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "clarify",
+                    "answer_fields": ["target"],
+                    "required_capabilities": [],
+                    "preserved_constraints": ["second", "farthest"],
+                }
+            )
 
 
 if __name__ == "__main__":

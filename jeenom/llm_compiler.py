@@ -123,6 +123,7 @@ class CompilerBackend(ABC):
         scene_summary: dict[str, Any] | None = None,
         capability_manifest: dict[str, Any] | None = None,
         active_claims_summary: dict[str, Any] | None = None,
+        pending_proposal: dict[str, Any] | None = None,
     ) -> OperatorIntent:
         raise NotImplementedError
 
@@ -391,6 +392,7 @@ class SmokeTestCompiler(CompilerBackend):
         scene_summary: dict[str, Any] | None = None,
         capability_manifest: dict[str, Any] | None = None,
         active_claims_summary: dict[str, Any] | None = None,
+        pending_proposal: dict[str, Any] | None = None,
     ) -> OperatorIntent:
         self.record_call(
             method_name="compile_operator_intent",
@@ -398,6 +400,17 @@ class SmokeTestCompiler(CompilerBackend):
             success=True,
             used_fallback=False,
         )
+        # When a synthesis proposal is pending, classify acceptance/rejection first.
+        if pending_proposal:
+            normalized_quick = " ".join(utterance.lower().strip().split())
+            _ACCEPT = {"yes", "ok", "okay", "sure", "go ahead", "do it", "yep", "yeah",
+                       "please", "sounds good", "go for it", "correct", "that works"}
+            _REJECT = {"no", "cancel", "stop", "nope", "don't", "skip", "never mind",
+                       "nevermind", "abort"}
+            if normalized_quick in _ACCEPT:
+                return OperatorIntent(intent_type="accept_proposal", confidence=1.0, reason="")
+            if normalized_quick in _REJECT:
+                return OperatorIntent(intent_type="reject_proposal", confidence=1.0, reason="")
         normalized = " ".join(utterance.lower().strip().split())
         color_pattern = r"red|green|blue|yellow|purple|grey|gray"
         door_match = re.search(
@@ -413,22 +426,269 @@ class SmokeTestCompiler(CompilerBackend):
             "euclidean" if "euclidean" in normalized
             else "manhattan"
         )
-        if any(t in normalized for t in _SUPERLATIVE_TERMS) and "door" in normalized:
+        ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
+        is_navigation = re.search(
+            r"\b(go to|go the|reach|find|get to|head to|navigate to)\b",
+            normalized,
+        ) is not None
+        ordinal_match = re.search(
+            r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+"
+            r"(closest|nearest|farthest|furthest)\b",
+            normalized,
+        )
+        if (
+            not is_navigation
+            and
+            ("closest" in normalized or "nearest" in normalized)
+            and re.search(r"\b(second|2nd)\s+(closest|nearest)\b", normalized)
+            and "door" in normalized
+        ):
             return OperatorIntent(
                 intent_type="status_query",
                 status_query="ground_target",
-                target_selector={
+                target_selector=None,
+                grounding_query_plan={
                     "object_type": "door",
+                    "operation": "answer",
+                    "primitive_handle": ranked_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": "ascending",
+                    "ordinal": None,
                     "color": None,
                     "exclude_colors": [],
-                    "relation": "closest",
-                    "distance_metric": metric,
-                    "distance_reference": "agent",
+                    "distance_value": None,
+                    "tie_policy": "display",
+                    "answer_fields": ["closest", "second_closest"],
+                    "required_capabilities": [ranked_handle],
+                    "preserved_constraints": ["closest", "second", "door", metric],
                 },
-                capability_status="missing_skills",
-                required_capabilities=[f"grounding.farthest_door.{metric}.agent"],
-                confidence=0.85,
-                reason="Farthest-door grounding is not implemented.",
+                capability_status="executable" if metric == "manhattan" else "synthesizable",
+                required_capabilities=[ranked_handle],
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a closest/second-closest answer plan.",
+            )
+        if ordinal_match and "door" in normalized:
+            ordinal_map = {
+                "second": 2,
+                "2nd": 2,
+                "third": 3,
+                "3rd": 3,
+                "fourth": 4,
+                "4th": 4,
+                "fifth": 5,
+                "5th": 5,
+            }
+            ordinal = ordinal_map[ordinal_match.group(1)]
+            direction = ordinal_match.group(2)
+            order = "descending" if direction in {"farthest", "furthest"} else "ascending"
+            return OperatorIntent(
+                intent_type="task_instruction" if is_navigation else "status_query",
+                status_query=None if is_navigation else "ground_target",
+                task_type="go_to_object" if is_navigation else None,
+                target_selector=None,
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "select" if is_navigation else "answer",
+                    "primitive_handle": ranked_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": order,
+                    "ordinal": ordinal,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "clarify",
+                    "answer_fields": ["target", "distance"],
+                    "required_capabilities": (
+                        [ranked_handle, "task.go_to_object.door"]
+                        if is_navigation
+                        else [ranked_handle]
+                    ),
+                    "preserved_constraints": [ordinal_match.group(1), direction, "door", metric],
+                },
+                capability_status="executable" if metric == "manhattan" else "synthesizable",
+                required_capabilities=(
+                    [ranked_handle, "task.go_to_object.door"]
+                    if is_navigation
+                    else [ranked_handle]
+                ),
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a ranked ordinal query plan.",
+            )
+
+        distance_match = re.search(
+            r"\b(?:distance\s+(?:of\s+)?|with\s+(?:a\s+)?distance\s+(?:of\s+)?)(\d+)\b",
+            normalized,
+        )
+        if distance_match and "door" in normalized:
+            distance_value = int(distance_match.group(1))
+            return OperatorIntent(
+                intent_type="task_instruction" if is_navigation else "status_query",
+                status_query=None if is_navigation else "ground_target",
+                task_type="go_to_object" if is_navigation else None,
+                target_selector=None,
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "select" if is_navigation else "answer",
+                    "primitive_handle": ranked_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": "ascending",
+                    "ordinal": None,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": distance_value,
+                    "tie_policy": "clarify",
+                    "answer_fields": ["target", "distance"],
+                    "required_capabilities": (
+                        [ranked_handle, "task.go_to_object.door"]
+                        if is_navigation
+                        else [ranked_handle]
+                    ),
+                    "preserved_constraints": ["distance", str(distance_value), "door", metric],
+                },
+                capability_status="executable" if metric == "manhattan" else "synthesizable",
+                required_capabilities=(
+                    [ranked_handle, "task.go_to_object.door"]
+                    if is_navigation
+                    else [ranked_handle]
+                ),
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a distance-value query plan.",
+            )
+
+        color_mention = re.search(rf"\b(?P<color>{color_pattern})\s+door\b", normalized)
+        if color_mention and (
+            "how far" in normalized
+            or "distance" in normalized
+            or normalized.startswith("is there")
+            or normalized.startswith("do you see")
+        ):
+            color = "grey" if color_mention.group("color") == "gray" else color_mention.group("color")
+            wants_distance = "how far" in normalized or "distance" in normalized
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="ground_target",
+                target_selector=None,
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "answer",
+                    "primitive_handle": ranked_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": "ascending",
+                    "ordinal": None,
+                    "color": color,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "display",
+                    "answer_fields": ["distance"] if wants_distance else ["exists"],
+                    "required_capabilities": [ranked_handle],
+                    "preserved_constraints": [color, "door", "distance" if wants_distance else "exists"],
+                },
+                capability_status="executable" if metric == "manhattan" else "synthesizable",
+                required_capabilities=[ranked_handle],
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a color-specific answer query plan.",
+            )
+
+        if (
+            ("closest" in normalized or "nearest" in normalized)
+            and ("farthest" in normalized or "furthest" in normalized)
+            and "door" in normalized
+        ):
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="ground_target",
+                target_selector=None,
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "answer",
+                    "primitive_handle": ranked_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": "ascending",
+                    "ordinal": None,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "display",
+                    "answer_fields": ["closest", "farthest"],
+                    "required_capabilities": [ranked_handle],
+                    "preserved_constraints": ["closest", "farthest", "door", metric],
+                },
+                capability_status="executable" if metric == "manhattan" else "synthesizable",
+                required_capabilities=[ranked_handle],
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a closest/farthest answer plan.",
+            )
+
+        if is_navigation and re.search(r"\b(that|it|that one|the one)\b", normalized):
+            claim_handle = "grounding.claims.last_grounded_target"
+            return OperatorIntent(
+                intent_type="task_instruction",
+                task_type="go_to_object",
+                target_selector=None,
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "select",
+                    "primitive_handle": claim_handle,
+                    "metric": None,
+                    "reference": None,
+                    "order": None,
+                    "ordinal": None,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "clarify",
+                    "answer_fields": ["target"],
+                    "required_capabilities": [
+                        claim_handle,
+                        "task.go_to_object.door",
+                    ],
+                    "preserved_constraints": ["that"],
+                },
+                capability_status="executable",
+                required_capabilities=[claim_handle, "task.go_to_object.door"],
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted an active-claim reference plan.",
+            )
+
+        if any(t in normalized for t in _SUPERLATIVE_TERMS) and "door" in normalized:
+            return OperatorIntent(
+                intent_type="task_instruction" if is_navigation else "status_query",
+                status_query=None if is_navigation else "ground_target",
+                task_type="go_to_object" if is_navigation else None,
+                target_selector=None,
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "select" if is_navigation else "answer",
+                    "primitive_handle": ranked_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": "descending",
+                    "ordinal": 1,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "clarify" if is_navigation else "display",
+                    "answer_fields": ["farthest", "distance"],
+                    "required_capabilities": (
+                        [ranked_handle, "task.go_to_object.door"]
+                        if is_navigation
+                        else [ranked_handle]
+                    ),
+                    "preserved_constraints": ["farthest", "door", metric],
+                },
+                capability_status="executable" if metric == "manhattan" else "synthesizable",
+                required_capabilities=(
+                    [ranked_handle, "task.go_to_object.door"]
+                    if is_navigation
+                    else [ranked_handle]
+                ),
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a farthest-door query plan.",
             )
 
         if any(
@@ -462,7 +722,7 @@ class SmokeTestCompiler(CompilerBackend):
             for phrase in (
                 "in order", "in descending order", "in ascending order",
                 "ranked", "ranking", "rank them", "list them",
-                "all doors", "all of them", "list all",
+                "all doors", "all of them", "list all", "each door", "each of these doors",
             )
         )
 
@@ -474,21 +734,31 @@ class SmokeTestCompiler(CompilerBackend):
                 if "manhattan" in normalized
                 else "manhattan"
             )
+            ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
             return OperatorIntent(
                 intent_type="status_query",
                 status_query="ground_target",
-                target_selector={
+                target_selector=None,
+                grounding_query_plan={
                     "object_type": "door",
+                    "operation": "rank",
+                    "primitive_handle": ranked_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": "ascending",
+                    "ordinal": None,
                     "color": None,
                     "exclude_colors": [],
-                    "relation": "closest",
-                    "distance_metric": metric,
-                    "distance_reference": "agent",
+                    "distance_value": None,
+                    "tie_policy": "display",
+                    "answer_fields": ["ranked_doors", "distance"],
+                    "required_capabilities": [ranked_handle],
+                    "preserved_constraints": ["rank", "door", metric],
                 },
-                capability_status="missing_skills",
-                required_capabilities=[f"grounding.ranked_doors.{metric}.agent"],
-                confidence=0.85,
-                reason="Ranked listing requires grounding.ranked_doors — not closest.",
+                capability_status="executable" if metric == "manhattan" else "synthesizable",
+                required_capabilities=[ranked_handle],
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a ranked-door query plan.",
             )
 
         if ("closest" in normalized or "nearest" in normalized or "shortest" in normalized) and "door" in normalized:
@@ -632,6 +902,19 @@ class SmokeTestCompiler(CompilerBackend):
                 required_capabilities=[],
                 confidence=1.0,
                 reason="Deterministic operator-intent fallback parsed delivery target knowledge.",
+            )
+
+        if (
+            re.search(r"\b(clear|delete|forget|remove)\b", normalized)
+            and re.search(r"\b(target|delivery target)\b", normalized)
+        ):
+            return OperatorIntent(
+                intent_type="knowledge_update",
+                knowledge_update={"delivery_target": None},
+                target_selector=None,
+                required_capabilities=[],
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback parsed target clearing.",
             )
 
         if "same" in normalized or "again" in normalized:
@@ -811,6 +1094,7 @@ class LLMCompiler(CompilerBackend):
         scene_summary: dict[str, Any] | None = None,
         capability_manifest: dict[str, Any] | None = None,
         active_claims_summary: dict[str, Any] | None = None,
+        pending_proposal: dict[str, Any] | None = None,
     ) -> OperatorIntent:
         payload = {
             "utterance": utterance,
@@ -819,6 +1103,7 @@ class LLMCompiler(CompilerBackend):
             "scene_summary": scene_summary,
             "capability_manifest": capability_manifest,
             "active_claims_summary": active_claims_summary,
+            "pending_synthesis_proposal": pending_proposal,
             "supported": {
                 "intent_types": [
                     "task_instruction",
@@ -828,6 +1113,8 @@ class LLMCompiler(CompilerBackend):
                     "claim_reference",
                     "reset",
                     "quit",
+                    "accept_proposal",
+                    "reject_proposal",
                     "unsupported",
                     "ambiguous",
                 ],
@@ -910,10 +1197,66 @@ class LLMCompiler(CompilerBackend):
                 "task.go_to_object does NOT satisfy task.pickup. "
                 "A request for ranked or ordered listing of objects (e.g. 'all doors in "
                 "order', 'list doors by distance', 'doors closest to me ranked') requires "
-                "'grounding.ranked_doors.manhattan.agent' — this is NOT the same as "
+                "'grounding.all_doors.ranked.manhattan.agent' — this is NOT the same as "
                 "grounding.closest_door.manhattan.agent and must be listed separately. "
+                "GROUNDING_QUERY_PLAN: For any operator request that asks about visible "
+                "doors, distances, ordering, closest/farthest, ordinal ranks, color-specific "
+                "existence, or a target selected from scene grounding, emit a "
+                "grounding_query_plan. For non-grounding intents, set grounding_query_plan=null. "
+                "Do not answer the question yourself and do not choose an object yourself. "
+                "Describe the query. Use primitive_handle='grounding.all_doors.ranked.manhattan.agent' "
+                "for Manhattan ranked-door plans. Use operation='rank' for ranked/list displays, "
+                "operation='answer' for questions, and operation='select' for tasks that choose "
+                "a grounded target. Use order='ascending' for closest/nearest and order='descending' "
+                "for farthest/furthest/least-close. Convert ordinal words to integers: second=2, "
+                "third=3. Example: 'can you navigate to the second farthest door' -> "
+                "intent_type=task_instruction, task_type=go_to_object, grounding_query_plan={"
+                "object_type:'door', operation:'select', primitive_handle:"
+                "'grounding.all_doors.ranked.manhattan.agent', metric:'manhattan', "
+                "reference:'agent', order:'descending', ordinal:2, color:null, "
+                "exclude_colors:[], distance_value:null, tie_policy:'clarify', "
+                "answer_fields:['target','distance'], required_capabilities:["
+                "'grounding.all_doors.ranked.manhattan.agent','task.go_to_object.door'], "
+                "preserved_constraints:['second','farthest','door','manhattan']}. "
+                "Example: 'how far is the red door' -> status_query=ground_target and a "
+                "grounding_query_plan with color='red', answer_fields=['distance']. "
+                "Example: 'is there a green door' -> status_query=ground_target and a "
+                "grounding_query_plan with color='green', answer_fields=['exists']. "
+                "Example: 'which door is closest and which is farthest' -> answer_fields="
+                "['closest','farthest']. "
+                "Example: 'which door is closest and second closest' -> operation='answer', "
+                "order='ascending', ordinal=null, answer_fields=['closest','second_closest'], "
+                "preserved_constraints=['closest','second','door','manhattan']. "
+                "Use answer fields first_closest, second_closest, third_closest, "
+                "first_farthest, second_farthest, third_farthest for multi-answer "
+                "ranked questions; do not collapse 'second closest' to ordinal=1. "
+                "Reference requests such as 'go to that', 'go to it', or 'take me there' "
+                "after a grounding answer must also use grounding_query_plan, not a plain "
+                "target guess. Emit primitive_handle='grounding.claims.last_grounded_target', "
+                "operation='select', metric=null, reference=null, order=null, ordinal=null, "
+                "answer_fields=['target'], required_capabilities=["
+                "'grounding.claims.last_grounded_target','task.go_to_object.door'], and "
+                "preserved_constraints=['that'] or the actual pronoun used. "
+                "Requests to clear/delete/forget only the current delivery target should be "
+                "knowledge_update with knowledge_update={delivery_target:null}; this is not "
+                "a motion task. "
                 "For status queries and claim references with no grounding or task "
                 "requirements, emit required_capabilities=[]."
+                + (
+                    " PENDING SYNTHESIS PROPOSAL: The station has proposed building a new "
+                    "primitive and is awaiting operator approval. The pending proposal is in "
+                    "pending_synthesis_proposal in the payload. If the operator's utterance "
+                    "expresses agreement, confirmation, or approval of the proposal "
+                    "(e.g. 'yes', 'yes build it', 'go ahead', 'do it', 'sure', 'yes please', "
+                    "'I mean yes', 'build it', 'ok yes', 'yes that one'), emit "
+                    "intent_type='accept_proposal' with required_capabilities=[]. "
+                    "If the operator declines or cancels (e.g. 'no', 'cancel', 'stop', "
+                    "'don't build it', 'no thanks'), emit intent_type='reject_proposal' "
+                    "with required_capabilities=[]. "
+                    "Only fall back to other intent types if the utterance is clearly a "
+                    "new, unrelated instruction."
+                    if pending_proposal else ""
+                )
             ),
             user_payload=payload,
             fallback_call=lambda: self.fallback.compile_operator_intent(
@@ -922,6 +1265,7 @@ class LLMCompiler(CompilerBackend):
                 scene_summary=scene_summary,
                 capability_manifest=capability_manifest,
                 active_claims_summary=active_claims_summary,
+                pending_proposal=pending_proposal,
             ),
         )
 

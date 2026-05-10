@@ -48,6 +48,8 @@ OPERATOR_INTENT_TYPES = (
     "cache_query",
     "reset",
     "quit",
+    "accept_proposal",
+    "reject_proposal",
     "unsupported",
     "ambiguous",
 )
@@ -59,6 +61,9 @@ OPERATOR_REFERENCES = ("delivery_target", "last_target", "last_task")
 OPERATOR_SELECTOR_RELATIONS = ("closest", "unique")
 OPERATOR_DISTANCE_METRICS = ("manhattan", "euclidean")
 OPERATOR_DISTANCE_REFERENCES = ("agent",)
+GROUNDING_QUERY_OPERATIONS = ("list", "filter", "rank", "select", "answer")
+GROUNDING_QUERY_ORDERS = ("ascending", "descending")
+GROUNDING_QUERY_TIE_POLICIES = ("clarify", "display")
 OPERATOR_STATUS_QUERIES = (
     "status",
     "scene",
@@ -202,6 +207,14 @@ def _ensure_optional_str_enum(
             f"{label} must be one of: {', '.join(allowed)}"
         )
     return string_value
+
+
+def _ensure_optional_int(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SchemaValidationError(f"{label} must be an integer or null")
+    return value
 
 
 def _ensure_operator_target(value: Any, label: str) -> dict[str, Any] | None:
@@ -389,6 +402,125 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
     return result
 
 
+def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    plan = _ensure_dict(value, label)
+    required_keys = (
+        "object_type",
+        "operation",
+        "primitive_handle",
+        "metric",
+        "reference",
+        "order",
+        "ordinal",
+        "color",
+        "exclude_colors",
+        "distance_value",
+        "tie_policy",
+        "answer_fields",
+        "required_capabilities",
+        "preserved_constraints",
+    )
+    missing = [key for key in required_keys if key not in plan]
+    if missing:
+        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
+    extra = sorted(set(plan) - set(required_keys))
+    if extra:
+        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+
+    raw_exclude = plan.get("exclude_colors") or []
+    if not isinstance(raw_exclude, list):
+        raise SchemaValidationError(f"{label}.exclude_colors must be a list")
+    exclude_colors: list[str] = []
+    for idx, color in enumerate(raw_exclude):
+        validated = _ensure_optional_str_enum(
+            color,
+            OPERATOR_COLORS,
+            f"{label}.exclude_colors[{idx}]",
+        )
+        if validated is not None:
+            exclude_colors.append(validated)
+
+    primitive_handle = plan.get("primitive_handle")
+    if primitive_handle is not None:
+        primitive_handle = _ensure_str(primitive_handle, f"{label}.primitive_handle")
+
+    result = {
+        "object_type": _ensure_optional_str_enum(
+            plan.get("object_type"),
+            OPERATOR_OBJECT_TYPES,
+            f"{label}.object_type",
+        ),
+        "operation": _ensure_optional_str_enum(
+            plan.get("operation"),
+            GROUNDING_QUERY_OPERATIONS,
+            f"{label}.operation",
+        ),
+        "primitive_handle": primitive_handle,
+        "metric": _ensure_optional_str_enum(
+            plan.get("metric"),
+            OPERATOR_DISTANCE_METRICS,
+            f"{label}.metric",
+        ),
+        "reference": _ensure_optional_str_enum(
+            plan.get("reference"),
+            OPERATOR_DISTANCE_REFERENCES,
+            f"{label}.reference",
+        ),
+        "order": _ensure_optional_str_enum(
+            plan.get("order"),
+            GROUNDING_QUERY_ORDERS,
+            f"{label}.order",
+        ),
+        "ordinal": _ensure_optional_int(plan.get("ordinal"), f"{label}.ordinal"),
+        "color": _ensure_optional_str_enum(
+            plan.get("color"),
+            OPERATOR_COLORS,
+            f"{label}.color",
+        ),
+        "exclude_colors": exclude_colors,
+        "distance_value": _ensure_optional_int(
+            plan.get("distance_value"),
+            f"{label}.distance_value",
+        ),
+        "tie_policy": _ensure_optional_str_enum(
+            plan.get("tie_policy"),
+            GROUNDING_QUERY_TIE_POLICIES,
+            f"{label}.tie_policy",
+        ),
+        "answer_fields": _ensure_str_list(
+            plan.get("answer_fields"),
+            f"{label}.answer_fields",
+        ),
+        "required_capabilities": _ensure_str_list(
+            plan.get("required_capabilities"),
+            f"{label}.required_capabilities",
+        ),
+        "preserved_constraints": _ensure_str_list(
+            plan.get("preserved_constraints"),
+            f"{label}.preserved_constraints",
+        ),
+    }
+    if result["object_type"] != "door":
+        raise SchemaValidationError(f"{label}.object_type must be door")
+    if result["operation"] is None:
+        raise SchemaValidationError(f"{label}.operation must not be null")
+    ordinal = result["ordinal"]
+    if ordinal is not None and ordinal < 1:
+        raise SchemaValidationError(f"{label}.ordinal must be >= 1")
+    distance_value = result["distance_value"]
+    if distance_value is not None and distance_value < 0:
+        raise SchemaValidationError(f"{label}.distance_value must be >= 0")
+    if result["metric"] is not None and result["reference"] is None:
+        raise SchemaValidationError(f"{label}.reference is required when metric is set")
+    if result["operation"] in {"rank", "select"} and result["metric"] is not None:
+        handle = result["primitive_handle"]
+        if handle is None:
+            raise SchemaValidationError(f"{label}.primitive_handle is required for ranked plans")
+    return result
+
+
 @dataclass
 class PrimitiveCall:
     name: str
@@ -439,6 +571,31 @@ class TargetSelector:
 
 
 @dataclass
+class GroundingQueryPlan:
+    object_type: str
+    operation: str
+    primitive_handle: str | None = None
+    metric: str | None = None
+    reference: str | None = None
+    order: str | None = None
+    ordinal: int | None = None
+    color: str | None = None
+    exclude_colors: list[str] = field(default_factory=list)
+    distance_value: int | None = None
+    tie_policy: str | None = "clarify"
+    answer_fields: list[str] = field(default_factory=list)
+    required_capabilities: list[str] = field(default_factory=list)
+    preserved_constraints: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> GroundingQueryPlan:
+        plan = _ensure_grounding_query_plan(data, "GroundingQueryPlan")
+        if plan is None:
+            raise SchemaValidationError("GroundingQueryPlan must not be null")
+        return cls(**plan)
+
+
+@dataclass
 class PrimitiveSpec:
     name: str
     primitive_type: str
@@ -485,6 +642,7 @@ class OperatorIntent:
     claim_reference: str | None = None
     control: str | None = None
     target_selector: dict[str, Any] | None = None
+    grounding_query_plan: dict[str, Any] | None = None
     capability_status: str = "executable"
     required_capabilities: list[str] = field(default_factory=list)
     clear_memory: bool = False
@@ -540,6 +698,10 @@ class OperatorIntent:
             mapping.get("target_selector"),
             "OperatorIntent.target_selector",
         )
+        grounding_query_plan = _ensure_grounding_query_plan(
+            mapping.get("grounding_query_plan"),
+            "OperatorIntent.grounding_query_plan",
+        )
 
         canonical_instruction = mapping.get("canonical_instruction")
         if canonical_instruction is not None:
@@ -567,6 +729,7 @@ class OperatorIntent:
             claim_reference=claim_reference,
             control=control,
             target_selector=target_selector,
+            grounding_query_plan=grounding_query_plan,
             capability_status=capability_status or "executable",
             required_capabilities=required_capabilities,
             clear_memory=_ensure_bool(
@@ -592,9 +755,10 @@ class OperatorIntent:
                 not has_target
                 and self.reference not in OPERATOR_REFERENCES
                 and self.target_selector is None
+                and self.grounding_query_plan is None
             ):
                 raise SchemaValidationError(
-                    "task_instruction requires a supported target, reference, or target_selector"
+                    "task_instruction requires a supported target, reference, target_selector, or grounding_query_plan"
                 )
         elif self.intent_type == "knowledge_update":
             if self.knowledge_update is None:
@@ -602,9 +766,10 @@ class OperatorIntent:
             if (
                 self.knowledge_update.get("delivery_target") is None
                 and self.target_selector is None
+                and self.grounding_query_plan is None
             ):
                 raise SchemaValidationError(
-                    "selector-based knowledge_update requires target_selector"
+                    "selector-based knowledge_update requires target_selector or grounding_query_plan"
                 )
         elif self.intent_type == "status_query":
             if self.status_query is None:
@@ -866,6 +1031,8 @@ class ArbitrationDecision:
     suggested_handle: str | None = None
     clarification_prompt: str | None = None
     operator_message: str = ""
+    proposed_handle: str | None = None
+    proposed_description: str | None = None
 
     def __post_init__(self) -> None:
         if self.decision_type not in ARBITRATION_DECISION_TYPES:
@@ -1195,6 +1362,57 @@ def operator_intent_json_schema() -> dict[str, Any]:
         ],
         "additionalProperties": False,
     }
+    grounding_query_plan_schema = {
+        "type": ["object", "null"],
+        "properties": {
+            "object_type": {"type": ["string", "null"], "enum": [*OPERATOR_OBJECT_TYPES, None]},
+            "operation": {"type": ["string", "null"], "enum": [*GROUNDING_QUERY_OPERATIONS, None]},
+            "primitive_handle": {"type": ["string", "null"]},
+            "metric": {"type": ["string", "null"], "enum": [*OPERATOR_DISTANCE_METRICS, None]},
+            "reference": {"type": ["string", "null"], "enum": [*OPERATOR_DISTANCE_REFERENCES, None]},
+            "order": {"type": ["string", "null"], "enum": [*GROUNDING_QUERY_ORDERS, None]},
+            "ordinal": {"type": ["integer", "null"]},
+            "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
+            "exclude_colors": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(OPERATOR_COLORS)},
+            },
+            "distance_value": {"type": ["integer", "null"]},
+            "tie_policy": {
+                "type": ["string", "null"],
+                "enum": [*GROUNDING_QUERY_TIE_POLICIES, None],
+            },
+            "answer_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "required_capabilities": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "preserved_constraints": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": [
+            "object_type",
+            "operation",
+            "primitive_handle",
+            "metric",
+            "reference",
+            "order",
+            "ordinal",
+            "color",
+            "exclude_colors",
+            "distance_value",
+            "tie_policy",
+            "answer_fields",
+            "required_capabilities",
+            "preserved_constraints",
+        ],
+        "additionalProperties": False,
+    }
     return {
         "type": "object",
         "properties": {
@@ -1221,6 +1439,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
             },
             "control": {"type": ["string", "null"], "enum": [*OPERATOR_CONTROLS, None]},
             "target_selector": target_selector_schema,
+            "grounding_query_plan": grounding_query_plan_schema,
             "capability_status": {
                 "type": "string",
                 "enum": list(OPERATOR_CAPABILITY_STATUSES),
@@ -1250,6 +1469,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "claim_reference",
             "control",
             "target_selector",
+            "grounding_query_plan",
             "capability_status",
             "required_capabilities",
             "clear_memory",
