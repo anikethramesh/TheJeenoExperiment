@@ -382,8 +382,10 @@ class OperatorStationSession:
             if pending_response is not None:
                 return pending_response
         if command.kind == "unresolved":
-            self.log("deterministic fast path unresolved; compiling operator intent")
-            command = self.command_from_llm_intent(utterance)
+            command = self._command_from_active_claim_text(utterance) or command
+            if command.kind == "unresolved":
+                self.log("deterministic fast path unresolved; compiling operator intent")
+                command = self.command_from_llm_intent(utterance)
         self.log(f"classified utterance as {command.kind}")
         if command.kind == "quit":
             self.pending_clarification = None
@@ -465,6 +467,14 @@ class OperatorStationSession:
         # Runs every turn, deterministically. Matcher verdict overrides LLM's
         # capability_status when required_capabilities are declared. No weakening.
         cap_match = default_matcher.match(intent, self.capability_registry)
+        composition_command = self._try_compose_grounding_result(
+            utterance,
+            intent,
+            cap_match,
+            verif_result,
+        )
+        if composition_command is not None:
+            return composition_command
         if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
             return self._arbitrate_gap(utterance, intent, cap_match)
 
@@ -723,13 +733,6 @@ class OperatorStationSession:
             )
 
         if decision.decision_type == "substitute" and decision.suggested_handle:
-            # Only allow substitution when the arbitrator explicitly flags it safe.
-            if decision.safe_to_execute:
-                self.log(
-                    f"arbitration substitute approved: {decision.suggested_handle}"
-                )
-            # Regardless of safe_to_execute, report the suggestion but refuse execution
-            # unless safe_to_execute is explicitly true (and we trust the arbitrator).
             if not decision.safe_to_execute:
                 msg = decision.operator_message or (
                     f"Suggested substitute: {decision.suggested_handle}, "
@@ -741,15 +744,9 @@ class OperatorStationSession:
                     payload={"message": msg, "match": cap_match.compact()},
                     capability_match=cap_match,
                 )
-            # safe_to_execute=True — pass through with a note (rare; arbitrator must be sure)
-            msg = decision.operator_message or (
-                f"Using substitute capability: {decision.suggested_handle}"
-            )
-            return OperatorCommand(
-                kind="missing_skills",
-                utterance=utterance,
-                payload={"message": msg, "match": cap_match.compact()},
-                capability_match=cap_match,
+            self.log(f"arbitration substitute approved: {decision.suggested_handle}")
+            return self._execute_approved_substitute(
+                decision.suggested_handle, utterance, intent, cap_match, decision
             )
 
         # Default: refuse
@@ -781,6 +778,396 @@ class OperatorStationSession:
                 for d in doors
             ],
         }
+
+    def _try_compose_grounding_result(
+        self,
+        utterance: str,
+        intent: OperatorIntent,
+        cap_match: CapabilityMatchResult,
+        verif_result: IntentVerificationResult,
+    ) -> OperatorCommand | None:
+        if not verif_result.signals:
+            return None
+        signal_types = {signal.signal_type for signal in verif_result.signals}
+        if not signal_types.intersection(
+            {"superlative", "cardinality", "ordinal", "distance_value"}
+        ):
+            return None
+
+        normalized = _normalize_utterance(utterance)
+        if "euclidean" in normalized:
+            return None
+        claims = self._ensure_ranked_door_claims()
+        if isinstance(claims, str):
+            return OperatorCommand(
+                kind="missing_skills",
+                utterance=utterance,
+                payload={"message": claims, "match": cap_match.compact()},
+                capability_match=cap_match,
+            )
+        if not claims.ranked_scene_doors:
+            return OperatorCommand(
+                kind="ambiguous",
+                utterance=utterance,
+                payload={"message": "No visible doors are available to compose from."},
+            )
+
+        wants_task = self._utterance_requests_navigation(normalized) or (
+            intent.intent_type == "task_instruction"
+        )
+
+        distance = self._distance_value_from_utterance(normalized)
+        if distance is not None:
+            return self._compose_distance_reference(
+                utterance,
+                claims,
+                distance,
+                wants_task=wants_task,
+            )
+
+        if "ordinal" in signal_types:
+            ordinal_result = self._compose_ordinal_reference(
+                utterance,
+                claims,
+                normalized,
+                wants_task=wants_task,
+            )
+            if ordinal_result is not None:
+                return ordinal_result
+
+        if "cardinality" in signal_types and "superlative" not in signal_types:
+            return OperatorCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={
+                    "message": self._format_ranked_doors_from_claims(
+                        claims,
+                        include_navigation_hint=not wants_task,
+                    )
+                },
+                capability_match=cap_match,
+            )
+
+        if "farthest" in normalized or "furthest" in normalized or "least close" in normalized:
+            if wants_task:
+                return self._compose_extreme_task(
+                    utterance,
+                    claims,
+                    extreme="farthest",
+                    cap_match=cap_match,
+                )
+            return OperatorCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={"message": self._format_extreme_answer(claims, normalized)},
+                capability_match=cap_match,
+            )
+
+        if "closest" in normalized or "nearest" in normalized:
+            if wants_task:
+                return self._compose_extreme_task(
+                    utterance,
+                    claims,
+                    extreme="closest",
+                    cap_match=cap_match,
+                )
+            return OperatorCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={"message": self._format_extreme_answer(claims, normalized)},
+                capability_match=cap_match,
+            )
+
+        return None
+
+    def _ensure_ranked_door_claims(self) -> StationActiveClaims | str:
+        handle = "grounding.all_doors.ranked.manhattan.agent"
+        spec = self.capability_registry.lookup(handle)
+        if spec is None:
+            return f"Capability '{handle}' is not registered. I cannot compose that result."
+        if spec.implementation_status != "implemented":
+            return (
+                f"Capability '{handle}' is registered but not implemented "
+                f"(status={spec.implementation_status})."
+            )
+        scene = self._ensure_scene_model()
+        if scene is None:
+            return "No scene data available yet."
+        if self.active_claims is not None and self.active_claims.is_valid_for(scene):
+            return self.active_claims
+        doors = scene.find(object_type="door")
+        if not doors:
+            return "No doors visible in the current scene."
+        ranked = sorted(
+            [(scene.manhattan_distance_from_agent(d), d) for d in doors],
+            key=lambda pair: (pair[0], pair[1].color or "", pair[1].x, pair[1].y),
+        )
+        self._write_ranked_claims(
+            ranked,
+            {
+                "object_type": "door",
+                "relation": "all",
+                "distance_metric": "manhattan",
+                "distance_reference": "agent",
+                "primitive": handle,
+            },
+        )
+        if self.active_claims is None:
+            return "Unable to write active grounding claims."
+        return self.active_claims
+
+    def _command_from_active_claim_text(self, utterance: str) -> OperatorCommand | None:
+        normalized = _normalize_utterance(utterance)
+        if not self._utterance_requests_navigation(normalized):
+            return None
+        color = self._color_reference_in_utterance(normalized)
+        if color is None:
+            return None
+        claims = self._ensure_ranked_door_claims()
+        if isinstance(claims, str):
+            return None
+        matches = [entry for entry in claims.ranked_scene_doors if entry.color == color]
+        if len(matches) != 1:
+            return None
+        return OperatorCommand(
+            kind="task_instruction",
+            utterance=f"go to the {matches[0].color} door",
+        )
+
+    def _utterance_requests_navigation(self, normalized: str) -> bool:
+        return bool(
+            re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
+        )
+
+    def _distance_value_from_utterance(self, normalized: str) -> int | None:
+        match = re.search(
+            r"\b(?:distance\s+(?:of\s+)?|with\s+(?:a\s+)?distance\s+(?:of\s+)?)(\d+)\b",
+            normalized,
+        )
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def _color_reference_in_utterance(self, normalized: str) -> str | None:
+        color_pattern = "|".join(SUPPORTED_COLORS)
+        match = re.search(rf"\b(?P<color>{color_pattern})\s+(?:one|door)\b", normalized)
+        if match:
+            return _normalize_color(match.group("color"))
+        return None
+
+    def _entry_target_dict(self, entry: GroundedDoorEntry) -> dict[str, Any]:
+        return {"type": "door", "color": entry.color, "x": entry.x, "y": entry.y}
+
+    def _entry_label(self, entry: GroundedDoorEntry) -> str:
+        return f"{entry.color} door@({entry.x},{entry.y}) distance={entry.distance}"
+
+    def _task_command_for_entry(self, entry: GroundedDoorEntry, utterance: str) -> OperatorCommand:
+        return OperatorCommand(
+            kind="task_instruction",
+            utterance=f"go to the {entry.color} door",
+        )
+
+    def _candidate_clarification_for_entries(
+        self,
+        *,
+        utterance: str,
+        entries: list[GroundedDoorEntry],
+        resume_kind: str,
+        message: str,
+    ) -> OperatorCommand:
+        self.pending_clarification = PendingClarification(
+            clarification_type="target_selector_candidate_choice",
+            original_utterance=utterance,
+            resume_kind=resume_kind,
+            partial_selector={},
+            missing_field="candidate",
+            supported_values=sorted(
+                str(entry.color) for entry in entries if entry.color is not None
+            ),
+            candidates=[self._entry_target_dict(entry) for entry in entries],
+        )
+        return OperatorCommand(
+            kind="clarification",
+            utterance=utterance,
+            payload={"message": message},
+        )
+
+    def _compose_distance_reference(
+        self,
+        utterance: str,
+        claims: StationActiveClaims,
+        distance: int,
+        *,
+        wants_task: bool,
+    ) -> OperatorCommand:
+        matches = [entry for entry in claims.ranked_scene_doors if entry.distance == distance]
+        if not matches:
+            return OperatorCommand(
+                kind="ambiguous",
+                utterance=utterance,
+                payload={
+                    "message": (
+                        f"No visible door has Manhattan distance {distance} from the agent."
+                    )
+                },
+            )
+        if len(matches) > 1:
+            message = (
+                "CLARIFY\n"
+                f"Multiple doors have distance {distance}. Which one should I use?\n"
+                f"Options: {_format_targets([self._entry_target_dict(e) for e in matches])}"
+            )
+            if wants_task:
+                return self._candidate_clarification_for_entries(
+                    utterance=utterance,
+                    entries=matches,
+                    resume_kind="task_instruction",
+                    message=message,
+                )
+            return OperatorCommand(kind="clarification", utterance=utterance, payload={"message": message})
+        entry = matches[0]
+        if wants_task:
+            return self._task_command_for_entry(entry, utterance)
+        return OperatorCommand(
+            kind="clarification",
+            utterance=utterance,
+            payload={
+                "message": (
+                    "GROUNDING ANSWER\n"
+                    f"distance={distance}\n"
+                    f"target={self._entry_label(entry)}"
+                )
+            },
+        )
+
+    def _compose_ordinal_reference(
+        self,
+        utterance: str,
+        claims: StationActiveClaims,
+        normalized: str,
+        *,
+        wants_task: bool,
+    ) -> OperatorCommand | None:
+        match = re.search(
+            r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+(closest|nearest|farthest|furthest)\b",
+            normalized,
+        )
+        if not match:
+            return None
+        ordinal = match.group(1)
+        direction = match.group(2)
+        ordinal_to_index = {
+            "second": 1,
+            "2nd": 1,
+            "third": 2,
+            "3rd": 2,
+            "fourth": 3,
+            "4th": 3,
+            "fifth": 4,
+            "5th": 4,
+        }
+        rank = ordinal_to_index[ordinal]
+        ranked = list(claims.ranked_scene_doors)
+        if direction in {"farthest", "furthest"}:
+            ranked = list(reversed(ranked))
+        if rank >= len(ranked):
+            return OperatorCommand(
+                kind="ambiguous",
+                utterance=utterance,
+                payload={"message": "There are not enough visible doors for that ordinal request."},
+            )
+        entry = ranked[rank]
+        tied = [item for item in ranked if item.distance == entry.distance]
+        if len(tied) > 1:
+            message = (
+                "CLARIFY\n"
+                f"That ordinal falls inside a distance tie at distance {entry.distance}. "
+                "Which one should I use?\n"
+                f"Options: {_format_targets([self._entry_target_dict(e) for e in tied])}"
+            )
+            if wants_task:
+                return self._candidate_clarification_for_entries(
+                    utterance=utterance,
+                    entries=tied,
+                    resume_kind="task_instruction",
+                    message=message,
+                )
+            return OperatorCommand(kind="clarification", utterance=utterance, payload={"message": message})
+        if wants_task:
+            return self._task_command_for_entry(entry, utterance)
+        return OperatorCommand(
+            kind="clarification",
+            utterance=utterance,
+            payload={
+                "message": (
+                    "GROUNDING ANSWER\n"
+                    f"{ordinal} {direction}={self._entry_label(entry)}"
+                )
+            },
+        )
+
+    def _compose_extreme_task(
+        self,
+        utterance: str,
+        claims: StationActiveClaims,
+        *,
+        extreme: str,
+        cap_match: CapabilityMatchResult,
+    ) -> OperatorCommand:
+        entries = claims.ranked_scene_doors
+        distance = entries[0].distance if extreme == "closest" else entries[-1].distance
+        tied = [entry for entry in entries if entry.distance == distance]
+        if len(tied) > 1:
+            message = (
+                "CLARIFY\n"
+                f"That matched multiple {extreme} doors. Which one should I use?\n"
+                f"Options: {_format_targets([self._entry_target_dict(e) for e in tied])}"
+            )
+            return self._candidate_clarification_for_entries(
+                utterance=utterance,
+                entries=tied,
+                resume_kind="task_instruction",
+                message=message,
+            )
+        return self._task_command_for_entry(tied[0], utterance)
+
+    def _format_extreme_answer(self, claims: StationActiveClaims, normalized: str) -> str:
+        entries = claims.ranked_scene_doors
+        min_distance = entries[0].distance
+        max_distance = entries[-1].distance
+        closest = [entry for entry in entries if entry.distance == min_distance]
+        farthest = [entry for entry in entries if entry.distance == max_distance]
+        lines = ["GROUNDING ANSWER"]
+        if "closest" in normalized or "nearest" in normalized:
+            lines.append(
+                "closest="
+                + ", ".join(self._entry_label(entry) for entry in closest)
+            )
+        if "farthest" in normalized or "furthest" in normalized or "least close" in normalized:
+            lines.append(
+                "farthest="
+                + ", ".join(self._entry_label(entry) for entry in farthest)
+            )
+        if len(lines) == 1:
+            lines.append(self._entry_label(closest[0]))
+        if len(farthest) > 1 and any(
+            term in normalized for term in ("farthest", "furthest", "least close")
+        ):
+            lines.append("tie=" + ", ".join(self._entry_label(entry) for entry in farthest))
+        return "\n".join(lines)
+
+    def _format_ranked_doors_from_claims(
+        self,
+        claims: StationActiveClaims,
+        *,
+        include_navigation_hint: bool = True,
+    ) -> str:
+        lines = ["DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT"]
+        for i, entry in enumerate(claims.ranked_scene_doors):
+            lines.append(f"  {i + 1}. {self._entry_label(entry)}")
+        if include_navigation_hint:
+            lines.append("\n(I can navigate to any specific door — tell me which color.)")
+        return "\n".join(lines)
 
     def _question_override_command(self, utterance: str) -> OperatorCommand | None:
         normalized = _normalize_utterance(utterance)
@@ -1153,6 +1540,14 @@ class OperatorStationSession:
             self.pending_clarification = None
             self.log("new operator intent cancelled pending clarification")
             return self.execute_command(command)
+        # A new arbitration fired a clarification — _arbitrate_gap already replaced
+        # self.pending_clarification with the new pending. Return the new message directly.
+        if command.kind == "clarification":
+            return command.payload["message"]
+        # Arbitration refused or synthesized — no new pending was set, so clear the old one.
+        if command.kind in {"missing_skills", "synthesizable"}:
+            self.pending_clarification = None
+            return command.payload.get("message", "I cannot fulfil that request.")
 
         pending = self.pending_clarification
         if pending is None:
@@ -1331,7 +1726,10 @@ class OperatorStationSession:
         return self._execute_grounding_display(handle)
 
     def _execute_grounding_display(self, handle: str) -> str:
-        """Run the named grounding primitive against the current SceneModel and return text."""
+        """Run the named grounding primitive against the current SceneModel and return text.
+
+        Writes results to active_claims so follow-up turns resolve against this grounding.
+        """
         scene = self._ensure_scene_model()
         if scene is None:
             return "No scene data available yet."
@@ -1343,12 +1741,113 @@ class OperatorStationSession:
                 [(scene.manhattan_distance_from_agent(d), d) for d in doors],
                 key=lambda pair: (pair[0], pair[1].color or ""),
             )
+            self._write_ranked_claims(
+                ranked,
+                {
+                    "object_type": "door",
+                    "relation": "all",
+                    "distance_metric": "manhattan",
+                    "distance_reference": "agent",
+                    "primitive": handle,
+                },
+            )
             lines = ["DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT"]
             for i, (dist, d) in enumerate(ranked):
                 lines.append(f"  {i + 1}. {d.color} door@({d.x},{d.y}) distance={dist}")
             lines.append("\n(I can navigate to any specific door — tell me which color.)")
             return "\n".join(lines)
         return f"No display handler implemented for grounding primitive: {handle}"
+
+    def _execute_approved_substitute(
+        self,
+        handle: str,
+        utterance: str,
+        intent: OperatorIntent,
+        cap_match: CapabilityMatchResult,
+        decision: Any,
+    ) -> OperatorCommand:
+        """Execute a registry-validated substitute primitive in place of the missing one.
+
+        Only called when decision.safe_to_execute=True. The handle must be registered
+        and implemented — anything else is a hard refuse, not a silent fallback.
+        """
+        spec = self.capability_registry.lookup(handle)
+        if spec is None or spec.implementation_status != "implemented":
+            return OperatorCommand(
+                kind="missing_skills",
+                utterance=utterance,
+                payload={
+                    "message": (
+                        f"Approved substitute '{handle}' is not implemented in the registry. "
+                        "I did not execute."
+                    ),
+                    "match": cap_match.compact(),
+                },
+                capability_match=cap_match,
+            )
+
+        # Selector-grounding substitute (e.g., euclidean → manhattan for closest door).
+        # Re-ground using the substitute metric then continue with the original intent path.
+        if handle.startswith("grounding.closest_door."):
+            parts = handle.split(".")  # grounding, closest_door, <metric>, <reference>
+            metric = parts[2] if len(parts) > 2 else "manhattan"
+            reference = parts[3] if len(parts) > 3 else "agent"
+            base_selector: dict[str, Any] = dict(intent.target_selector or {})
+            base_selector.update({
+                "object_type": "door",
+                "relation": "closest",
+                "distance_metric": metric,
+                "distance_reference": reference,
+            })
+            grounded = self.ground_target_selector(base_selector)
+            if not grounded["ok"]:
+                return OperatorCommand(
+                    kind="ambiguous",
+                    utterance=utterance,
+                    payload={"message": grounded["message"]},
+                )
+            target = grounded["target"]
+            if intent.intent_type == "task_instruction":
+                return OperatorCommand(
+                    kind="task_instruction",
+                    utterance=f"go to the {target['color']} {target['type']}",
+                )
+            lines = [
+                "GROUNDED TARGET (substitute)",
+                f"substitute={handle}",
+                f"target={target.get('color')} {target.get('type')}"
+                f"@({target.get('x')},{target.get('y')})",
+            ]
+            if grounded.get("distance") is not None:
+                lines.append(f"distance={grounded['distance']}")
+            return OperatorCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={"message": "\n".join(lines)},
+                capability_match=cap_match,
+            )
+
+        # Display-grounding substitute (e.g., all_doors.ranked for a ranked query).
+        if "all_doors.ranked" in handle:
+            result_text = self._execute_grounding_display(handle)
+            return OperatorCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={"message": result_text},
+                capability_match=cap_match,
+            )
+
+        # Unknown primitive type — refuse clearly rather than silently doing nothing.
+        msg = decision.operator_message or (
+            f"Substitute '{handle}' was approved but no execution path exists for "
+            f"primitive type '{spec.layer}'. I did not execute."
+        )
+        return OperatorCommand(
+            kind="missing_skills",
+            utterance=utterance,
+            payload={"message": msg, "match": cap_match.compact()},
+            capability_match=cap_match,
+        )
 
     def _color_answer(self, normalized: str) -> str | None:
         color_pattern = "|".join(SUPPORTED_COLORS)

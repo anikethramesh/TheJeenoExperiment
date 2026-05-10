@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 SIGNAL_SUPERLATIVE = "superlative"   # farthest, furthest, most distant
 SIGNAL_CARDINALITY = "cardinality"   # all doors, sort/rank/list by distance
 SIGNAL_ORDINAL = "ordinal"           # second closest, third nearest
+SIGNAL_DISTANCE_VALUE = "distance_value"  # door with distance N
 
 _SUPERLATIVE_TERMS: frozenset[str] = frozenset([
     "farthest", "furthest", "most distant", "most far",
@@ -47,6 +48,10 @@ _CARDINALITY_TRIGGERS: list[tuple[re.Pattern[str], str]] = [
 
 _ORDINAL_PATTERN: re.Pattern[str] = re.compile(
     r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+(closest|nearest|farthest|furthest)\b"
+)
+
+_DISTANCE_VALUE_PATTERN: re.Pattern[str] = re.compile(
+    r"\b(?:distance\s+(?:of\s+)?|with\s+(?:a\s+)?distance\s+(?:of\s+)?)(?P<distance>\d+)\b"
 )
 
 
@@ -91,9 +96,26 @@ class IntentVerifier:
         metric = _detect_metric(normalized)
         signals: list[IntentSignal] = []
 
+        # ── Ordinal signals ────────────────────────────────────────────────
+        # Check ordinal before superlative so "second farthest" is not
+        # collapsed into plain "farthest".
+        m = _ORDINAL_PATTERN.search(normalized)
+        if m:
+            ordinal = m.group(1)
+            direction = m.group(2)
+            if direction in ("farthest", "furthest"):
+                handle = f"grounding.farthest_door.{metric}.agent"
+            else:
+                handle = f"grounding.nth_closest_door.{metric}.agent"
+            signals.append(IntentSignal(
+                signal_type=SIGNAL_ORDINAL,
+                detected_term=f"{ordinal} {direction}",
+                required_handle=handle,
+            ))
+
         # ── Superlative signals ────────────────────────────────────────────
         for term in _SUPERLATIVE_TERMS:
-            if term in normalized:
+            if not signals and term in normalized:
                 signals.append(IntentSignal(
                     signal_type=SIGNAL_SUPERLATIVE,
                     detected_term=term,
@@ -112,20 +134,14 @@ class IntentVerifier:
                     ))
                     break
 
-        # ── Ordinal signals ────────────────────────────────────────────────
-        if not signals:
-            m = _ORDINAL_PATTERN.search(normalized)
+        # ── Distance-value reference signals ──────────────────────────────
+        if not signals and "door" in normalized:
+            m = _DISTANCE_VALUE_PATTERN.search(normalized)
             if m:
-                ordinal = m.group(1)
-                direction = m.group(2)
-                if direction in ("farthest", "furthest"):
-                    handle = f"grounding.farthest_door.{metric}.agent"
-                else:
-                    handle = f"grounding.nth_closest_door.{metric}.agent"
                 signals.append(IntentSignal(
-                    signal_type=SIGNAL_ORDINAL,
-                    detected_term=f"{ordinal} {direction}",
-                    required_handle=handle,
+                    signal_type=SIGNAL_DISTANCE_VALUE,
+                    detected_term=f"distance {m.group('distance')}",
+                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
                 ))
 
         return self._inject(intent, signals)
@@ -167,8 +183,22 @@ class IntentVerifier:
         metric = _detect_metric(normalized)
         signals: list[IntentSignal] = []
 
+        m = _ORDINAL_PATTERN.search(normalized)
+        if m:
+            ordinal = m.group(1)
+            direction = m.group(2)
+            if direction in ("farthest", "furthest"):
+                handle = f"grounding.farthest_door.{metric}.agent"
+            else:
+                handle = f"grounding.nth_closest_door.{metric}.agent"
+            signals.append(IntentSignal(
+                signal_type=SIGNAL_ORDINAL,
+                detected_term=f"{ordinal} {direction}",
+                required_handle=handle,
+            ))
+
         for term in _SUPERLATIVE_TERMS:
-            if term in normalized:
+            if not signals and term in normalized:
                 signals.append(IntentSignal(
                     signal_type=SIGNAL_SUPERLATIVE,
                     detected_term=term,
@@ -186,19 +216,13 @@ class IntentVerifier:
                     ))
                     break
 
-        if not signals:
-            m = _ORDINAL_PATTERN.search(normalized)
+        if not signals and "door" in normalized:
+            m = _DISTANCE_VALUE_PATTERN.search(normalized)
             if m:
-                ordinal = m.group(1)
-                direction = m.group(2)
-                if direction in ("farthest", "furthest"):
-                    handle = f"grounding.farthest_door.{metric}.agent"
-                else:
-                    handle = f"grounding.nth_closest_door.{metric}.agent"
                 signals.append(IntentSignal(
-                    signal_type=SIGNAL_ORDINAL,
-                    detected_term=f"{ordinal} {direction}",
-                    required_handle=handle,
+                    signal_type=SIGNAL_DISTANCE_VALUE,
+                    detected_term=f"distance {m.group('distance')}",
+                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
                 ))
 
         if not signals:

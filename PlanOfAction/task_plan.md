@@ -429,7 +429,7 @@ Station-level clarification eval:
 Technical debt:
 - The manifest is currently a Python-defined MiniGrid manifest, not a discovered or generated registry.
 - Capability statuses are useful, but readiness language still needs to be unified across compiler, station, and primitive registry.
-- Missing-but-synthesizable primitives are detected but not synthesized until Phase 7.7.
+- Missing-but-synthesizable primitives are detected but not synthesized until Phase 7.8.
 - Manifest summaries must stay compact enough for LLM use while retaining enough detail for good arbitration.
 
 ### Phase 7.56 — Registry Unification
@@ -774,7 +774,7 @@ Design principles:
   the operator a precise response: "I can find the closest door but do not have a ranked
   listing primitive."
 - synthesizable is not executable. A synthesizable result means the capability is absent
-  but marked safe to generate. The station reports this; actual synthesis is Phase 7.7.
+  but marked safe to generate. The station reports this; actual synthesis is Phase 7.8.
   synthesizable does not unblock execution in this phase.
 - When multiple handles are required and some are missing, the matcher identifies all gaps
   at once, not just the first.
@@ -805,7 +805,7 @@ Scope:
 
 What this does NOT do:
 - Does not add new grounding, actuation, or sensing primitives — the matcher surfaces gaps,
-  it does not fill them. Adding new capabilities is Phase 7.7.
+  it does not fill them. Adding new capabilities is Phase 7.8.
 - Does not change the task-execution readiness check.
 - Does not change SceneModel or StationActiveClaims.
 - Does not add substrate-specific readiness contracts for actuation or sensing — those are
@@ -836,7 +836,7 @@ Success criteria:
 - cache_miss_during_render remains 0.
 
 Out of scope:
-- Generating or synthesizing missing primitives (Phase 7.7).
+- Generating or synthesizing missing primitives (Phase 7.8).
 - Substrate-specific readiness contracts for actuation and sensing primitives.
 - Multi-robot capability federation.
 - Capability versioning or deprecation.
@@ -1069,7 +1069,7 @@ Implemented:
 Out of scope:
   - LLM arbitration for substitute decision with re-routing.
   - Persistent arbitration trace across sessions.
-  - Synthesis of missing primitives (Phase 7.7).
+  - Synthesis of missing primitives (Phase 7.8).
 
 Technical debt:
   - substitute decision type is parsed and validated but does not yet re-route
@@ -1122,7 +1122,7 @@ Success criteria:
 - runtime_llm_calls_during_render remains 0.
 - cache_miss_during_render remains 0.
 - final_skill_plan == ["done"].
-- "euclidean" does not execute and reports unsupported metric until Phase 7.7.
+- "euclidean" does not execute and reports unsupported metric until primitive synthesis.
 - "cancel" clears pending clarification without running a task.
 - reset clears pending clarification.
 - status/cache queries work while keeping pending clarification.
@@ -1162,11 +1162,186 @@ Technical debt:
 - Broad clarification requires the capability registry plus future primitive synthesis/readiness machinery, not more phrase patches.
 
 
-### Phase 7.7 — Validated Grounding Primitive Synthesis
+### Phase 7.7 — Grounding Result Composition
+Status: done.
+
+Goal:
+Use outputs from existing registered grounding/query primitives to answer operator questions or
+produce grounded targets for existing go_to_object tasks. Composition must use registered
+primitive outputs, SceneModel, and ActiveClaims. It must not invent capabilities, bypass the
+registry, or weaken operator intent.
+
+Core rule:
+- The station composes from the registered primitive handle:
+  - grounding.all_doors.ranked.manhattan.agent
+- If no ranked claim exists, the station refreshes it through the registered ranked primitive.
+- If the ranked claim is stale, the station refreshes it before composing.
+- Unsupported metrics still go through missing/synthesizable capability handling.
+
+Supported composition:
+- closest = ranked[0]
+- farthest = ranked[-1], unless tied
+- second closest = ranked[1]
+- color reference = matching object in the active ranked claim
+- distance reference = matching object(s) in the active ranked claim
+- answer query = display composed result
+- task query = compose grounded target, then run existing go_to_object
+
+Tie handling:
+- Answer queries display ties.
+- Task execution with tied targets asks clarification and does not execute until resolved.
+- Second/ordinal target execution asks clarification if the requested rank is tied.
+- The station must never silently pick from ties.
+
+Implemented:
+- Added composition from StationActiveClaims ranked door outputs.
+- "which door is closest and which is farthest?" returns both from the ranked claim.
+- "go to the farthest door" clarifies on a tied farthest result.
+- A color answer such as "red" resumes the tied-target clarification and runs go_to_object.
+- "go to the second closest door" composes ranked[1] into a go_to_object task.
+- "go to the door with a distance of 7" resolves from ranked claims when the match is unique.
+- After a ranked display, "go to the red one" resolves using active claims.
+- Added tests/test_jeenom_minigrid.py::TestGroundingResultComposition.
+- Added evals/grounding_composition_probe.py.
+
+Proved:
+- Composition uses grounding.all_doors.ranked.manhattan.agent as the primitive source.
+- Answer queries do not execute tasks.
+- Task queries still execute through the existing cached JEENOM go_to_object path.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+- Ties are surfaced to the operator instead of silently selected.
+- "second farthest" does not degrade into "farthest"; if the requested ordinal rank is tied,
+  the station asks for a candidate instead of moving.
+
+Test plan:
+- python evals/grounding_composition_probe.py
+- python -m pytest -q tests/test_jeenom_minigrid.py -k GroundingResultComposition
+- python -m pytest -q tests/test_jeenom_schemas.py tests/test_jeenom_minigrid.py
+
+Technical debt:
+- Composition is currently over ranked visible doors only.
+- Color-only follow-up references work when a current ranked claim exists; broader pronoun/reference
+  resolution still needs a more general discourse model.
+- Ties are handled at the station layer, but multi-turn candidate dialogue is still single-pending
+  clarification only.
+- Semantic signal extraction still relies on deterministic text patterns as a safety verifier.
+  This is not the desired long-term understanding layer. Phase 7.75 replaces this with an
+  LLM-emitted typed semantic query plan plus deterministic validation.
+- This does not add new grounding primitives; Euclidean and other metrics remain future synthesis work.
+
+Out of scope:
+- Euclidean distance
+- primitive synthesis
+- non-door objects
+- left/right/front/behind
+- continuous-world execution
+- pickup/open/unlock
+- blocked-path replan
+
+### Phase 7.75 — LLM Semantic Query Planner
+Status: next.
+
+Goal:
+Make the LLM solve the language-understanding part by emitting a typed semantic query plan,
+instead of relying on regex-like signal extraction for ranked/superlative/ordinal grounding.
+
+Core rule:
+- The LLM may interpret the operator's language.
+- The LLM must not choose objects or answer from imagination.
+- The LLM emits a typed GroundingQueryPlan.
+- JEENOM validates that plan against the CapabilityRegistry, SceneModel, and ActiveClaims.
+- Only validated plans are composed into answers or existing go_to_object tasks.
+
+Why this phase exists:
+- Phase 7.7 proved the composition substrate works once the intended ranked/ordinal operation
+  is known.
+- The remaining weakness is semantic parsing: phrases such as "second farthest" should be
+  understood by the LLM as an ordinal over a ranked set, not recovered by deterministic patterns.
+- Regex/verifier logic remains as a safety backstop during the transition, but it should no
+  longer be the primary semantic parser after this phase.
+
+New schema:
+- GroundingQueryPlan:
+  - object_type: door
+  - operation: list | filter | rank | select | answer
+  - primitive_handle: registered capability handle, if known
+  - metric: manhattan | euclidean | None
+  - reference: agent | None
+  - order: ascending | descending | None
+  - ordinal: integer | None
+  - color: supported color | None
+  - exclude_colors: list[supported color]
+  - distance_value: integer | None
+  - tie_policy: clarify | display
+  - answer_fields: list[str]
+  - required_capabilities: list[str]
+  - preserved_constraints: list[str]
+
+Implementation:
+- Add GroundingQueryPlan schema and validation helpers.
+- Extend OperatorIntent with optional grounding_query_plan.
+- Update operator-intent LLM prompt to use the compact CapabilityRegistry and emit
+  grounding_query_plan for grounding/status/task requests.
+- Update SmokeTestCompiler only as a deterministic fixture for tests; do not grow it into the
+  production parser.
+- Add validation that the plan preserves important operator constraints:
+  - ordinal words such as second/third must appear as ordinal values.
+  - farthest/furthest/least close must produce descending ranking semantics.
+  - closest/nearest must produce ascending ranking semantics.
+  - explicit colors and exclusions must be preserved.
+  - explicit metrics must be preserved.
+- Convert valid GroundingQueryPlan into the existing Phase 7.7 composition path.
+- If the plan needs a missing/synthesizable primitive, route through capability matching and
+  arbitration; do not execute.
+- Keep runtime execution unchanged.
+
+Success criteria:
+- "can you navigate to the second farthest door" produces a plan with:
+  - operation=select
+  - primitive_handle=grounding.all_doors.ranked.manhattan.agent
+  - order=descending
+  - ordinal=2
+  - tie_policy=clarify
+- "which door is closest and which is farthest?" produces an answer plan over the ranked handle.
+- "how far is the red door?" produces a distance answer plan using the ranked/scene grounding
+  substrate, not delivery_target status.
+- "is there a green door?" produces a filter/answer plan and returns yes/no from SceneModel.
+- "go to the door with distance 7" produces distance_value=7 and executes only if unique.
+- "rank the doors from nearest to farthest" produces a ranked display plan.
+- "go to the closest door using Euclidean distance" routes to synthesizable/missing handling and
+  does not execute.
+- The deterministic verifier catches LLM constraint dropping during tests, but normal successful
+  paths are driven by grounding_query_plan, not pattern-only extraction.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+- Phase 3.5 through 7.7 guardrails still pass.
+
+Test plan:
+- Unit tests for GroundingQueryPlan schema validation.
+- Fake-LLM tests that emit correct typed plans for second farthest, closest/farthest answer,
+  red-door distance, green-door existence, distance-value selection, and ranked display.
+- Fake-LLM negative tests where constraints are dropped; validator must reject.
+- Live eval probe for OpenRouter that prints the raw typed query plan for a small suite of
+  language variants.
+- Station integration tests proving valid query plans compose through Phase 7.7.
+
+Out of scope:
+- Primitive synthesis
+- Euclidean implementation
+- non-door objects
+- left/right/front/behind
+- continuous-world execution
+- pickup/open/unlock
+- blocked-path replan
+- removing the verifier entirely; it remains a safety backstop until the planner is proven.
+
+### Phase 7.8 — Validated Grounding Primitive Synthesis
 Status: planned.
 
 Goal:
-Generate missing pure scene/query primitives when a grounded operator request requires a deterministic primitive that does not exist yet.
+Generate missing pure scene/query primitives when a grounded operator request requires a
+deterministic primitive that does not exist yet.
 
 Example:
 - operator: "go to the closest door using Euclidean distance"
@@ -1196,7 +1371,7 @@ Success criteria:
 - The final task still uses the existing go_to_object pipeline.
 - runtime_llm_calls_during_render remains 0.
 - cache_miss_during_render remains 0.
-- Phase 3.5, 4, 5, 6, 7, and 7.5 guardrails still pass.
+- Phase 3.5 through 7.7 guardrails still pass.
 
 Out of scope:
 - motion-control primitive synthesis

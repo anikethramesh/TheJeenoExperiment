@@ -2585,5 +2585,124 @@ class TestStationActiveClaims(unittest.TestCase):
         self.assertFalse(session.active_claims.is_valid_for(fake_scene))
 
 
+class TestGroundingResultComposition(unittest.TestCase):
+    """Phase 7.7 — compose answers/tasks from registered ranked-door grounding claims."""
+
+    def _make_session(
+        self,
+        render_mode: str = "none",
+        *,
+        seed: int = 8,
+    ) -> OperatorStationSession:
+        return OperatorStationSession(
+            compiler=SmokeTestCompiler(),
+            compiler_name="smoke",
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=seed,
+            render_mode=render_mode,
+            memory_root=Path(tempfile.mkdtemp()),
+            max_loops=512,
+        )
+
+    def _run_with_env(self, fn):
+        def fake_build_env(env_id, render_mode):
+            return FullyObsWrapper(gym.make(env_id))
+
+        with patch("jeenom.run_demo.build_env", side_effect=fake_build_env):
+            return fn()
+
+    def _assert_cached_success(self, session: OperatorStationSession, response: str) -> None:
+        self.assertIn("RUN COMPLETE", response)
+        self.assertIn("final_skill_plan=['done']", response)
+        self.assertIsNotNone(session.last_result)
+        self.assertTrue(session.last_result["final_state"]["task_complete"])
+        self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
+        self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+
+    def test_closest_and_farthest_query_composes_ranked_claim_answer(self):
+        session = self._make_session()
+        response = self._run_with_env(
+            lambda: session.handle_utterance("which door is closest and which is farthest")
+        )
+
+        self.assertIn("GROUNDING ANSWER", response)
+        self.assertIn("closest=purple door@(4,0) distance=5", response)
+        self.assertIn("farthest=", response)
+        self.assertIn("blue door@(12,3) distance=8", response)
+        self.assertIn("red door@(10,7) distance=8", response)
+        self.assertIn("tie=", response)
+        self.assertIsNone(session.last_result)
+        self.assertIsNotNone(session.active_claims)
+
+    def test_go_to_farthest_door_clarifies_when_farthest_is_tied(self):
+        session = self._make_session()
+        response = self._run_with_env(lambda: session.handle_utterance("go to the farthest door"))
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("multiple farthest", response)
+        self.assertIn("blue door@(12,3)", response)
+        self.assertIn("red door@(10,7)", response)
+        self.assertIsNone(session.last_result)
+        self.assertIsNotNone(session.pending_clarification)
+
+        resumed = self._run_with_env(lambda: session.handle_utterance("red"))
+        self._assert_cached_success(session, resumed)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+
+    def test_go_to_second_closest_door_composes_ranked_target_and_executes(self):
+        session = self._make_session()
+        response = self._run_with_env(
+            lambda: session.handle_utterance("go to the second closest door")
+        )
+
+        self._assert_cached_success(session, response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the yellow door")
+
+    def test_second_farthest_door_does_not_degrade_to_farthest(self):
+        session = self._make_session(seed=12)
+        response = self._run_with_env(
+            lambda: session.handle_utterance("can you navigate to the second farthest door")
+        )
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("ordinal falls inside a distance tie", response)
+        self.assertIn("green door@(9,0)", response)
+        self.assertIn("yellow door@(11,2)", response)
+        self.assertIsNone(session.last_result)
+
+    def test_distance_reference_uses_ranked_claims_and_executes_unique_match(self):
+        session = self._make_session()
+        response = self._run_with_env(
+            lambda: session.handle_utterance("can you go to the door with a distance of 7")
+        )
+
+        self._assert_cached_success(session, response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the yellow door")
+
+    def test_color_reference_after_ranked_display_uses_active_claims(self):
+        session = self._make_session()
+        ranked = self._run_with_env(
+            lambda: session.handle_utterance("rank all the doors by manhattan distance")
+        )
+        self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT", ranked)
+        self.assertIsNotNone(session.active_claims)
+
+        response = self._run_with_env(lambda: session.handle_utterance("go to the red one"))
+        self._assert_cached_success(session, response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+
+    def test_ranked_composition_uses_registered_primitive_handle(self):
+        session = self._make_session()
+        self._run_with_env(
+            lambda: session.handle_utterance("which door is closest and which is farthest")
+        )
+
+        self.assertIsNotNone(session.active_claims)
+        self.assertEqual(
+            session.active_claims.last_grounding_query.get("primitive"),
+            "grounding.all_doors.ranked.manhattan.agent",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
