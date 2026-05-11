@@ -8,10 +8,10 @@ Verifies that:
 - Signals inject the correct required_capabilities handles.
 - No double-injection when LLM already declared the handle.
 - Normal queries (closest, red door) produce no signals.
-- Full session: "go to the farthest door" → missing_skills, no task executed.
-- Full session: "distance of all the doors" → missing_skills.
-- Full session: "sort the doors by distance" → missing_skills.
-- Full session: "second closest door" → missing_skills.
+- Full session: "go to the farthest door" → executes task successfully.
+- Full session: "distance of all the doors" → displays ranked list.
+- Full session: "sort the doors by distance" → displays ranked list.
+- Full session: "second closest door" → clarifies on tie.
 - Golden path "go to the red door" still works after IntentVerifier added.
 """
 from __future__ import annotations
@@ -102,7 +102,7 @@ def main() -> int:
             any(s.signal_type == SIGNAL_SUPERLATIVE for s in result.signals)
         )
         checks[f"superlative_injects_handle_{label}"] = (
-            "grounding.farthest_door.manhattan.agent" in enriched.required_capabilities
+            "grounding.all_doors.ranked.manhattan.agent" in enriched.required_capabilities
         )
 
     # ── 3. CARDINALITY signals ─────────────────────────────────────────────
@@ -119,15 +119,15 @@ def main() -> int:
         key = utterance[:30].replace(" ", "_")
         checks[f"cardinality_{key}"] = (
             any(s.signal_type == SIGNAL_CARDINALITY for s in result.signals)
-            and "grounding.ranked_doors.manhattan.agent" in enriched.required_capabilities
+            and "grounding.all_doors.ranked.manhattan.agent" in enriched.required_capabilities
         )
 
     # ── 4. ORDINAL signals ─────────────────────────────────────────────────
     ordinal_cases = [
-        ("go to the second closest door", "grounding.nth_closest_door.manhattan.agent", SIGNAL_ORDINAL),
-        ("go to the third nearest door", "grounding.nth_closest_door.manhattan.agent", SIGNAL_ORDINAL),
+        ("go to the second closest door", "grounding.all_doors.ranked.manhattan.agent", SIGNAL_ORDINAL),
+        ("go to the third nearest door", "grounding.all_doors.ranked.manhattan.agent", SIGNAL_ORDINAL),
         # "second farthest" — superlative fires first (farthest in term list), same handle
-        ("go to the second farthest door", "grounding.farthest_door.manhattan.agent", None),
+        ("go to the second farthest door", "grounding.all_doors.ranked.manhattan.agent", None),
     ]
     for utterance, expected_handle, expected_signal in ordinal_cases:
         enriched, result = verifier.enrich(utterance, base_intent)
@@ -143,12 +143,12 @@ def main() -> int:
     already_declared = OperatorIntent(
         intent_type="status_query",
         status_query="ground_target",
-        required_capabilities=["grounding.farthest_door.manhattan.agent"],
+        required_capabilities=["grounding.all_doors.ranked.manhattan.agent"],
         confidence=0.9,
     )
     enriched_dup, result_dup = verifier.enrich("go to the farthest door", already_declared)
     checks["no_double_injection"] = (
-        enriched_dup.required_capabilities.count("grounding.farthest_door.manhattan.agent") == 1
+        enriched_dup.required_capabilities.count("grounding.all_doors.ranked.manhattan.agent") == 1
     )
     checks["no_injection_when_already_declared"] = result_dup.injected_handles == []
 
@@ -163,7 +163,7 @@ def main() -> int:
         _, result = verifier.enrich(utterance, base_intent)
         checks[f"no_signal_{utterance[:20].replace(' ','_')}"] = not result.has_signals
 
-    # ── 7. Full session: farthest door → missing_skills, no task ──────────
+    # ── 7. Full session: farthest door → completes successfully ──────────
     session = _make_session()
     _run(lambda: session.handle_utterance("go to the red door"))
     task_ran = [False]
@@ -175,38 +175,38 @@ def main() -> int:
 
     session.run_task = tracking_run_task
     result_far = _run(lambda: session.handle_utterance("go to the farthest door"))
-    checks["farthest_returns_missing_skills"] = "MISSING" in result_far.upper()
-    checks["farthest_does_not_execute_task"] = not task_ran[0]
+    checks["farthest_completes_successfully"] = "task_complete=True" in result_far
+    checks["farthest_does_execute_task"] = task_ran[0]
 
     print("FARTHEST DOOR response")
     print(result_far)
     print()
 
-    # ── 8. Full session: "distance of all the doors" → missing_skills ──────
+    # ── 8. Full session: "distance of all the doors" → returns ranked list ──────
     session2 = _make_session()
     _run(lambda: session2.handle_utterance("go to the red door"))
     result_all = _run(lambda: session2.handle_utterance("what is the distance of all the doors from you"))
-    checks["all_doors_returns_missing_skills"] = "MISSING" in result_all.upper()
+    checks["all_doors_returns_ranked_list"] = "RANKED BY" in result_all.upper()
 
     print("ALL DOORS DISTANCE response")
     print(result_all)
     print()
 
-    # ── 9. Full session: "sort doors by distance" → missing_skills ─────────
+    # ── 9. Full session: "sort doors by distance" → returns ranked list ─────────
     session3 = _make_session()
     _run(lambda: session3.handle_utterance("go to the red door"))
     result_sort = _run(lambda: session3.handle_utterance("can you sort the doors by distance"))
-    checks["sort_doors_returns_missing_skills"] = "MISSING" in result_sort.upper()
+    checks["sort_doors_returns_ranked_list"] = "RANKED BY" in result_sort.upper()
 
     print("SORT DOORS response")
     print(result_sort)
     print()
 
-    # ── 10. Full session: "second closest" → missing_skills ───────────────
+    # ── 10. Full session: "second closest" → clarifies on tie ───────────────
     session4 = _make_session()
     _run(lambda: session4.handle_utterance("go to the red door"))
     result_ord = _run(lambda: session4.handle_utterance("go to the second closest door"))
-    checks["second_closest_returns_missing_skills"] = "MISSING" in result_ord.upper()
+    checks["second_closest_returns_clarify"] = "CLARIFY" in result_ord.upper()
 
     print("SECOND CLOSEST response")
     print(result_ord)

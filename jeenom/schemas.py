@@ -1733,6 +1733,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "color",
             "exclude_colors",
             "distance_value",
+            "comparison",
             "tie_policy",
             "answer_fields",
             "required_capabilities",

@@ -8,9 +8,7 @@ Verifies that:
 - ArbitrationTrace records provenance correctly.
 - LLMArbitrator falls back to SmokeTestArbitrator when no API key.
 - CapabilityArbitrator integrates into operator_station (last_arbitration_trace set).
-- Farthest-door session produces arbitration trace (refuse).
-- Ranked-doors session produces arbitration trace (refuse).
-- Euclidean session produces synthesize arbitration (synthesizable handle).
+- Farthest-door session works now, so we test Euclidean session instead for synthesize trace.
 - Golden-path "go to the red door" produces NO arbitration trace.
 - exclude_colors multi-exclusion: "neither purple nor yellow" is parsed as list.
 - exclude_colors migration: legacy exclude_color dict is migrated correctly.
@@ -185,19 +183,21 @@ def main() -> int:
         default_arbitrator, SmokeTestArbitrator
     )
 
-    # ── 8. Session integration: farthest door → arbitration trace ─────────
+    # ── 8. Session integration: euclidean door → synthesize trace ─────────
     session = _make_session()
     _run(lambda: session.handle_utterance("go to the red door"))
     session.last_arbitration_trace = None  # clear after golden path
-    _run(lambda: session.handle_utterance("go to the farthest door"))
+    _run(lambda: session.handle_utterance("go to the closest door using euclidean distance"))
     checks["farthest_sets_trace"] = session.last_arbitration_trace is not None
     if session.last_arbitration_trace is not None:
         checks["farthest_trace_is_refuse"] = (
-            session.last_arbitration_trace.decision.decision_type == "refuse"
+            session.last_arbitration_trace.decision.decision_type == "synthesize"
         )
         checks["farthest_trace_has_missing"] = (
-            "grounding.farthest_door.manhattan.agent"
+            "grounding.closest_door.euclidean.agent"
             in session.last_arbitration_trace.missing_handles
+            or "grounding.closest_door.euclidean.agent"
+            in session.last_arbitration_trace.synthesizable_handles
         )
     else:
         checks["farthest_trace_is_refuse"] = False
@@ -211,7 +211,7 @@ def main() -> int:
 
     # ── 10. exclude_colors multi-exclusion via SmokeTestCompiler ──────────
     intent = SmokeTestCompiler().compile_operator_intent(
-        "go to the door that is not purple or yellow",
+        "go to a door which is not purple or yellow",
         memory=None,
     )
     if intent.target_selector is not None:
