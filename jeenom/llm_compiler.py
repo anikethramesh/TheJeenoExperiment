@@ -431,6 +431,93 @@ class SmokeTestCompiler(CompilerBackend):
             r"\b(go to|go the|reach|find|get to|head to|navigate to)\b",
             normalized,
         ) is not None
+        threshold_match = re.search(
+            r"\b(?:distance\s+)?"
+            r"(?P<comparison>above|greater than|more than|over|exceeds|at least|"
+            r"below|less than|under|at most|within)\s+"
+            r"(?P<value>\d+(?:\.\d+)?)\b",
+            normalized,
+        )
+        if threshold_match and ("door" in normalized or active_claims_summary is not None):
+            comparison_text = threshold_match.group("comparison")
+            comparison = {
+                "above": "above",
+                "greater than": "above",
+                "more than": "above",
+                "over": "above",
+                "exceeds": "above",
+                "at least": "at_least",
+                "below": "below",
+                "less than": "below",
+                "under": "below",
+                "at most": "at_most",
+                "within": "within",
+            }[comparison_text]
+            threshold = float(threshold_match.group("value"))
+            metric = (
+                "euclidean"
+                if "euclidean" in normalized
+                else "manhattan"
+                if "manhattan" in normalized
+                else None
+            )
+            if metric is None and active_claims_summary is not None:
+                ranked = active_claims_summary.get("ranked_doors") or []
+                # compact summaries are strings such as "red@7.62"; metric is not
+                # always present, so default to manhattan if the operator omitted it.
+                metric = "manhattan"
+            metric = metric or "manhattan"
+            claims_handle = f"claims.filter.threshold.{metric}"
+            wants_highest = any(
+                term in normalized
+                for term in ("highest", "largest", "maximum", "farthest", "furthest")
+            )
+            wants_lowest = any(
+                term in normalized
+                for term in ("lowest", "smallest", "minimum", "closest", "nearest")
+            )
+            order = "descending" if wants_highest else "ascending" if wants_lowest else None
+            ordinal = 1 if order is not None else None
+            required = [claims_handle]
+            if is_navigation:
+                required.append("task.go_to_object.door")
+            return OperatorIntent(
+                intent_type="task_instruction" if is_navigation else "claim_reference",
+                status_query=None,
+                task_type="go_to_object" if is_navigation else None,
+                target_selector=None,
+                claim_reference="threshold_filter",
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "filter",
+                    "primitive_handle": claims_handle,
+                    "metric": metric,
+                    "reference": "agent",
+                    "order": order,
+                    "ordinal": ordinal,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": (
+                        int(threshold) if threshold.is_integer() else threshold
+                    ),
+                    "comparison": comparison,
+                    "tie_policy": "clarify",
+                    "answer_fields": ["target", "distance"],
+                    "required_capabilities": required,
+                    "preserved_constraints": [
+                        "door",
+                        metric,
+                        comparison,
+                        str(threshold),
+                        *(["highest"] if wants_highest else []),
+                        *(["lowest"] if wants_lowest else []),
+                    ],
+                },
+                capability_status="synthesizable",
+                required_capabilities=required,
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback emitted a threshold claims-filter plan.",
+            )
         ordinal_match = re.search(
             r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+"
             r"(closest|nearest|farthest|furthest)\b",
@@ -721,7 +808,8 @@ class SmokeTestCompiler(CompilerBackend):
             phrase in normalized
             for phrase in (
                 "in order", "in descending order", "in ascending order",
-                "ranked", "ranking", "rank them", "list them",
+                "ranked", "ranking", "rank them", "rank the", "rank distances",
+                "rank the distances", "list them",
                 "all doors", "all of them", "list all", "each door", "each of these doors",
             )
         )
@@ -956,6 +1044,7 @@ class SmokeTestCompiler(CompilerBackend):
             or "capabilit" in normalized
             or "what are you able" in normalized
             or "overview" in normalized
+            or "skill" in normalized
         ):
             return OperatorIntent(
                 intent_type="status_query",
@@ -1151,9 +1240,9 @@ class LLMCompiler(CompilerBackend):
                 "'what do you see around you' map to status_query=scene. Delivery-target "
                 "questions map to status_query=delivery_target only when the utterance "
                 "explicitly mentions delivery target. Capability or help questions such as "
-                "'what can you do', 'what are your capabilities', or 'give me an overview "
-                "of your capabilities' map to status_query=help and should be answered "
-                "from the capability_manifest by the station. "
+                "'what can you do', 'what are your capabilities', 'what are your skills', "
+                "or 'give me an overview of your capabilities' map to status_query=help "
+                "and should be answered from the capability_manifest by the station. "
                 "Relational target questions such as "
                 "'what is the closest door to you', 'which door is nearest', or 'shortest "
                 "distance to a door' must map to status_query=ground_target with a "
@@ -1195,7 +1284,11 @@ class LLMCompiler(CompilerBackend):
                 "active claim metric, distance_value set to the numeric threshold, and "
                 "comparison in ['above','below','within','at_least','at_most']. Include the "
                 "claims.filter.threshold.<metric> handle in required_capabilities. Do not "
-                "bake the threshold into the handle; the primitive is parametric. "
+                "bake the threshold into the handle; the primitive is parametric. If the "
+                "utterance asks for the highest/largest/farthest item inside the filtered "
+                "set, set order='descending' and ordinal=1. If it asks for the lowest/"
+                "smallest/closest item inside the filtered set, set order='ascending' and "
+                "ordinal=1. "
                 "REQUIRED_CAPABILITIES: Every intent must include a required_capabilities "
                 "field listing the exact capability handles needed. Use the handle names "
                 "exactly as they appear in the capability_manifest (e.g. "

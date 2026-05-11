@@ -4,14 +4,34 @@ config:
 ---
 flowchart TD
 
-  Start["Operator instruction"] --> CompileTask["LLM compile_task<br>instruction → TaskRequest"]
-  CompileTask --> CompileProc["LLM compile_procedure<br>TaskRequest → Procedure"]
-  CompileProc --> Readiness["Readiness check<br>task + sensing + action primitives"]
+  Start["Operator utterance"] --> CompileIntent["LLM / deterministic compile_operator_intent<br>utterance → OperatorIntent schema"]
+  CompileIntent --> VerifyIntent["IntentVerifier<br>semantic preservation signals<br>superlative / ordinal / metric / negation / cardinality"]
+  VerifyIntent --> RequestPlan["RequestPlan compiler<br>objective → typed dependency graph<br>grounding / claims / selector / task / answer"]
+  RequestPlan --> Readiness["ReadinessGraph<br>evaluate each plan node against<br>CapabilityRegistry + Memory + ActiveClaims + SceneModel"]
 
-  Readiness -->|not groundable| Ask["Ask operator / report missing primitive"]
+  Readiness -->|needs clarification| Ask["Ask one narrow clarification<br>store pending RequestPlan"]
   Ask --> Start
 
-  Readiness -->|groundable| Prewarm["JIT prewarm<br>compile/cache templates before render"]
+  Readiness -->|stale or missing claims| RefreshClaims["Refresh / compute ActiveClaims<br>using registered grounding primitives"]
+  RefreshClaims --> Readiness
+
+  Readiness -->|synthesizable missing primitive| Propose["Explain gap + proposal<br>operator approves synthesis"]
+  Propose -->|approved| Synthesize["Synthesize + validate + register primitive"]
+  Synthesize --> Readiness
+  Propose -->|rejected / redirect| Start
+
+  Readiness -->|unsupported or missing skills| Refuse["Report blocking plan node<br>do not execute"]
+  Refuse --> Start
+
+  Readiness -->|answer query| Answer["Compose answer from SceneModel / ActiveClaims / Knowledge"]
+  Answer --> Start
+
+  Readiness -->|memory update| MemoryUpdate["Update durable Knowledge or episodic memory<br>only declared writes"]
+  MemoryUpdate --> Start
+
+  Readiness -->|ready task| Materialize["Materialize TaskRequest + Procedure<br>from grounded RequestPlan"]
+  Materialize --> CompileProc["LLM compile_procedure if needed<br>TaskRequest → Procedure"]
+  CompileProc --> Prewarm["JIT prewarm<br>compile/cache templates before render"]
 
   Prewarm --> Cache["PlanCache<br>ProcedureRecipe<br>SensePlanTemplate<br>SkillPlanTemplate"]
 

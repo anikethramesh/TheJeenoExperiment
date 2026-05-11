@@ -83,6 +83,62 @@ OPERATOR_CAPABILITY_STATUSES = (
     "synthesizable",
     "unsupported",
 )
+REQUEST_OBJECTIVE_TYPES = (
+    "task",
+    "query",
+    "knowledge_update",
+    "control",
+    "unsupported",
+)
+REQUEST_PLAN_LAYERS = (
+    "task",
+    "grounding",
+    "claims",
+    "sensing",
+    "action",
+    "memory",
+    "answer",
+    "control",
+)
+REQUEST_PLAN_OPERATIONS = (
+    "rank",
+    "filter",
+    "select",
+    "ground",
+    "execute",
+    "answer",
+    "read",
+    "update",
+    "reset",
+    "refuse",
+)
+REQUEST_EXPECTED_RESPONSES = (
+    "execute_task",
+    "answer_query",
+    "ask_clarification",
+    "propose_synthesis",
+    "update_memory",
+    "refuse",
+)
+REQUEST_TIE_POLICIES = ("clarify", "display_ties", "fail")
+READINESS_NODE_STATUSES = (
+    "executable",
+    "needs_clarification",
+    "synthesizable",
+    "missing_skills",
+    "unsupported",
+    "stale_claims",
+    "blocked_by_dependency",
+)
+READINESS_NEXT_ACTIONS = (
+    "execute_task",
+    "answer_query",
+    "ask_clarification",
+    "propose_synthesis",
+    "refresh_claims",
+    "update_memory",
+    "refuse",
+)
 ARBITRATION_DECISION_TYPES = (
     "substitute",
     "clarify",
@@ -601,6 +657,253 @@ class GroundingQueryPlan:
         if plan is None:
             raise SchemaValidationError("GroundingQueryPlan must not be null")
         return cls(**plan)
+
+
+@dataclass
+class RequestPlanStep:
+    step_id: str
+    layer: str
+    operation: str
+    required_handle: str | None = None
+    implementation_status: str | None = None
+    inputs: dict[str, Any] = field(default_factory=dict)
+    outputs: list[str] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+    constraints: dict[str, Any] = field(default_factory=dict)
+    tie_policy: str = "clarify"
+    memory_reads: list[str] = field(default_factory=list)
+    memory_writes: list[str] = field(default_factory=list)
+    scene_fingerprint_required: bool = False
+
+    @classmethod
+    def from_dict(cls, data: Any) -> RequestPlanStep:
+        mapping = _ensure_mapping(data, "RequestPlanStep")
+        layer = _ensure_optional_str_enum(
+            mapping.get("layer"),
+            REQUEST_PLAN_LAYERS,
+            "RequestPlanStep.layer",
+        )
+        operation = _ensure_optional_str_enum(
+            mapping.get("operation"),
+            REQUEST_PLAN_OPERATIONS,
+            "RequestPlanStep.operation",
+        )
+        implementation_status = _ensure_optional_str_enum(
+            mapping.get("implementation_status"),
+            PRIMITIVE_IMPLEMENTATION_STATUSES,
+            "RequestPlanStep.implementation_status",
+        )
+        tie_policy = _ensure_optional_str_enum(
+            mapping.get("tie_policy", "clarify"),
+            REQUEST_TIE_POLICIES,
+            "RequestPlanStep.tie_policy",
+        )
+        required_handle = mapping.get("required_handle")
+        if required_handle is not None:
+            required_handle = _ensure_str(required_handle, "RequestPlanStep.required_handle")
+        return cls(
+            step_id=_ensure_str(mapping.get("step_id"), "RequestPlanStep.step_id"),
+            layer=layer or "control",
+            operation=operation or "refuse",
+            required_handle=required_handle,
+            implementation_status=implementation_status,
+            inputs=_ensure_dict(mapping.get("inputs", {}), "RequestPlanStep.inputs"),
+            outputs=_ensure_str_list(mapping.get("outputs", []), "RequestPlanStep.outputs"),
+            depends_on=_ensure_str_list(
+                mapping.get("depends_on", []),
+                "RequestPlanStep.depends_on",
+            ),
+            constraints=_ensure_dict(
+                mapping.get("constraints", {}),
+                "RequestPlanStep.constraints",
+            ),
+            tie_policy=tie_policy or "clarify",
+            memory_reads=_ensure_str_list(
+                mapping.get("memory_reads", []),
+                "RequestPlanStep.memory_reads",
+            ),
+            memory_writes=_ensure_str_list(
+                mapping.get("memory_writes", []),
+                "RequestPlanStep.memory_writes",
+            ),
+            scene_fingerprint_required=_ensure_bool(
+                mapping.get("scene_fingerprint_required", False),
+                "RequestPlanStep.scene_fingerprint_required",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "layer": self.layer,
+            "operation": self.operation,
+            "required_handle": self.required_handle,
+            "implementation_status": self.implementation_status,
+            "inputs": dict(self.inputs),
+            "outputs": list(self.outputs),
+            "depends_on": list(self.depends_on),
+            "constraints": dict(self.constraints),
+            "tie_policy": self.tie_policy,
+            "memory_reads": list(self.memory_reads),
+            "memory_writes": list(self.memory_writes),
+            "scene_fingerprint_required": self.scene_fingerprint_required,
+        }
+
+
+@dataclass
+class RequestPlan:
+    request_id: str
+    original_utterance: str
+    objective_type: str
+    objective_summary: str
+    steps: list[RequestPlanStep] = field(default_factory=list)
+    preservation_signals: list[str] = field(default_factory=list)
+    expected_response: str = "refuse"
+
+    @classmethod
+    def from_dict(cls, data: Any) -> RequestPlan:
+        mapping = _ensure_mapping(data, "RequestPlan")
+        objective_type = _ensure_optional_str_enum(
+            mapping.get("objective_type"),
+            REQUEST_OBJECTIVE_TYPES,
+            "RequestPlan.objective_type",
+        )
+        expected_response = _ensure_optional_str_enum(
+            mapping.get("expected_response", "refuse"),
+            REQUEST_EXPECTED_RESPONSES,
+            "RequestPlan.expected_response",
+        )
+        raw_steps = _ensure_list(mapping.get("steps", []), "RequestPlan.steps")
+        return cls(
+            request_id=_ensure_str(mapping.get("request_id"), "RequestPlan.request_id"),
+            original_utterance=_ensure_str(
+                mapping.get("original_utterance"),
+                "RequestPlan.original_utterance",
+            ),
+            objective_type=objective_type or "unsupported",
+            objective_summary=_ensure_str(
+                mapping.get("objective_summary"),
+                "RequestPlan.objective_summary",
+            ),
+            steps=[
+                RequestPlanStep.from_dict(item)
+                for item in raw_steps
+            ],
+            preservation_signals=_ensure_str_list(
+                mapping.get("preservation_signals", []),
+                "RequestPlan.preservation_signals",
+            ),
+            expected_response=expected_response or "refuse",
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "original_utterance": self.original_utterance,
+            "objective_type": self.objective_type,
+            "objective_summary": self.objective_summary,
+            "steps": [step.as_dict() for step in self.steps],
+            "preservation_signals": list(self.preservation_signals),
+            "expected_response": self.expected_response,
+        }
+
+
+@dataclass
+class ReadinessNode:
+    step_id: str
+    status: str
+    layer: str
+    operation: str
+    required_handle: str | None = None
+    reason: str = ""
+    blocking_dependencies: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> ReadinessNode:
+        mapping = _ensure_mapping(data, "ReadinessNode")
+        status = _ensure_optional_str_enum(
+            mapping.get("status"),
+            READINESS_NODE_STATUSES,
+            "ReadinessNode.status",
+        )
+        required_handle = mapping.get("required_handle")
+        if required_handle is not None:
+            required_handle = _ensure_str(required_handle, "ReadinessNode.required_handle")
+        return cls(
+            step_id=_ensure_str(mapping.get("step_id"), "ReadinessNode.step_id"),
+            status=status or "unsupported",
+            layer=_ensure_str(mapping.get("layer"), "ReadinessNode.layer"),
+            operation=_ensure_str(mapping.get("operation"), "ReadinessNode.operation"),
+            required_handle=required_handle,
+            reason=_ensure_str(mapping.get("reason", ""), "ReadinessNode.reason"),
+            blocking_dependencies=_ensure_str_list(
+                mapping.get("blocking_dependencies", []),
+                "ReadinessNode.blocking_dependencies",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "status": self.status,
+            "layer": self.layer,
+            "operation": self.operation,
+            "required_handle": self.required_handle,
+            "reason": self.reason,
+            "blocking_dependencies": list(self.blocking_dependencies),
+        }
+
+
+@dataclass
+class ReadinessGraph:
+    request_id: str
+    nodes: list[ReadinessNode] = field(default_factory=list)
+    graph_status: str = "unsupported"
+    next_action: str = "refuse"
+    blocking_step_id: str | None = None
+    explanation: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Any) -> ReadinessGraph:
+        mapping = _ensure_mapping(data, "ReadinessGraph")
+        graph_status = _ensure_optional_str_enum(
+            mapping.get("graph_status", "unsupported"),
+            READINESS_NODE_STATUSES,
+            "ReadinessGraph.graph_status",
+        )
+        next_action = _ensure_optional_str_enum(
+            mapping.get("next_action", "refuse"),
+            READINESS_NEXT_ACTIONS,
+            "ReadinessGraph.next_action",
+        )
+        blocking_step_id = mapping.get("blocking_step_id")
+        if blocking_step_id is not None:
+            blocking_step_id = _ensure_str(
+                blocking_step_id,
+                "ReadinessGraph.blocking_step_id",
+            )
+        raw_nodes = _ensure_list(mapping.get("nodes", []), "ReadinessGraph.nodes")
+        return cls(
+            request_id=_ensure_str(mapping.get("request_id"), "ReadinessGraph.request_id"),
+            nodes=[ReadinessNode.from_dict(item) for item in raw_nodes],
+            graph_status=graph_status or "unsupported",
+            next_action=next_action or "refuse",
+            blocking_step_id=blocking_step_id,
+            explanation=_ensure_str(
+                mapping.get("explanation", ""),
+                "ReadinessGraph.explanation",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "nodes": [node.as_dict() for node in self.nodes],
+            "graph_status": self.graph_status,
+            "next_action": self.next_action,
+            "blocking_step_id": self.blocking_step_id,
+            "explanation": self.explanation,
+        }
 
 
 @dataclass

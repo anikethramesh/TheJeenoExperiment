@@ -153,6 +153,7 @@ class ArbitratorBackend(ABC):
         synthesizable_handles: list[str],
         available_handles: list[str],
         scene_summary: dict[str, Any] | None = None,
+        registry_synthesizable_handles: list[str] | None = None,
     ) -> ArbitrationDecision:
         raise NotImplementedError
 
@@ -173,6 +174,7 @@ class SmokeTestArbitrator(ArbitratorBackend):
         synthesizable_handles: list[str],
         available_handles: list[str],
         scene_summary: dict[str, Any] | None = None,
+        registry_synthesizable_handles: list[str] | None = None,
     ) -> ArbitrationDecision:
         if missing_handles:
             return ArbitrationDecision(
@@ -185,7 +187,10 @@ class SmokeTestArbitrator(ArbitratorBackend):
                     "Use 'what can you do' to see what is available."
                 ),
             )
-        if synthesizable_handles:
+        # Intent-specific synthesizable handles take priority; fall back to full
+        # registry surface when the compiler emitted no specific required_capabilities.
+        candidates = synthesizable_handles or registry_synthesizable_handles or []
+        if candidates:
             return ArbitrationDecision(
                 decision_type="synthesize",
                 safe_to_execute=False,
@@ -195,10 +200,10 @@ class SmokeTestArbitrator(ArbitratorBackend):
                 ),
                 operator_message=(
                     "That capability is synthesizable but not yet implemented: "
-                    + ", ".join(synthesizable_handles)
+                    + ", ".join(candidates)
                     + ". Synthesis is not yet active (Phase 7.7)."
                 ),
-                proposed_handle=synthesizable_handles[0],
+                proposed_handle=candidates[0],
                 proposed_condition=_condition_from_utterance(utterance),
             )
         return ArbitrationDecision(
@@ -249,6 +254,7 @@ class LLMArbitrator(ArbitratorBackend):
         synthesizable_handles: list[str],
         available_handles: list[str],
         scene_summary: dict[str, Any] | None = None,
+        registry_synthesizable_handles: list[str] | None = None,
     ) -> ArbitrationDecision:
         if self._fallback_reason:
             return self.fallback.arbitrate(
@@ -259,6 +265,7 @@ class LLMArbitrator(ArbitratorBackend):
                 synthesizable_handles,
                 available_handles,
                 scene_summary=scene_summary,
+                registry_synthesizable_handles=registry_synthesizable_handles,
             )
 
         scene_api = (
@@ -286,6 +293,12 @@ class LLMArbitrator(ArbitratorBackend):
             "You are the JEENOM capability arbitrator. The operator gave an instruction "
             "that requires capabilities not currently available in the registry. "
             "Your task is to reason about what the station should do next.\n\n"
+            "The payload includes registry_synthesizable_handles — ALL primitives in the "
+            "registry that are marked safe to synthesize, regardless of what the compiler "
+            "declared. When intent_type=unsupported or synthesizable_handles is empty, "
+            "check registry_synthesizable_handles first: if the utterance maps to any of "
+            "those handles, choose synthesize and set proposed_handle to the matching handle. "
+            "Do not refuse a request that a registry_synthesizable_handle could satisfy.\n\n"
             + scene_api + "\n"
             "Decision types:\n"
             "  'synthesize' — The operator's request can be expressed as a NEW pure Python\n"
@@ -369,6 +382,7 @@ class LLMArbitrator(ArbitratorBackend):
             "missing_handles": missing_handles,
             "synthesizable_handles": synthesizable_handles,
             "available_handles": available_handles[:30],
+            "registry_synthesizable_handles": registry_synthesizable_handles or [],
         }
         if scene_summary:
             user_payload["scene_summary"] = scene_summary
@@ -393,6 +407,7 @@ class LLMArbitrator(ArbitratorBackend):
                 synthesizable_handles,
                 available_handles,
                 scene_summary=scene_summary,
+                registry_synthesizable_handles=registry_synthesizable_handles,
             )
 
     def _chat_completions_transport(self, request_payload: dict[str, Any]) -> Any:

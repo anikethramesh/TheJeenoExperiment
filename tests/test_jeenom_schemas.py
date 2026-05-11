@@ -8,6 +8,8 @@ from jeenom.schemas import (
     PrimitiveManifest,
     PrimitiveCall,
     ProcedureRecipe,
+    ReadinessGraph,
+    RequestPlan,
     SchemaValidationError,
     SensePlanTemplate,
     SkillPlanTemplate,
@@ -361,6 +363,79 @@ class JeenomSchemaTests(unittest.TestCase):
 
         self.assertEqual(intent.grounding_query_plan["color"], "red")
         self.assertEqual(intent.grounding_query_plan["answer_fields"], ["distance"])
+
+    def test_request_plan_schema_accepts_typed_dependency_steps(self):
+        plan = RequestPlan.from_dict(
+            {
+                "request_id": "req-1",
+                "original_utterance": "go to the highest euclidean door below 10",
+                "objective_type": "task",
+                "objective_summary": "rank, filter, select, execute",
+                "expected_response": "execute_task",
+                "preservation_signals": ["metric.euclidean", "threshold"],
+                "steps": [
+                    {
+                        "step_id": "rank_scene_doors",
+                        "layer": "grounding",
+                        "operation": "rank",
+                        "required_handle": "grounding.all_doors.ranked.euclidean.agent",
+                        "implementation_status": "synthesizable",
+                        "inputs": {"object_type": "door"},
+                        "outputs": ["active_claims.ranked_scene_doors"],
+                        "depends_on": [],
+                        "constraints": {"metric": "euclidean"},
+                        "tie_policy": "clarify",
+                        "memory_reads": [],
+                        "memory_writes": [],
+                        "scene_fingerprint_required": False,
+                    },
+                    {
+                        "step_id": "filter_distance_threshold",
+                        "layer": "claims",
+                        "operation": "filter",
+                        "required_handle": "claims.filter.threshold.euclidean",
+                        "implementation_status": "synthesizable",
+                        "inputs": {"entries": "active_claims.ranked_scene_doors"},
+                        "outputs": ["filtered_candidates"],
+                        "depends_on": ["rank_scene_doors"],
+                        "constraints": {"comparison": "below", "threshold": 10},
+                        "tie_policy": "clarify",
+                        "memory_reads": ["active_claims.ranked_scene_doors"],
+                        "memory_writes": [],
+                        "scene_fingerprint_required": True,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(plan.objective_type, "task")
+        self.assertEqual(plan.steps[1].depends_on, ["rank_scene_doors"])
+        self.assertEqual(plan.steps[1].constraints["threshold"], 10)
+
+    def test_readiness_graph_schema_accepts_blocking_node(self):
+        graph = ReadinessGraph.from_dict(
+            {
+                "request_id": "req-1",
+                "graph_status": "synthesizable",
+                "next_action": "propose_synthesis",
+                "blocking_step_id": "rank_scene_doors",
+                "explanation": "rank_scene_doors needs synthesis",
+                "nodes": [
+                    {
+                        "step_id": "rank_scene_doors",
+                        "status": "synthesizable",
+                        "layer": "grounding",
+                        "operation": "rank",
+                        "required_handle": "grounding.all_doors.ranked.euclidean.agent",
+                        "reason": "safe to synthesize",
+                        "blocking_dependencies": [],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(graph.next_action, "propose_synthesis")
+        self.assertEqual(graph.nodes[0].status, "synthesizable")
 
     def test_grounding_query_plan_rejects_missing_ranked_handle(self):
         with self.assertRaises(SchemaValidationError):

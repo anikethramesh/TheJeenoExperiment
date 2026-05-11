@@ -9,6 +9,7 @@ flowchart LR
 
   subgraph C["CORTEX<br>memory-backed operational model"]
     CS["CorticalSchema<br>shared grammar"]
+    RP["RequestPlan<br>typed objective graph<br>grounding / claims / selector / task / answer"]
 
     subgraph M["Operational Memory<br>what carries across time"]
       U1["Understanding<br>task recipes / reusable patterns"]
@@ -16,7 +17,7 @@ flowchart LR
       K1["Knowledge<br>deployment facts / history"]
     end
 
-    R["Readiness<br>can this task be grounded<br>with available primitives?"]
+    R["ReadinessGraph<br>per-step verdicts<br>execute / clarify / synthesize / refuse"]
 
     subgraph A["Active Operational Model<br>what is true now"]
       CL["Claims"]
@@ -49,7 +50,9 @@ flowchart LR
 
   U <--> L
   L --> IV["Intent Verifier<br>utterance signal extraction<br>semantic signal → required_capabilities injection<br>proactive, deterministic, substrate-independent"]
-  IV --> CS
+  IV --> RP
+  RP --> R
+  R --> CS
 
   CS --- M
   CS --- R
@@ -57,6 +60,9 @@ flowchart LR
   CS --- O
 
   M --> R
+  CL -. "ActiveClaims<br>scene fingerprint + provenance" .-> R
+  SPL -. sensing handles .-> R
+  APL -. action handles .-> R
   R --> A
   A <--> O
   O -. durable updates .-> M
@@ -73,6 +79,7 @@ flowchart LR
   ASE --> REP
   ASE --> Actuators
 
+  R -- "ready query / evidence need" --> O
   O -- "EvidenceFrame<br>what evidence matters?" --> QP
   PROJ -- "OperationalEvidence" --> A
 

@@ -1669,6 +1669,234 @@ Current proven behavior:
 - Fixed proposal handoff bug: arbitration-created claims-filter proposals now preserve
   proposed_condition (threshold, comparison, metric) through operator approval. This prevents
   threshold filters from defaulting to threshold=0 or the wrong metric after synthesis.
+- Claims-filter composition now supports selecting from a filtered set using order/ordinal.
+  Example: "highest Euclidean distance below 10" is represented as filter below 10, then
+  order=descending, ordinal=1. The station selects that target if unique, clarifies on ties,
+  and never silently degrades the request.
+- Exact synthesizable registry matches now override unreliable arbitration refusals. If the
+  CapabilityMatcher says a required handle is present and safe_to_synthesize, the station
+  proposes synthesis instead of accepting an LLM arbitrator refusal.
+
+
+### Phase 7.95 — Typed RequestPlan and ReadinessGraph
+Status: in progress.
+
+Goal:
+Introduce a first-class RequestPlan schema and ReadinessGraph so operator requests are
+decomposed into typed steps before clarification, synthesis, memory lookup, query answering,
+or task execution. This is the architectural layer that prevents the station from guessing
+from a raw utterance or from a single overloaded OperatorIntent.
+
+Relationship to Phase 7.9:
+This is separate from Phase 7.9.
+Phase 7.9 is the collaborative capability-composition loop: propose, approve, synthesize,
+validate, register, and reuse a missing primitive.
+Phase 7.95 decides what needs to happen in the first place. It turns the operator request into
+a typed plan, evaluates every plan node against the registry, memory, ActiveClaims, SceneModel,
+and synthesis policy, then chooses the next safe action.
+
+Problem this solves:
+Right now the station is split across OperatorIntent, IntentVerifier, CapabilityMatcher,
+CapabilityArbitrator, ActiveClaims, and several station fallbacks. That makes behavior janky:
+the system can recognize a phrase, propose a primitive, answer a query, or execute a task, but
+the decomposition is implicit and scattered. Complex requests like "go to the door with the
+highest Euclidean distance below 10" need a graph:
+1. produce/refresh Euclidean ranked door claims,
+2. filter claims below threshold 10,
+3. select highest remaining candidate,
+4. clarify if tied or ambiguous,
+5. convert the grounded target into go_to_object,
+6. prewarm and run cached runtime.
+
+Core rule:
+Raw operator utterances are never the final execution object. The station must compile or
+derive a RequestPlan, validate that it preserves the utterance, and run the ReadinessGraph over
+the plan. Clarification, synthesis proposals, query answers, and execution all come from graph
+verdicts, not ad hoc phrase handling.
+
+RequestPlan schema:
+- request_id
+- original_utterance
+- objective_type: task | query | knowledge_update | control
+- objective_summary
+- steps: ordered/dependency-aware RequestPlanStep list
+- preservation_signals: superlative, ordinal, cardinality, negation, metric, threshold,
+  object_type, color, reference terms
+- expected_response: execute_task | answer_query | ask_clarification | propose_synthesis |
+  update_memory | refuse
+
+RequestPlanStep schema:
+- step_id
+- layer: task | grounding | claims | sensing | action | memory | answer | control
+- operation: rank | filter | select | ground | execute | answer | update | reset | refuse
+- required_handle
+- implementation_status expectation: implemented | synthesizable | planned | unsupported
+- inputs
+- outputs
+- depends_on
+- constraints
+- tie_policy: clarify | display_ties | fail
+- memory_reads
+- memory_writes
+- scene_fingerprint requirement if using ActiveClaims
+
+Example RequestPlan:
+Utterance:
+"go to the door that has the highest Euclidean distance below 10"
+
+Plan:
+1. rank_doors_euclidean
+   - layer: grounding
+   - operation: rank
+   - required_handle: grounding.all_doors.ranked.euclidean.agent
+   - output: active_claims.ranked_scene_doors
+2. filter_below_10
+   - layer: claims
+   - operation: filter
+   - required_handle: claims.filter.threshold.euclidean
+   - input: active_claims.ranked_scene_doors
+   - constraints: comparison=below, threshold=10
+3. select_highest
+   - layer: claims
+   - operation: select
+   - constraints: order=descending, ordinal=1
+   - tie_policy: clarify
+4. execute_go_to_object
+   - layer: task
+   - operation: execute
+   - required_handle: task.go_to_object.door
+   - input: grounded door target
+
+ReadinessGraph:
+- Builds a node for every RequestPlanStep.
+- Evaluates each node against:
+  - CapabilityRegistry
+  - primitive_library-derived primitive specs
+  - OperationalMemory durable knowledge
+  - episodic memory
+  - ActiveClaims with scene fingerprint/staleness
+  - current SceneModel
+  - synthesis policy
+  - PlanCache/JIT prewarm requirements for runtime execution
+- Emits per-node status:
+  - executable
+  - needs_clarification
+  - synthesizable
+  - missing_skills
+  - unsupported
+  - stale_claims
+  - blocked_by_dependency
+- Emits one graph-level next action:
+  - ask one clarification question
+  - refresh/recompute claims
+  - propose synthesis
+  - answer query
+  - execute task
+  - update memory
+  - refuse with exact blocking node and reason
+
+Memory policy:
+- Durable Knowledge stores operator-taught facts such as delivery_target.
+- Episodic memory stores last_request_plan, last_grounded_target, last_task, last_result.
+- ActiveClaims stores computed scene facts, tied to a scene fingerprint and provenance handle.
+- RequestPlan steps must declare memory_reads and memory_writes before execution.
+- Computed analysis does not become durable truth unless explicitly promoted by the operator.
+
+Clarification policy:
+- Clarification questions are generated from incomplete or ambiguous RequestPlan nodes.
+- Supported initial cases:
+  - missing metric for closest/farthest/ranked distance query
+  - tied target for task execution
+  - multiple filtered candidates for a task
+  - missing object type when the registry supports more than one candidate family
+- Status/cache/capability queries must not destroy the pending RequestPlan.
+- A new task request cancels the pending plan unless it is clearly an answer to the pending
+  clarification.
+
+Implementation plan:
+- Add RequestPlan, RequestPlanStep, ReadinessGraph, ReadinessNode, and ReadinessVerdict schemas.
+- Add a request planner module that converts validated OperatorIntent + semantic query plan +
+  active context into RequestPlan.
+- Keep LLM compilation separate from readiness arbitration. The LLM may propose a plan, but the
+  station validates it before use.
+- Replace direct capability arbitration from raw utterance with ReadinessGraph arbitration over
+  RequestPlan nodes.
+- Route synthesis proposals through graph nodes rather than one-off handle matching.
+- Route claims-filter and grounding composition through graph dependencies.
+- Teach station responses to explain the blocking node: missing primitive, ambiguous selector,
+  stale claims, unsupported action, or pending synthesis.
+
+Files likely touched:
+- jeenom/schemas.py
+- jeenom/request_planner.py
+- jeenom/readiness_graph.py
+- jeenom/operator_station.py
+- jeenom/llm_compiler.py
+- jeenom/capability_arbitrator.py
+- tests/test_jeenom_schemas.py
+- tests/test_jeenom_minigrid.py
+- evals/request_plan_probe.py
+
+Success criteria:
+- "go to the door with the highest Euclidean distance below 10" becomes a multi-step
+  RequestPlan instead of a single guessed intent.
+- If Euclidean ranking is missing but synthesizable, the graph proposes that primitive first.
+- If threshold filtering is missing but synthesizable, the graph proposes that primitive next.
+- If multiple filtered candidates remain, the graph asks which candidate to use and does not
+  execute silently.
+- If a query can be answered from fresh ActiveClaims, the graph answers without rerunning
+  unnecessary sensing.
+- If ActiveClaims are stale, the graph refreshes or reports why it cannot.
+- "pick up the key" produces an unsupported/missing action node and does not execute.
+- Status/capability queries answer from the registry and graph state.
+- Golden path remains unchanged.
+- runtime_llm_calls_during_render remains 0.
+- cache_miss_during_render remains 0.
+
+Evals:
+- evals/request_plan_probe.py
+  - prints RequestPlan steps, dependencies, required handles, preservation signals, and graph
+    verdicts for representative utterances.
+- Cases:
+  - "what doors do you see?"
+  - "how far are all doors from you?"
+  - "what is the farthest door?"
+  - "go to the closest door"
+  - "go to the door with the highest Euclidean distance below 10"
+  - "pick up the key"
+  - "go to that" after a grounded claim
+
+Implemented:
+- Added typed RequestPlan, RequestPlanStep, ReadinessNode, and ReadinessGraph schemas.
+- Added jeenom/request_planner.py to decompose validated OperatorIntent + grounding query plans
+  into a side-effect-free RequestPlan.
+- Added jeenom/readiness_graph.py to evaluate plan nodes against CapabilityRegistry,
+  ActiveClaims validity, and dependency status.
+- OperatorStationSession now records last_request_plan and last_readiness_graph into episodic
+  memory on operator-intent handling. This makes the plan/graph inspectable without changing
+  rendered runtime execution.
+- Added evals/request_plan_probe.py, which prints the plan and readiness graph for key cases.
+- Added regression tests for schema validation, thresholded Euclidean plan decomposition,
+  first blocking synthesizable node detection, and station episodic plan/graph recording.
+
+Current proven behavior:
+- "go to the door with the highest Euclidean distance below 10" decomposes into:
+  rank Euclidean doors → threshold filter → select highest → execute go_to_object.
+- The ReadinessGraph identifies grounding.all_doors.ranked.euclidean.agent as the first
+  synthesizable blocking node.
+- "go to the closest door" produces a needs_clarification graph before execution.
+- "pick up the key" produces an unsupported task node and refuses.
+- Status/scene query plans are executable answer plans.
+- The existing Phase 3.5/Phase 4 guardrails still pass.
+
+Out of scope:
+- New robot actions.
+- New object families.
+- Continuous-world execution.
+- Mid-run correction.
+- Broad conversational Q/A.
+- Primitive synthesis beyond the existing safe synthesis policy.
+- Replacing PlanCache or runtime Sense/Spine execution.
 
 
 ### Phase 8 — GoToObject/general object variant

@@ -12,6 +12,8 @@ from .capability_matcher import CapabilityMatchResult, CapabilityMatcher, defaul
 from .capability_registry import CapabilityRegistry
 from .primitive_synthesizer import SynthesizerBackend, build_synthesizer
 from .primitive_validator import PrimitiveValidator, default_validator
+from .readiness_graph import evaluate_request_plan
+from .request_planner import build_request_plan
 from .intent_verifier import IntentVerificationResult, IntentVerifier, default_verifier
 from .cortex import Cortex
 from .llm_compiler import CompilerBackend, SmokeTestCompiler, build_compiler, canonical_task_params
@@ -25,6 +27,8 @@ from .schemas import (
     GroundedDoorEntry,
     OperatorIntent,
     ProcedureRecipe,
+    ReadinessGraph,
+    RequestPlan,
     SceneModel,
     SceneObject,
     SchemaValidationError,
@@ -326,6 +330,8 @@ class OperatorStationSession:
         self.pending_clarification: PendingClarification | None = None
         self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
         self.active_claims: StationActiveClaims | None = None
+        self.last_request_plan: RequestPlan | None = None
+        self.last_readiness_graph: ReadinessGraph | None = None
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
         self.last_arbitration_trace: ArbitrationTrace | None = None
         self.synthesizer: SynthesizerBackend = build_synthesizer(compiler_name)
@@ -483,6 +489,8 @@ class OperatorStationSession:
         intent: OperatorIntent,
         utterance: str,
     ) -> OperatorCommand:
+        self._record_request_plan(utterance, intent)
+
         if intent.grounding_query_plan is not None:
             plan_command = self._command_from_grounding_query_plan(utterance, intent)
             if plan_command is not None:
@@ -715,6 +723,38 @@ class OperatorStationSession:
             return OperatorCommand(kind="task_instruction", utterance=instruction)
 
         return OperatorCommand(kind="unsupported", utterance=utterance)
+
+    def _record_request_plan(self, utterance: str, intent: OperatorIntent) -> None:
+        active_summary = (
+            self.active_claims.compact_summary()
+            if self.active_claims is not None
+            else None
+        )
+        request_plan = build_request_plan(
+            utterance,
+            intent,
+            active_claims_summary=active_summary,
+        )
+        claims_valid = False
+        scene = self.memory.scene_model
+        if scene is not None and self.active_claims is not None:
+            claims_valid = self.active_claims.is_valid_for(scene)
+        readiness_graph = evaluate_request_plan(
+            request_plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=claims_valid,
+        )
+        self.last_request_plan = request_plan
+        self.last_readiness_graph = readiness_graph
+        self.memory.episodic_memory["last_request_plan"] = request_plan.as_dict()
+        self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+        self.log(
+            "request plan: "
+            f"steps={len(request_plan.steps)} "
+            f"graph_status={readiness_graph.graph_status} "
+            f"next_action={readiness_graph.next_action}"
+        )
 
     def _command_from_grounding_query_plan(
         self,
@@ -1135,6 +1175,15 @@ class OperatorStationSession:
             if (spec := self.capability_registry.lookup(h)) is not None
             and spec.implementation_status == "implemented"
         ]
+        # Full synthesizable surface from the registry — passed when the compiler
+        # emitted no specific required_capabilities (e.g. intent_type=unsupported).
+        # Lets the arbitrator LLM match the utterance against the actual synthesizable
+        # surface rather than only what the compiler declared.
+        registry_synthesizable = [
+            h for h in self.capability_registry.primitive_names()
+            if (spec := self.capability_registry.lookup(h)) is not None
+            and (spec.implementation_status == "synthesizable" or spec.safe_to_synthesize)
+        ]
         scene_summary = self._build_scene_summary_for_arbitrator()
         decision = self.arbitrator.arbitrate(
             utterance=utterance,
@@ -1144,6 +1193,7 @@ class OperatorStationSession:
             synthesizable_handles=cap_match.synthesizable_handles,
             available_handles=available,
             scene_summary=scene_summary,
+            registry_synthesizable_handles=registry_synthesizable,
         )
         self.last_arbitration_trace = ArbitrationTrace(
             utterance=utterance,
@@ -1186,6 +1236,22 @@ class OperatorStationSession:
                     "match": cap_match.compact(),
                 },
                 capability_match=cap_match,
+            )
+
+        if cap_match.synthesizable_handles:
+            # The registry is the source of truth. If an exact required handle is
+            # marked safe_to_synthesize, do not let an unreliable arbitration
+            # refusal hide that path from the operator.
+            handle = cap_match.synthesizable_handles[0]
+            return self._propose_synthesis(
+                handle,
+                utterance,
+                intent,
+                cap_match,
+                proposed_condition=(
+                    decision.proposed_condition
+                    or self._condition_from_intent_or_utterance(handle, intent, utterance)
+                ),
             )
 
         if decision.decision_type == "clarify" and decision.clarification_prompt:
@@ -1629,6 +1695,68 @@ class OperatorStationSession:
                 },
             )
 
+        order = plan.get("order")
+        ordinal = plan.get("ordinal")
+        if order in {"ascending", "descending"} or ordinal is not None:
+            ordered = sorted(
+                filtered,
+                key=lambda e: (e.distance, e.color or "", e.x, e.y),
+                reverse=order == "descending",
+            )
+            target_index = max(0, int(ordinal or 1) - 1)
+            if target_index >= len(ordered):
+                return OperatorCommand(
+                    kind="ambiguous",
+                    utterance=utterance,
+                    payload={
+                        "message": (
+                            f"The filter matched only {len(ordered)} doors, so ordinal "
+                            f"{target_index + 1} is not available."
+                        )
+                    },
+                )
+            selected = ordered[target_index]
+            tied = [entry for entry in ordered if entry.distance == selected.distance]
+            if len(tied) > 1 and plan.get("tie_policy") == "clarify":
+                message = (
+                    "CLARIFY\n"
+                    "That filtered selector lands inside a distance tie. Which one should I use?\n"
+                    f"Options: {_format_targets([self._entry_target_dict(e) for e in tied])}"
+                )
+                return self._candidate_clarification_for_entries(
+                    utterance=utterance,
+                    entries=tied,
+                    resume_kind=(
+                        "task_instruction"
+                        if intent.intent_type in {"task_instruction", "claim_reference"}
+                        else "ground_target_query"
+                    ),
+                    message=message,
+                )
+            self.active_claims.last_grounded_target = selected
+            self.active_claims.last_grounded_rank = next(
+                (i for i, e in enumerate(entries) if e.x == selected.x and e.y == selected.y),
+                0,
+            )
+            if intent.intent_type == "task_instruction":
+                return OperatorCommand(
+                    kind="task_instruction",
+                    utterance=f"go to the {selected.color} {selected.object_type}",
+                )
+            lines = [
+                f"GROUNDED TARGET (claims filter: {handle})",
+                f"target={selected.color} {selected.object_type}@({selected.x},{selected.y})",
+                f"distance={selected.distance:.2f} [{metric_label}]",
+                f"filter={comparison} {threshold}",
+                "source=active_claims",
+            ]
+            return OperatorCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={"message": "\n".join(lines)},
+                capability_match=cap_match,
+            )
+
         if len(filtered) == 1:
             entry = filtered[0]
             self.active_claims.last_grounded_target = entry
@@ -1819,6 +1947,7 @@ class OperatorStationSession:
         if threshold is None:
             return intent
         threshold_float = float(threshold)
+        existing_plan = intent.grounding_query_plan or {}
         wants_task = self._utterance_requests_navigation(
             _normalize_utterance(proposal.original_utterance)
         )
@@ -1831,8 +1960,8 @@ class OperatorStationSession:
             "primitive_handle": proposal.handle,
             "metric": metric,
             "reference": "agent",
-            "order": None,
-            "ordinal": None,
+            "order": existing_plan.get("order"),
+            "ordinal": existing_plan.get("ordinal"),
             "color": None,
             "exclude_colors": [],
             "distance_value": (
@@ -1840,7 +1969,7 @@ class OperatorStationSession:
             ),
             "comparison": comparison,
             "tie_policy": "clarify",
-            "answer_fields": ["target", "distance"],
+            "answer_fields": existing_plan.get("answer_fields") or ["target", "distance"],
             "required_capabilities": required,
             "preserved_constraints": [
                 "door",
@@ -3714,6 +3843,8 @@ class OperatorStationSession:
         self.pending_clarification = None
         self.pending_synthesis_proposal = None
         self.active_claims = None
+        self.last_request_plan = None
+        self.last_readiness_graph = None
         self.memory.reset_episode()
         self.last_result = None
         if clear_memory:

@@ -23,11 +23,14 @@ from jeenom.primitive_library import (
     TASK_PRIMITIVES,
 )
 from jeenom.primitive_synthesizer import SynthesisResult
+from jeenom.readiness_graph import evaluate_request_plan
+from jeenom.request_planner import build_request_plan
 from jeenom.run_demo import prewarm_jit_cache, run_episode
 from jeenom.schemas import (
     EvidenceFrame,
     ExecutionContext,
     ExecutionContract,
+    ArbitrationDecision,
     GroundedDoorEntry,
     OperatorIntent,
     Percepts,
@@ -2778,6 +2781,24 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
                 status="success",
             )
 
+    class RefusingArbitrator:
+        def arbitrate(
+            self,
+            utterance,
+            intent_type,
+            required_capabilities,
+            missing_handles,
+            synthesizable_handles,
+            available_handles,
+            scene_summary=None,
+        ):
+            return ArbitrationDecision(
+                decision_type="refuse",
+                safe_to_execute=False,
+                reason="Simulated unreliable arbitration refusal.",
+                operator_message="No.",
+            )
+
     def _make_session(self) -> OperatorStationSession:
         session = OperatorStationSession(
             compiler=SmokeTestCompiler(),
@@ -2798,7 +2819,15 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
         with patch("jeenom.run_demo.build_env", side_effect=fake_build_env):
             return fn()
 
-    def _threshold_intent(self, *, wants_task: bool = True) -> OperatorIntent:
+    def _threshold_intent(
+        self,
+        *,
+        wants_task: bool = True,
+        distance_value: int = 7,
+        comparison: str = "above",
+        order: str | None = None,
+        ordinal: int | None = None,
+    ) -> OperatorIntent:
         return OperatorIntent(
             intent_type="task_instruction" if wants_task else "claim_reference",
             canonical_instruction=None,
@@ -2820,19 +2849,24 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
                 "primitive_handle": "claims.filter.threshold.manhattan",
                 "metric": "manhattan",
                 "reference": "agent",
-                "order": None,
-                "ordinal": None,
+                "order": order,
+                "ordinal": ordinal,
                 "color": None,
                 "exclude_colors": [],
-                "distance_value": 7,
-                "comparison": "above",
+                "distance_value": distance_value,
+                "comparison": comparison,
                 "tie_policy": "clarify",
                 "answer_fields": ["target", "distance"],
                 "required_capabilities": [
                     "claims.filter.threshold.manhattan",
                     "task.go_to_object.door",
                 ],
-                "preserved_constraints": ["door", "manhattan", "above", "7"],
+                "preserved_constraints": [
+                    "door",
+                    "manhattan",
+                    comparison,
+                    str(distance_value),
+                ],
             },
             required_capabilities=[
                 "claims.filter.threshold.manhattan",
@@ -2902,6 +2936,69 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
         self.assertIn("red door@(10,7)", clarified)
         self.assertNotIn("purple door@(4,0)", clarified)
         self.assertNotIn("yellow door@(0,2)", clarified)
+
+    def test_claims_filter_highest_below_selects_from_filtered_set(self):
+        session = self._make_session()
+        ranked = self._run_with_env(
+            lambda: session.handle_utterance("rank all the doors by manhattan distance")
+        )
+        self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT", ranked)
+
+        proposal = session.command_from_operator_intent(
+            self._threshold_intent(
+                distance_value=8,
+                comparison="below",
+                order="descending",
+                ordinal=1,
+            ),
+            "go to the door with the highest manhattan distance below 8",
+        )
+        self.assertEqual(proposal.kind, "synthesis_proposal")
+
+        response = self._run_with_env(lambda: session.handle_utterance("yes"))
+
+        self.assertIn("RUN COMPLETE", response)
+        self.assertIn("runtime_llm_calls_during_render=0", response)
+        self.assertIn("cache_miss_during_render=0", response)
+        self.assertIn("final_skill_plan=['done']", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the yellow door")
+
+    def test_exact_synthesizable_registry_match_overrides_arbitrator_refusal(self):
+        session = self._make_session()
+        session.arbitrator = self.RefusingArbitrator()
+        intent = OperatorIntent(
+            intent_type="status_query",
+            status_query="ground_target",
+            capability_status="synthesizable",
+            confidence=1.0,
+            reason="Euclidean ranking is predeclared synthesizable.",
+            grounding_query_plan={
+                "object_type": "door",
+                "operation": "rank",
+                "primitive_handle": "grounding.all_doors.ranked.euclidean.agent",
+                "metric": "euclidean",
+                "reference": "agent",
+                "order": "ascending",
+                "ordinal": None,
+                "color": None,
+                "exclude_colors": [],
+                "distance_value": None,
+                "comparison": None,
+                "tie_policy": "display",
+                "answer_fields": ["ranked_doors", "distance"],
+                "required_capabilities": ["grounding.all_doors.ranked.euclidean.agent"],
+                "preserved_constraints": ["rank", "door", "euclidean"],
+            },
+            required_capabilities=["grounding.all_doors.ranked.euclidean.agent"],
+        )
+
+        command = session.command_from_operator_intent(
+            intent,
+            "can you rank the distances based on euclidean distance",
+        )
+
+        self.assertEqual(command.kind, "synthesis_proposal")
+        self.assertIn("grounding.all_doors.ranked.euclidean.agent", command.payload["message"])
 
 
 class TestLLMSemanticQueryPlanner(unittest.TestCase):
@@ -3204,6 +3301,104 @@ class TestLLMSemanticQueryPlanner(unittest.TestCase):
         self.assertEqual(session.last_result["task"]["instruction"], "go to the purple door")
         self.assertEqual(session.last_result["runtime_llm_calls_during_render"], 0)
         self.assertEqual(session.last_result["cache_miss_during_render"], 0)
+
+
+class JeenomPhase795RequestPlanTests(unittest.TestCase):
+    def _threshold_intent(self) -> OperatorIntent:
+        plan = {
+            "object_type": "door",
+            "operation": "filter",
+            "primitive_handle": "grounding.all_doors.ranked.euclidean.agent",
+            "metric": "euclidean",
+            "reference": "agent",
+            "order": "descending",
+            "ordinal": 1,
+            "color": None,
+            "exclude_colors": [],
+            "distance_value": 10,
+            "comparison": "below",
+            "tie_policy": "clarify",
+            "answer_fields": ["target", "distance"],
+            "required_capabilities": [
+                "grounding.all_doors.ranked.euclidean.agent",
+                "claims.filter.threshold.euclidean",
+                "task.go_to_object.door",
+            ],
+            "preserved_constraints": ["highest", "euclidean", "below", "10"],
+        }
+        return OperatorIntent(
+            intent_type="task_instruction",
+            task_type="go_to_object",
+            grounding_query_plan=plan,
+            capability_status="synthesizable",
+            required_capabilities=plan["required_capabilities"],
+            confidence=1.0,
+            reason="Thresholded Euclidean task request.",
+        )
+
+    def test_request_plan_decomposes_thresholded_euclidean_task(self):
+        intent = self._threshold_intent()
+        plan = build_request_plan(
+            "go to the door with the highest Euclidean distance below 10",
+            intent,
+        )
+        handles = [step.required_handle for step in plan.steps]
+
+        self.assertIn("grounding.all_doors.ranked.euclidean.agent", handles)
+        self.assertIn("claims.filter.threshold.euclidean", handles)
+        self.assertIn("task.go_to_object.door", handles)
+        self.assertEqual(
+            [step.step_id for step in plan.steps],
+            [
+                "rank_scene_doors",
+                "filter_distance_threshold",
+                "select_grounded_target",
+                "execute_task",
+            ],
+        )
+        self.assertEqual(
+            plan.steps[1].constraints,
+            {"metric": "euclidean", "comparison": "below", "threshold": 10},
+        )
+
+    def test_readiness_graph_proposes_first_synthesizable_blocking_node(self):
+        intent = self._threshold_intent()
+        plan = build_request_plan(
+            "go to the door with the highest Euclidean distance below 10",
+            intent,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=CapabilityRegistry.minigrid_default(),
+        )
+
+        self.assertEqual(graph.graph_status, "synthesizable")
+        self.assertEqual(graph.next_action, "propose_synthesis")
+        self.assertEqual(graph.blocking_step_id, "rank_scene_doors")
+
+    def test_operator_station_records_request_plan_and_readiness_graph(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(transport=build_test_llm_transport(), api_key="test"),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+            verbose=False,
+        )
+        intent = self._threshold_intent()
+        _ = session.command_from_operator_intent(
+            intent,
+            "go to the door with the highest Euclidean distance below 10",
+        )
+
+        self.assertIsNotNone(session.last_request_plan)
+        self.assertIsNotNone(session.last_readiness_graph)
+        self.assertEqual(
+            session.memory.episodic_memory["last_request_plan"]["steps"][0]["step_id"],
+            "rank_scene_doors",
+        )
+        self.assertEqual(
+            session.memory.episodic_memory["last_readiness_graph"]["next_action"],
+            "propose_synthesis",
+        )
 
 
 if __name__ == "__main__":

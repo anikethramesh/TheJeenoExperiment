@@ -53,3 +53,28 @@
 
    This rule applies to all substrate ports. A robot receiving "go to the farthest
    object" must not silently navigate to the closest one.
+
+10. OperatorIntent is not the execution plan.
+    Natural language must be converted into a typed RequestPlan before the station
+    clarifies, synthesizes, answers, updates memory, or executes.
+
+    The RequestPlan decomposes the operator request into dependency-aware steps:
+    grounding, claims filtering, selection, task execution, memory update, answer
+    generation, or control. Each step declares required handles, inputs, outputs,
+    constraints, tie policy, memory reads/writes, and expected side effects.
+
+    The ReadinessGraph arbitrates the RequestPlan, not the raw utterance. It checks each
+    step against the CapabilityRegistry, primitive library, OperationalMemory,
+    ActiveClaims, SceneModel, synthesis policy, and runtime cache/prewarm guarantees.
+    Its verdicts are explicit: executable, needs_clarification, synthesizable,
+    missing_skills, unsupported, stale_claims, or blocked_by_dependency.
+
+    Clarification questions, synthesis proposals, query answers, and task execution must
+    come from ReadinessGraph verdicts. This prevents phrase patches and silent capability
+    degradation. If the request cannot be represented as a valid RequestPlan, the station
+    must fail safely and explain the blocking node.
+
+    Durable Knowledge stores operator-taught facts. ActiveClaims store computed scene
+    facts with provenance and scene fingerprint. Episodic memory stores the last plan,
+    target, task, and result. Computed analysis is not durable knowledge unless the
+    operator explicitly promotes it.
