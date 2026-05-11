@@ -1464,6 +1464,9 @@ Implemented:
   - _try_synthesize_primitive: synthesize → validate → register → re-route to
     _execute_synthesized_grounding. On validation failure, returns an honest operator
     message without executing. On synthesis refusal, returns None (falls through).
+  - _try_synthesize_primitive now runs one bounded repair attempt after validation failure,
+    passing the exact validation error and previous candidate back to the synthesizer. A
+    second failure still does not register or execute anything.
   - _execute_synthesized_grounding: calls the registered callable, writes ranked claims,
     then either returns task_instruction (go_to_object) or a display result.
   - ground_target_selector: checks get_synthesized_callable before refusing unknown metrics.
@@ -1472,7 +1475,7 @@ Implemented:
 - evals/primitive_synthesis_probe.py: 20 checks covering AST imports, SmokeTest refusal,
   LLM fallback, validator pass/reject/import-reject, registry promotion, synthesized
   callable output, end-to-end session synthesis with fake transport, second-call reuse,
-  and golden-path preservation.
+  syntax-error repair, and golden-path preservation.
 
 Success criteria:
 - "go to the closest door using Euclidean distance" detects missing Euclidean grounding support.
@@ -1498,6 +1501,8 @@ Technical debt:
 - Synthesis is triggered only from the arbitration path (synthesize decision). The
   GroundingQueryPlan path (Phase 7.75) does not yet trigger synthesis when the required
   primitive is synthesizable.
+- The repair loop is intentionally bounded to one retry. Future phases need a richer
+  repair protocol with operator-visible diff/inspection before registration.
 
 Out of scope:
 - motion-control primitive synthesis
@@ -1508,7 +1513,7 @@ Out of scope:
 - clarification Q/A
 
 ### Phase 7.9 — Collaborative Capability Composition
-Status: planned.
+Status: in progress.
 
 Goal:
 Close the capability gap through dialogue. When the system detects a missing primitive that
@@ -1600,11 +1605,70 @@ Implemented:
   pending_clarification. synthesis_proposal added to dispatch. reset() clears proposal.
 - evals/collaborative_synthesis_probe.py: 16 checks covering proposal, yes/no/redirect,
   second-call, reset, and golden path.
+- jeenom/primitive_synthesizer.py: prompt hardened to require a complete syntactically valid
+  function, no Markdown fences, and exact def-line conformance.
+- jeenom/primitive_synthesizer.py / jeenom/operator_station.py: synthesis approval now supports
+  synthesize → validate → repair once → validate → register. This directly handles malformed
+  LLM candidates such as mismatched brackets without weakening the safety gate.
+- jeenom/primitive_validator.py: corrected the Euclidean-vs-Manhattan regression fixture so
+  Manhattan masquerading as Euclidean is actually rejected.
+- jeenom/primitive_library.py: added grounding.all_doors.ranked.euclidean.agent as a
+  pre-declared synthesizable ranked-list handle. This is the exact capability needed for
+  "Euclidean distance to all doors" questions.
+- jeenom/capability_registry.py: synthesizing grounding.closest_door.euclidean.agent now also
+  promotes the equivalent grounding.all_doors.ranked.euclidean.agent handle because both share
+  the same ranked-list callable contract. The registry still uses exact handles; it does not
+  weaken closest into ranked at match time.
+- jeenom/intent_verifier.py: ranked, ordinal, and superlative distance signals now inject
+  grounding.all_doors.ranked.<metric>.agent instead of the legacy unregistered
+  grounding.ranked_doors.<metric>.agent form.
+- jeenom/operator_station.py: ranked composition and display now use the primitive handle's
+  metric and synthesized callable, so a post-synthesis "give me Euclidean distance to all the
+  doors" displays a Euclidean ranking rather than falling back to Manhattan or refusing.
+- evals/primitive_synthesis_probe.py: added repair-loop checks proving malformed first code is
+  not registered, the validation error is sent back, and the repaired second candidate can be
+  registered.
+  - Also checks that the ranked Euclidean alias is promoted and displayable after synthesis.
 
 Eval:
 - Command:
   python evals/collaborative_synthesis_probe.py
+- Command:
+  python evals/primitive_synthesis_probe.py
+- Command:
+  python evals/primitive_composition_probe.py
 - Requires gymnasium + minigrid environment.
+
+Current proven behavior:
+- Operator-approved synthesis does not register malformed code.
+- If the first candidate fails validation, JEENOM asks the synthesizer for one repair using the
+  exact compiler/validation failure.
+- If the repaired candidate passes, it is registered and the original grounding/task resumes.
+- If the repaired candidate fails, JEENOM returns an honest failure and does not execute.
+- After Euclidean synthesis, both the specific closest-door handle and the all-doors ranked
+  Euclidean handle are available in the registry.
+- Follow-up requests like "give me the Euclidean distance to all the doors" route through the
+  exact ranked Euclidean handle and display a Euclidean ranking.
+- Added a second synthesis target type: claims-filter primitives with signature
+  fn(entries, condition) -> list[GroundedDoorEntry]. These operate on typed ActiveClaims
+  rather than SceneModel.
+- Added claims.filter.threshold.euclidean and claims.filter.threshold.manhattan as
+  pre-declared, safe-to-synthesize claims primitives. They are parametric: threshold and
+  comparison are supplied through condition, not baked into the generated function.
+- CapabilityRegistry now indexes the claims layer from primitive_library.py, and the schema
+  accepts claims as a first-class primitive layer.
+- The LLM/arbitrator prompts now distinguish scene-grounding synthesis from claims-filter
+  synthesis. Threshold filters over already-ranked claims should propose claims.filter.threshold.<metric>.
+- Operator approval now dispatches claims.* handles through the claims-filter synthesizer and
+  validator path, not the SceneModel grounding signature.
+- Multiple matches from a claims filter create a normal candidate clarification instead of
+  silently selecting a target.
+- Added evals/claims_filter_synthesis_probe.py proving: ranked claims -> threshold synthesis
+  proposal -> approval -> claims-filter validation/register -> multiple-match clarification
+  -> selected target executes with runtime_llm_calls_during_render=0 and cache_miss_during_render=0.
+- Fixed proposal handoff bug: arbitration-created claims-filter proposals now preserve
+  proposed_condition (threshold, comparison, metric) through operator approval. This prevents
+  threshold filters from defaulting to threshold=0 or the wrong metric after synthesis.
 
 
 ### Phase 8 — GoToObject/general object variant

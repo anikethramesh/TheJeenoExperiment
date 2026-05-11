@@ -16,13 +16,20 @@ from jeenom.minigrid_envs import ensure_custom_minigrid_envs_registered
 from jeenom.minigrid_adapter import MiniGridAdapter
 from jeenom.operator_station import OperatorStationSession, classify_utterance
 from jeenom.plan_cache import PlanCache
-from jeenom.primitive_library import ACTION_PRIMITIVES, SENSING_PRIMITIVES, TASK_PRIMITIVES
+from jeenom.primitive_library import (
+    ACTION_PRIMITIVES,
+    CLAIMS_FILTER_PRIMITIVES,
+    SENSING_PRIMITIVES,
+    TASK_PRIMITIVES,
+)
+from jeenom.primitive_synthesizer import SynthesisResult
 from jeenom.run_demo import prewarm_jit_cache, run_episode
 from jeenom.schemas import (
     EvidenceFrame,
     ExecutionContext,
     ExecutionContract,
     GroundedDoorEntry,
+    OperatorIntent,
     Percepts,
     PrimitiveCall,
     SceneModel,
@@ -1024,14 +1031,19 @@ class JeenomMiniGridTests(unittest.TestCase):
         self.assertIn("grounding", summary["primitives"])
         self.assertIn("sensing", summary["primitives"])
         self.assertIn("action", summary["primitives"])
+        self.assertIn("claims", summary["primitives"])
         task_names = {item["name"] for item in summary["primitives"]["task"]}
         sensing_names = {item["name"] for item in summary["primitives"]["sensing"]}
         action_names = {item["name"] for item in summary["primitives"]["action"]}
+        claims_names = {item["name"] for item in summary["primitives"]["claims"]}
         self.assertTrue({f"task.{name}" for name in TASK_PRIMITIVES}.issubset(task_names))
         self.assertTrue(
             {f"sensing.{name}" for name in SENSING_PRIMITIVES}.issubset(sensing_names)
         )
         self.assertTrue({f"action.{name}" for name in ACTION_PRIMITIVES}.issubset(action_names))
+        self.assertTrue(
+            {f"claims.{name}" for name in CLAIMS_FILTER_PRIMITIVES}.issubset(claims_names)
+        )
         plan_grid_path = registry.primitive("action.plan_grid_path")
         self.assertIsNotNone(plan_grid_path)
         self.assertEqual(plan_grid_path.runtime_binding["kind"], "python")
@@ -1097,6 +1109,7 @@ class JeenomMiniGridTests(unittest.TestCase):
         self.assertIn("grounding.closest_door.manhattan.agent", response)
         self.assertIn("sensing.parse_grid_objects", response)
         self.assertIn("action.plan_grid_path", response)
+        self.assertIn("claims.filter.threshold.manhattan", response)
         self.assertIn("grounding.closest_door.euclidean.agent", response)
 
     def test_operator_station_llm_capability_overview_answers_from_registry(self):
@@ -2727,6 +2740,168 @@ class TestGroundingResultComposition(unittest.TestCase):
         self.assertIn("closest=grey door@(3,0) distance=2", response)
         self.assertIn("second closest=purple door@(0,3) distance=6", response)
         self.assertIsNone(session.last_result)
+
+
+class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
+    """Claims-filter primitives synthesize over ActiveClaims, not SceneModel."""
+
+    class ThresholdSynthesizer:
+        def synthesize(
+            self,
+            handle,
+            description,
+            consumes,
+            produces,
+            existing_example=None,
+            previous_code=None,
+            validation_error=None,
+        ):
+            function_name = handle.replace(".", "_")
+            code = (
+                f"def {function_name}(entries, condition):\n"
+                "    threshold = float(condition.get('threshold', 0))\n"
+                "    comparison = condition.get('comparison', 'above')\n"
+                "    if comparison == 'above':\n"
+                "        return [e for e in entries if e.distance > threshold]\n"
+                "    if comparison == 'at_least':\n"
+                "        return [e for e in entries if e.distance >= threshold]\n"
+                "    if comparison == 'below':\n"
+                "        return [e for e in entries if e.distance < threshold]\n"
+                "    if comparison in ('at_most', 'within'):\n"
+                "        return [e for e in entries if e.distance <= threshold]\n"
+                "    return []\n"
+            )
+            return SynthesisResult(
+                handle=handle,
+                function_name=function_name,
+                code=code,
+                status="success",
+            )
+
+    def _make_session(self) -> OperatorStationSession:
+        session = OperatorStationSession(
+            compiler=SmokeTestCompiler(),
+            compiler_name="smoke",
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+            max_loops=512,
+        )
+        session.synthesizer = self.ThresholdSynthesizer()
+        return session
+
+    def _run_with_env(self, fn):
+        def fake_build_env(env_id, render_mode):
+            return FullyObsWrapper(gym.make(env_id))
+
+        with patch("jeenom.run_demo.build_env", side_effect=fake_build_env):
+            return fn()
+
+    def _threshold_intent(self, *, wants_task: bool = True) -> OperatorIntent:
+        return OperatorIntent(
+            intent_type="task_instruction" if wants_task else "claim_reference",
+            canonical_instruction=None,
+            task_type="go_to_object" if wants_task else None,
+            target=None,
+            target_selector=None,
+            capability_status="synthesizable",
+            knowledge_update=None,
+            reference=None,
+            status_query=None,
+            control=None,
+            clear_memory=False,
+            confidence=1.0,
+            reason="Threshold filter over active ranked claims.",
+            claim_reference="threshold_filter",
+            grounding_query_plan={
+                "object_type": "door",
+                "operation": "filter",
+                "primitive_handle": "claims.filter.threshold.manhattan",
+                "metric": "manhattan",
+                "reference": "agent",
+                "order": None,
+                "ordinal": None,
+                "color": None,
+                "exclude_colors": [],
+                "distance_value": 7,
+                "comparison": "above",
+                "tie_policy": "clarify",
+                "answer_fields": ["target", "distance"],
+                "required_capabilities": [
+                    "claims.filter.threshold.manhattan",
+                    "task.go_to_object.door",
+                ],
+                "preserved_constraints": ["door", "manhattan", "above", "7"],
+            },
+            required_capabilities=[
+                "claims.filter.threshold.manhattan",
+                "task.go_to_object.door",
+            ],
+        )
+
+    def test_claims_filter_threshold_synthesis_clarifies_multiple_matches_then_runs(self):
+        session = self._make_session()
+        ranked = self._run_with_env(
+            lambda: session.handle_utterance("rank all the doors by manhattan distance")
+        )
+        self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT", ranked)
+        self.assertIsNotNone(session.active_claims)
+
+        proposal = session.command_from_operator_intent(
+            self._threshold_intent(),
+            "go to the door where manhattan distance is above 7",
+        )
+        self.assertEqual(proposal.kind, "synthesis_proposal")
+        self.assertIn("claims.filter.threshold.manhattan", proposal.payload["message"])
+
+        clarified = self._run_with_env(lambda: session.handle_utterance("yes"))
+        self.assertIn("DOORS WITH MANHATTAN DISTANCE ABOVE 7.0", clarified)
+        self.assertIn("blue door@(12,3)", clarified)
+        self.assertIn("red door@(10,7)", clarified)
+        self.assertIsNotNone(session.pending_clarification)
+        spec = session.capability_registry.lookup("claims.filter.threshold.manhattan")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.implementation_status, "implemented")
+
+        response = self._run_with_env(lambda: session.handle_utterance("red"))
+        self.assertIn("RUN COMPLETE", response)
+        self.assertIn("runtime_llm_calls_during_render=0", response)
+        self.assertIn("cache_miss_during_render=0", response)
+        self.assertIn("final_skill_plan=['done']", response)
+        self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
+
+    def test_claims_filter_arbitration_proposal_preserves_threshold_condition(self):
+        session = self._make_session()
+        ranked = self._run_with_env(
+            lambda: session.handle_utterance("rank all the doors by manhattan distance")
+        )
+        self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT", ranked)
+
+        intent = OperatorIntent(
+            intent_type="unsupported",
+            capability_status="synthesizable",
+            confidence=0.0,
+            reason="Arbitrator must recover threshold condition.",
+            required_capabilities=["claims.filter.threshold.manhattan"],
+        )
+        proposal = session.command_from_operator_intent(
+            intent,
+            "go to a door which has a manhattan distance above 7",
+        )
+        self.assertEqual(proposal.kind, "synthesis_proposal")
+        self.assertEqual(
+            session.pending_synthesis_proposal.proposed_condition,
+            {"threshold": 7.0, "comparison": "above", "metric": "manhattan"},
+        )
+
+        clarified = self._run_with_env(lambda: session.handle_utterance("yes"))
+
+        self.assertIn("DOORS WITH MANHATTAN DISTANCE ABOVE 7.0", clarified)
+        self.assertIn("blue door@(12,3)", clarified)
+        self.assertIn("red door@(10,7)", clarified)
+        self.assertNotIn("purple door@(4,0)", clarified)
+        self.assertNotIn("yellow door@(0,2)", clarified)
 
 
 class TestLLMSemanticQueryPlanner(unittest.TestCase):

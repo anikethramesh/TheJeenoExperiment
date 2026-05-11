@@ -783,9 +783,9 @@ class SmokeTestCompiler(CompilerBackend):
                         "distance_reference": "agent" if metric is not None else None,
                     },
                     capability_status="missing_skills",
-                    required_capabilities=[f"grounding.ranked_doors.{metric_suffix}.agent"],
+                    required_capabilities=[f"grounding.all_doors.ranked.{metric_suffix}.agent"],
                     confidence=0.85,
-                    reason="Ranked listing requires grounding.ranked_doors — not the same as closest.",
+                    reason="Ranked listing requires grounding.all_doors.ranked — not the same as closest.",
                 )
             return OperatorIntent(
                 intent_type=(
@@ -1186,13 +1186,23 @@ class LLMCompiler(CompilerBackend):
                 "closest, next door) and claim_reference=other_door for residual references "
                 "(the other door, the remaining door). Do NOT choose the object yourself; "
                 "the station resolves claim references deterministically from active_claims. "
+                "If active_claims_summary is provided and the utterance asks for a distance "
+                "threshold over the prior ranked results (e.g. 'the door where euclidean "
+                "distance is above 6', 'doors below 10', 'go to one with distance at least "
+                "7'), emit intent_type=claim_reference, claim_reference=threshold_filter, "
+                "and a grounding_query_plan with operation='filter', primitive_handle="
+                "'claims.filter.threshold.<metric>', metric set to the named metric or the "
+                "active claim metric, distance_value set to the numeric threshold, and "
+                "comparison in ['above','below','within','at_least','at_most']. Include the "
+                "claims.filter.threshold.<metric> handle in required_capabilities. Do not "
+                "bake the threshold into the handle; the primitive is parametric. "
                 "REQUIRED_CAPABILITIES: Every intent must include a required_capabilities "
                 "field listing the exact capability handles needed. Use the handle names "
                 "exactly as they appear in the capability_manifest (e.g. "
                 "'grounding.closest_door.manhattan.agent', 'task.go_to_object.door'). "
                 "Include any handle the intent needs even if it is NOT in the manifest — the "
                 "station's CapabilityMatcher will classify it as missing_skills. "
-                "No weakening: grounding.closest_door does NOT satisfy grounding.ranked_doors; "
+                "No weakening: grounding.closest_door does NOT satisfy legacy grounding.ranked_doors; "
                 "grounding.closest_door does NOT satisfy grounding.nth_closest_door; "
                 "task.go_to_object does NOT satisfy task.pickup. "
                 "A request for ranked or ordered listing of objects (e.g. 'all doors in "

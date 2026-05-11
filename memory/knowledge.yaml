@@ -2,4 +2,4 @@ target_color: "red"
 target_type: "door"
 delivery_target: {"color": "red", "object_type": "door"}
 last_task_type: "go_to_object"
-last_instruction: "go to the red door"
+last_instruction: "go to the blue door"

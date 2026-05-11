@@ -37,6 +37,33 @@ GROUNDING_FUNCTION_SIGNATURE = (
     "    # Returns: list[tuple[float, SceneObject]] sorted ascending by distance\n"
 )
 
+CLAIMS_FILTER_FUNCTION_SIGNATURE = (
+    "def {function_name}(entries, condition):\n"
+    "    # entries: list[GroundedDoorEntry] — typed ActiveClaims entries with fields:\n"
+    "    #   .color (str|None), .x (int), .y (int), .distance (float),\n"
+    "    #   .object_type (str), .metric (str|None), .provenance (str|None)\n"
+    "    # condition: dict — threshold (float), comparison (str)\n"
+    "    #   comparison values: 'above', 'below', 'within', 'at_least', 'at_most'\n"
+    "    # Returns: list[GroundedDoorEntry] — filtered subset, order preserved\n"
+    "    # MUST NOT access scene, env, filesystem, or network. MUST NOT import anything.\n"
+)
+
+CLAIMS_FILTER_EXAMPLE = (
+    "# Example: parametric distance threshold filter over ActiveClaims entries\n"
+    "def claims_filter_threshold(entries, condition):\n"
+    "    threshold = float(condition.get('threshold', 0))\n"
+    "    comparison = condition.get('comparison', 'above')\n"
+    "    if comparison == 'above':\n"
+    "        return [e for e in entries if e.distance > threshold]\n"
+    "    elif comparison == 'at_least':\n"
+    "        return [e for e in entries if e.distance >= threshold]\n"
+    "    elif comparison == 'below':\n"
+    "        return [e for e in entries if e.distance < threshold]\n"
+    "    elif comparison in ('at_most', 'within'):\n"
+    "        return [e for e in entries if e.distance <= threshold]\n"
+    "    return entries\n"
+)
+
 ALLOWED_IMPORTS = frozenset({"typing"})
 
 
@@ -77,6 +104,8 @@ class SynthesizerBackend(ABC):
         consumes: tuple[str, ...],
         produces: tuple[str, ...],
         existing_example: str | None = None,
+        previous_code: str | None = None,
+        validation_error: str | None = None,
     ) -> SynthesisResult:
         raise NotImplementedError
 
@@ -91,6 +120,8 @@ class SmokeTestSynthesizer(SynthesizerBackend):
         consumes: tuple[str, ...],
         produces: tuple[str, ...],
         existing_example: str | None = None,
+        previous_code: str | None = None,
+        validation_error: str | None = None,
     ) -> SynthesisResult:
         return SynthesisResult(
             handle=handle,
@@ -149,6 +180,8 @@ class LLMSynthesizer(SynthesizerBackend):
         consumes: tuple[str, ...],
         produces: tuple[str, ...],
         existing_example: str | None = None,
+        previous_code: str | None = None,
+        validation_error: str | None = None,
     ) -> SynthesisResult:
         if self._fallback_reason:
             return SynthesisResult(
@@ -159,27 +192,58 @@ class LLMSynthesizer(SynthesizerBackend):
                 error_message=self._fallback_reason,
             )
 
-        example = existing_example or self.MANHATTAN_EXAMPLE
         function_name = _handle_to_function_name(handle)
-        signature = GROUNDING_FUNCTION_SIGNATURE.format(function_name=function_name)
+        is_claims_filter = handle.startswith("claims.")
 
-        system_prompt = (
-            "You are the JEENOM primitive synthesizer. Your task is to generate a pure Python "
-            "function body for a missing grounding primitive.\n\n"
-            "HARD RULES:\n"
-            "  - Only use: math, standard Python built-ins, and the scene/selector inputs.\n"
-            "  - Do NOT import gymnasium, minigrid, numpy, torch, or any external library.\n"
-            "  - Do NOT access the filesystem or network.\n"
-            "  - Do NOT call env.step() or any robot action.\n"
-            "  - The function must be pure and deterministic.\n"
-            "  - Return a list[tuple[float, SceneObject]] sorted ascending by distance.\n"
-            "  - An empty scene returns [].\n\n"
-            f"Function signature to implement:\n{signature}\n\n"
-            f"Reference implementation (Manhattan distance):\n{example}\n\n"
-            "Put the complete function in function_body: start with the def line, "
-            "then all indented body lines. "
-            "Do not include import statements — use math.sqrt etc. inline.\n"
-        )
+        if is_claims_filter:
+            signature = CLAIMS_FILTER_FUNCTION_SIGNATURE.format(function_name=function_name)
+            example = existing_example or CLAIMS_FILTER_EXAMPLE
+            system_prompt = (
+                "You are the JEENOM primitive synthesizer. Your task is to generate a pure Python "
+                "claims-filter function that operates exclusively on typed ActiveClaims entries.\n\n"
+                "HARD RULES:\n"
+                "  - Only use: standard Python built-ins and the entries/condition inputs.\n"
+                "  - Do NOT import anything — no math, no gymnasium, no minigrid, no numpy.\n"
+                "  - Do NOT access SceneModel, env, filesystem, or network.\n"
+                "  - Do NOT call env.step() or any robot action.\n"
+                "  - The function must be pure and deterministic.\n"
+                "  - Return a list[GroundedDoorEntry] — filtered subset, order preserved.\n"
+                "  - entries may be empty — return [] in that case.\n\n"
+                f"Function signature to implement:\n{signature}\n\n"
+                f"Reference implementation:\n{example}\n\n"
+                "Put the complete function in function_body: start with exactly the def line, "
+                "then all indented body lines. Return only syntactically valid Python code. "
+                "Do not include Markdown fences or import statements.\n"
+            )
+        else:
+            example = existing_example or self.MANHATTAN_EXAMPLE
+            signature = GROUNDING_FUNCTION_SIGNATURE.format(function_name=function_name)
+            system_prompt = (
+                "You are the JEENOM primitive synthesizer. Your task is to generate a pure Python "
+                "function body for a missing grounding primitive.\n\n"
+                "HARD RULES:\n"
+                "  - Only use: math, standard Python built-ins, and the scene/selector inputs.\n"
+                "  - Do NOT import gymnasium, minigrid, numpy, torch, or any external library.\n"
+                "  - Do NOT access the filesystem or network.\n"
+                "  - Do NOT call env.step() or any robot action.\n"
+                "  - The function must be pure and deterministic.\n"
+                "  - Return a list[tuple[float, SceneObject]] sorted ascending by distance.\n"
+                "  - An empty scene returns [].\n\n"
+                f"Function signature to implement:\n{signature}\n\n"
+                f"Reference implementation (Manhattan distance):\n{example}\n\n"
+                "Put the complete function in function_body: start with exactly this def line, "
+                "then all indented body lines. Return only syntactically valid Python code in "
+                "function_body. Do not include Markdown fences. Do not include import statements — "
+                "use math.sqrt etc. inline.\n"
+            )
+        if validation_error and previous_code:
+            system_prompt += (
+                "\nThe previous candidate failed validation. Repair it instead of changing "
+                "the requested primitive.\n"
+                f"Validation failure:\n{validation_error}\n\n"
+                f"Previous candidate:\n{previous_code}\n\n"
+                "Return a complete corrected function only.\n"
+            )
         user_payload = {
             "handle": handle,
             "description": description,
@@ -232,10 +296,13 @@ class LLMSynthesizer(SynthesizerBackend):
                 error_message="Synthesis response missing function_body.",
             )
         # Normalize: LLMs sometimes emit only the indented body without the def line.
-        # If the code doesn't start with a def, prepend the signature.
+        # If the code doesn't start with a def, prepend the appropriate signature.
         # Preserve original indentation — only strip leading blank lines.
         if not body.lstrip("\n").startswith("def "):
-            sig = GROUNDING_FUNCTION_SIGNATURE.format(function_name=function_name)
+            if handle.startswith("claims."):
+                sig = CLAIMS_FILTER_FUNCTION_SIGNATURE.format(function_name=function_name)
+            else:
+                sig = GROUNDING_FUNCTION_SIGNATURE.format(function_name=function_name)
             body = sig + body.lstrip("\n")
         # Reject any import statements the LLM might have snuck in
         for line in body.splitlines():

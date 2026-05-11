@@ -244,7 +244,7 @@ def main() -> int:
         "tell me the doors in descending order by manhattan distance", memory=mem
     )
     checks["smoke_ranked_requires_ranked_handle"] = (
-        "grounding.ranked_doors.manhattan.agent" in intent_ranked_smoke.required_capabilities
+        "grounding.all_doors.ranked.manhattan.agent" in intent_ranked_smoke.required_capabilities
     )
 
     print("SMOKETEST required_capabilities")
@@ -258,14 +258,14 @@ def main() -> int:
     checks["lookup_missing_returns_none"] = registry.lookup("grounding.ranked_doors.manhattan.agent") is None
     checks["lookup_no_prefix_relaxation"] = registry.lookup("grounding.closest_door") is None
 
-    # ── 13. Full session: ranked query → missing_skills response ───────────
+    # ── 13. Full session: ranked query → registered ranked display ─────────
     session2 = _make_session()
     _run(lambda: session2.handle_utterance("go to the red door"))
     result_str = _run(lambda: session2.handle_utterance(
         "tell me the doors in descending order by manhattan distance"
     ))
-    checks["ranked_query_returns_missing_skills_message"] = (
-        "MISSING" in result_str.upper() or "CAPABILIT" in result_str.upper()
+    checks["ranked_query_returns_registered_display"] = (
+        "DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT" in result_str
     )
 
     print("RANKED QUERY response")

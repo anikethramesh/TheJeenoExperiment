@@ -67,6 +67,7 @@ class PendingSynthesisProposal:
     cap_match: Any
     similar_handles: list[str]
     proposed_description: str | None = None
+    proposed_condition: dict[str, Any] | None = None
 
 
 def _normalize_color(color: str) -> str:
@@ -541,6 +542,13 @@ class OperatorStationSession:
             return OperatorCommand(kind=intent.intent_type, utterance=utterance)
 
         if intent.intent_type == "claim_reference":
+            if intent.claim_reference == "threshold_filter":
+                # Route through capability matching → arbitration → synthesis pipeline.
+                # The plan carries threshold, comparison, and metric for execution.
+                if cap_match.verdict in {"synthesizable", "missing_skills"}:
+                    return self._arbitrate_gap(utterance, intent, cap_match)
+                # Already registered — execute directly.
+                return self._dispatch_claims_filter(utterance, intent, cap_match)
             return OperatorCommand(
                 kind="claim_reference",
                 utterance=utterance,
@@ -548,18 +556,10 @@ class OperatorStationSession:
             )
 
         if intent.intent_type in {"unsupported", "ambiguous"}:
-            return OperatorCommand(
-                kind=intent.intent_type,
-                utterance=utterance,
-                payload={
-                    "message": (
-                        "I cannot safely execute that capability yet."
-                        if intent.intent_type == "unsupported"
-                        else "I could not safely resolve that instruction yet."
-                    ),
-                    "reason": intent.reason,
-                },
-            )
+            # Route through the arbitrator — it has access to the full capability manifest
+            # and SceneModel API surface, so it can recognise synthesisable spatial
+            # computations (e.g. threshold filtering) that the LLM compiler missed.
+            return self._arbitrate_gap(utterance, intent, cap_match)
 
         if intent.intent_type == "quit":
             return OperatorCommand(kind="quit", utterance=utterance)
@@ -669,6 +669,16 @@ class OperatorStationSession:
                     return readiness_command
                 grounded = self.ground_target_selector(intent.target_selector)
                 if not grounded["ok"]:
+                    # Before asking the operator to disambiguate, let the arbitrator
+                    # decide whether the unresolved constraint can be synthesised.
+                    # This fires when the operator specifies a condition (e.g. a
+                    # distance threshold) that the current primitives cannot handle.
+                    if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
+                        arb_command = self._arbitrate_gap(utterance, intent, cap_match)
+                        if arb_command.kind in {
+                            "synthesis_proposal", "missing_skills", "synthesizable",
+                        }:
+                            return arb_command
                     clarification = self.maybe_start_selector_clarification(
                         utterance=utterance,
                         resume_kind="task_instruction",
@@ -778,6 +788,8 @@ class OperatorStationSession:
 
         if handle == "grounding.claims.last_grounded_target":
             return self._compose_claim_reference_query_plan(utterance, intent)
+        if isinstance(handle, str) and handle.startswith("claims."):
+            return self._dispatch_claims_filter(utterance, intent, cap_match)
 
         return self._compose_grounding_query_plan(
             utterance,
@@ -976,7 +988,7 @@ class OperatorStationSession:
         wants_task = intent.intent_type == "task_instruction" or self._utterance_requests_navigation(
             _normalize_utterance(utterance)
         )
-        claims = self._ensure_ranked_door_claims()
+        claims = self._ensure_ranked_door_claims(plan.get("primitive_handle"))
         if isinstance(claims, str):
             return OperatorCommand(
                 kind="missing_skills",
@@ -1164,6 +1176,7 @@ class OperatorStationSession:
                     intent,
                     cap_match,
                     proposed_description=decision.proposed_description,
+                    proposed_condition=decision.proposed_condition,
                 )
             return OperatorCommand(
                 kind="synthesizable",
@@ -1217,7 +1230,12 @@ class OperatorStationSession:
             )
 
         # Default: refuse
-        kind = "synthesizable" if cap_match.verdict == "synthesizable" else "missing_skills"
+        if cap_match.verdict == "synthesizable":
+            kind = "synthesizable"
+        elif cap_match.verdict == "ok":
+            kind = "ambiguous"
+        else:
+            kind = "missing_skills"
         return OperatorCommand(
             kind=kind,
             utterance=utterance,
@@ -1259,28 +1277,46 @@ class OperatorStationSession:
         produces: tuple[str, ...] = tuple(spec.outputs) if spec is not None else (
             "grounded_target", "distance"
         )
-        self.log(f"synthesis: attempting {handle} (dynamic={spec is None})")
-        result = self.synthesizer.synthesize(
-            handle=handle,
-            description=description,
-            consumes=consumes,
-            produces=produces,
-        )
-        if result.status != "success":
-            self.log(f"synthesis: {handle} refused/failed — {result.error_message}")
-            return None
+        validation = None
+        result = None
+        validation_failures: list[str] = []
+        previous_code: str | None = None
+        for attempt in range(2):
+            if attempt == 0:
+                self.log(f"synthesis: attempting {handle} (dynamic={spec is None})")
+            else:
+                self.log(f"synthesis: repairing {handle} after validation failure")
+            result = self.synthesizer.synthesize(
+                handle=handle,
+                description=description,
+                consumes=consumes,
+                produces=produces,
+                previous_code=previous_code,
+                validation_error="; ".join(validation_failures) if validation_failures else None,
+            )
+            if result.status != "success":
+                self.log(f"synthesis: {handle} refused/failed — {result.error_message}")
+                return None
 
-        self.log(f"synthesis: validating {handle}")
-        validation = self.validator.validate(
-            handle=handle,
-            function_name=result.function_name,
-            code=result.code,
-        )
-        if not validation.passed:
+            self.log(f"synthesis: validating {handle}")
+            self.log(f"synthesis: generated code:\n{result.code}")
+            validation = self.validator.validate(
+                handle=handle,
+                function_name=result.function_name,
+                code=result.code,
+            )
+            if validation.passed:
+                break
+            validation_failures = list(validation.failures)
+            previous_code = result.code
             self.log(
                 f"synthesis: {handle} validation failed — "
-                + "; ".join(validation.failures)
+                + "; ".join(validation_failures)
             )
+
+        if validation is None or result is None:
+            return None
+        if not validation.passed:
             return OperatorCommand(
                 kind="synthesizable",
                 utterance=utterance,
@@ -1351,6 +1387,11 @@ class OperatorStationSession:
             )
 
         selector = dict(intent.target_selector or {})
+        doors_in_scene = [o for o in scene.objects if o.object_type == "door"]
+        self.log(
+            f"synthesis grounding: scene has {len(scene.objects)} objects "
+            f"({len(doors_in_scene)} doors), selector={selector}"
+        )
         try:
             ranked = fn(scene, selector)
         except Exception as exc:  # noqa: BLE001
@@ -1403,6 +1444,237 @@ class OperatorStationSession:
             capability_match=cap_match,
         )
 
+    # ── Claims-filter synthesis path ──────────────────────────────────────────
+
+    def _dispatch_claims_filter(
+        self,
+        utterance: str,
+        intent: OperatorIntent,
+        cap_match: CapabilityMatchResult,
+    ) -> OperatorCommand:
+        """Execute a registered claims-filter primitive against active_claims."""
+        plan = intent.grounding_query_plan or {}
+        handle = plan.get("primitive_handle") or ""
+        if not handle:
+            # Infer handle from metric in plan
+            metric = plan.get("metric", "euclidean") or "euclidean"
+            handle = f"claims.filter.threshold.{metric}"
+
+        fn = self.capability_registry.get_synthesized_callable(handle)
+        if fn is None:
+            return OperatorCommand(
+                kind="missing_skills",
+                utterance=utterance,
+                payload={"message": f"Claims-filter primitive '{handle}' is not registered."},
+                capability_match=cap_match,
+            )
+        return self._execute_synthesized_claims_filter(handle, fn, utterance, intent, cap_match)
+
+    def _try_synthesize_claims_filter(
+        self,
+        handle: str,
+        utterance: str,
+        intent: OperatorIntent,
+        cap_match: CapabilityMatchResult,
+    ) -> OperatorCommand | None:
+        """Synthesize, validate, and register a claims-filter primitive.
+
+        Same proposal→validate→register pipeline as _try_synthesize_primitive but
+        uses CLAIMS_FILTER_FUNCTION_SIGNATURE and ClaimsFilterFixtures.
+        Returns None if synthesis is refused (falls through to error message).
+        """
+        spec = self.capability_registry.lookup(handle)
+        description = (
+            spec.description if spec is not None
+            else f"Parametric distance threshold filter over ActiveClaims entries ({handle})."
+        )
+        self.log(f"claims-filter synthesis: synthesizing {handle}")
+        result = self.synthesizer.synthesize(
+            handle=handle,
+            description=description,
+            consumes=tuple(spec.inputs) if spec is not None else ("active_claims.ranked_scene_doors", "condition"),
+            produces=tuple(spec.outputs) if spec is not None else ("filtered_entries",),
+        )
+        if result.status != "success":
+            self.log(f"claims-filter synthesis refused/failed: {result.error_message}")
+            return None
+
+        self.log(f"claims-filter synthesis: generated code:\n{result.code}")
+        vr = self.validator.validate(handle, result.function_name, result.code)
+        if not vr.passed:
+            self.log(f"claims-filter validation failed: {vr.failures} — attempting repair")
+            repair = self.synthesizer.synthesize(
+                handle=handle,
+                description=description,
+                consumes=tuple(spec.inputs) if spec is not None else ("active_claims.ranked_scene_doors", "condition"),
+                produces=tuple(spec.outputs) if spec is not None else ("filtered_entries",),
+                previous_code=result.code,
+                validation_error="; ".join(vr.failures),
+            )
+            if repair.status != "success":
+                return None
+            vr = self.validator.validate(handle, repair.function_name, repair.code)
+            if not vr.passed:
+                self.log(f"claims-filter repair also failed: {vr.failures}")
+                return OperatorCommand(
+                    kind="synthesizable",
+                    utterance=utterance,
+                    payload={
+                        "message": (
+                            f"I synthesized a claims-filter candidate for '{handle}' but it failed "
+                            f"validation: {'; '.join(vr.failures)}. I did not register it."
+                        ),
+                        "match": cap_match.compact(),
+                    },
+                    capability_match=cap_match,
+                )
+
+        fn = vr.compiled_fn
+        registered = self.capability_registry.register_synthesized(handle, fn)
+        if not registered:
+            self.capability_registry.register_dynamic(handle, description, fn)
+        self.log(f"claims-filter synthesis: {handle} registered")
+        return self._execute_synthesized_claims_filter(handle, fn, utterance, intent, cap_match)
+
+    def _execute_synthesized_claims_filter(
+        self,
+        handle: str,
+        fn: Any,
+        utterance: str,
+        intent: OperatorIntent,
+        cap_match: CapabilityMatchResult,
+    ) -> OperatorCommand:
+        """Call a registered claims-filter fn(entries, condition) and route the result."""
+        plan = intent.grounding_query_plan or {}
+        metric = plan.get("metric") or "manhattan"
+        expected_ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
+        if (
+            self.active_claims is None
+            or not self.active_claims.ranked_scene_doors
+            or self.active_claims.last_grounding_query.get("primitive") != expected_ranked_handle
+        ):
+            claims = self._ensure_ranked_door_claims(expected_ranked_handle)
+            if isinstance(claims, str):
+                return OperatorCommand(
+                    kind="missing_skills",
+                    utterance=utterance,
+                    payload={
+                        "message": (
+                            "No compatible active grounding claims to filter, and I could not "
+                            f"refresh them with {expected_ranked_handle}: {claims}"
+                        ),
+                        "match": cap_match.compact(),
+                    },
+                    capability_match=cap_match,
+                )
+
+        if self.active_claims is None or not self.active_claims.ranked_scene_doors:
+            return OperatorCommand(
+                kind="ambiguous",
+                utterance=utterance,
+                payload={
+                    "message": (
+                        "No active grounding claims to filter. "
+                        "Run a ranked grounding query first (e.g. 'show all doors by euclidean distance')."
+                    ),
+                },
+            )
+
+        condition = {
+            "threshold": float(plan.get("distance_value") or 0),
+            "comparison": plan.get("comparison") or "above",
+            "metric": metric,
+        }
+        entries = self.active_claims.ranked_scene_doors
+        self.log(
+            f"claims-filter: calling {handle} with {len(entries)} entries, condition={condition}"
+        )
+        try:
+            filtered = fn(entries, condition)
+        except Exception as exc:  # noqa: BLE001
+            return OperatorCommand(
+                kind="synthesizable",
+                utterance=utterance,
+                payload={
+                    "message": f"Claims-filter '{handle}' raised an error: {exc}.",
+                    "match": cap_match.compact(),
+                },
+                capability_match=cap_match,
+            )
+
+        if not isinstance(filtered, list):
+            return OperatorCommand(
+                kind="synthesizable",
+                utterance=utterance,
+                payload={"message": f"Claims-filter '{handle}' returned {type(filtered).__name__}, expected list."},
+                capability_match=cap_match,
+            )
+
+        metric_label = condition.get("metric") or "distance"
+        comparison = condition["comparison"]
+        threshold = condition["threshold"]
+
+        if not filtered:
+            known = ", ".join(
+                f"{e.color}@{e.distance:.1f}" for e in entries
+            )
+            return OperatorCommand(
+                kind="ambiguous",
+                utterance=utterance,
+                payload={
+                    "message": (
+                        f"No doors with {metric_label} distance {comparison} {threshold}. "
+                        f"Known distances: {known}"
+                    ),
+                },
+            )
+
+        if len(filtered) == 1:
+            entry = filtered[0]
+            self.active_claims.last_grounded_target = entry
+            self.active_claims.last_grounded_rank = next(
+                (i for i, e in enumerate(entries) if e.x == entry.x and e.y == entry.y), 0
+            )
+            if intent.intent_type == "task_instruction":
+                instruction = f"go to the {entry.color} {entry.object_type}"
+                return OperatorCommand(kind="task_instruction", utterance=instruction)
+            lines = [
+                f"GROUNDED TARGET (claims filter: {handle})",
+                f"target={entry.color} {entry.object_type}@({entry.x},{entry.y})",
+                f"distance={entry.distance:.2f} [{metric_label}]",
+                f"filter={comparison} {threshold}",
+                "source=active_claims",
+            ]
+            return OperatorCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={"message": "\n".join(lines)},
+                capability_match=cap_match,
+            )
+
+        # Multiple matches — display ranked list and let operator choose
+        header = (
+            f"DOORS WITH {metric_label.upper()} DISTANCE "
+            f"{comparison.upper()} {threshold} (claims filter: {handle})"
+        )
+        lines = [header]
+        for i, entry in enumerate(filtered):
+            lines.append(
+                f"  {i + 1}. {entry.color} {entry.object_type}"
+                f"@({entry.x},{entry.y}) dist={entry.distance:.2f}"
+            )
+        lines.append("\n(Tell me which one to navigate to.)")
+        return self._candidate_clarification_for_entries(
+            utterance=utterance,
+            entries=filtered,
+            resume_kind=(
+                "task_instruction"
+                if intent.intent_type in {"task_instruction", "claim_reference"}
+                else "ground_target_query"
+            ),
+            message="\n".join(lines),
+        )
+
     def _propose_synthesis(
         self,
         handle: str,
@@ -1411,6 +1683,7 @@ class OperatorStationSession:
         cap_match: CapabilityMatchResult,
         *,
         proposed_description: str | None = None,
+        proposed_condition: dict[str, Any] | None = None,
     ) -> OperatorCommand:
         """Build a natural-language proposal and enter pending_synthesis_proposal state.
 
@@ -1439,6 +1712,11 @@ class OperatorStationSession:
             cap_match=cap_match,
             similar_handles=similar,
             proposed_description=description if spec is None else None,
+            proposed_condition=(
+                proposed_condition
+                if proposed_condition is not None
+                else self._condition_from_intent_or_utterance(handle, intent, utterance)
+            ),
         )
         self.log(f"synthesis proposal pending for {handle} (dynamic={spec is None})")
         return OperatorCommand(
@@ -1466,6 +1744,121 @@ class OperatorStationSession:
         ]
         return similar[:2]
 
+    def _condition_from_intent_or_utterance(
+        self,
+        handle: str,
+        intent: Any,
+        utterance: str,
+    ) -> dict[str, Any] | None:
+        """Carry claims-filter parameters through synthesis approval.
+
+        Primary source is the typed grounding_query_plan. The utterance parser is a
+        conservative fallback for arbitration-only paths where the LLM proposed a
+        claims handle but no query plan existed.
+        """
+        if not handle.startswith("claims.filter.threshold."):
+            return None
+        plan = getattr(intent, "grounding_query_plan", None) or {}
+        threshold = plan.get("distance_value")
+        comparison = plan.get("comparison")
+        metric = plan.get("metric")
+        if threshold is not None and comparison is not None:
+            return {
+                "threshold": float(threshold),
+                "comparison": comparison,
+                "metric": metric or handle.rsplit(".", 1)[-1],
+            }
+
+        normalized = _normalize_utterance(utterance)
+        number_match = re.search(r"\b(\d+(?:\.\d+)?)\b", normalized)
+        if not number_match:
+            return None
+        if any(
+            term in normalized
+            for term in ("above", "greater than", "more than", "over", "exceeds")
+        ):
+            comparison = "above"
+        elif any(term in normalized for term in ("at least", "no less than")):
+            comparison = "at_least"
+        elif any(term in normalized for term in ("below", "less than", "under")):
+            comparison = "below"
+        elif any(term in normalized for term in ("at most", "within", "no more than")):
+            comparison = "at_most"
+        else:
+            comparison = "above"
+        metric = (
+            "euclidean"
+            if "euclidean" in normalized
+            else "manhattan"
+            if "manhattan" in normalized
+            else handle.rsplit(".", 1)[-1]
+        )
+        return {
+            "threshold": float(number_match.group(1)),
+            "comparison": comparison,
+            "metric": metric,
+        }
+
+    def _intent_with_claims_filter_plan(
+        self,
+        proposal: PendingSynthesisProposal,
+    ) -> OperatorIntent:
+        intent = proposal.intent
+        if not isinstance(intent, OperatorIntent):
+            return intent
+        condition = proposal.proposed_condition or self._condition_from_intent_or_utterance(
+            proposal.handle,
+            intent,
+            proposal.original_utterance,
+        )
+        if not condition:
+            return intent
+        metric = condition.get("metric") or proposal.handle.rsplit(".", 1)[-1]
+        threshold = condition.get("threshold")
+        comparison = condition.get("comparison") or "above"
+        if threshold is None:
+            return intent
+        threshold_float = float(threshold)
+        wants_task = self._utterance_requests_navigation(
+            _normalize_utterance(proposal.original_utterance)
+        )
+        required = [proposal.handle]
+        if wants_task:
+            required.append("task.go_to_object.door")
+        plan = {
+            "object_type": "door",
+            "operation": "filter",
+            "primitive_handle": proposal.handle,
+            "metric": metric,
+            "reference": "agent",
+            "order": None,
+            "ordinal": None,
+            "color": None,
+            "exclude_colors": [],
+            "distance_value": (
+                int(threshold_float) if threshold_float.is_integer() else threshold_float
+            ),
+            "comparison": comparison,
+            "tie_policy": "clarify",
+            "answer_fields": ["target", "distance"],
+            "required_capabilities": required,
+            "preserved_constraints": [
+                "door",
+                str(metric),
+                str(comparison),
+                str(threshold_float),
+            ],
+        }
+        return replace(
+            intent,
+            intent_type="task_instruction" if wants_task else "claim_reference",
+            task_type="go_to_object" if wants_task else intent.task_type,
+            claim_reference="threshold_filter",
+            grounding_query_plan=plan,
+            capability_status="executable",
+            required_capabilities=required,
+        )
+
     def handle_pending_synthesis_proposal(
         self,
         utterance: str,
@@ -1491,6 +1884,7 @@ class OperatorStationSession:
             "handle": proposal.handle,
             "proposed_description": proposal.proposed_description,
             "similar_handles": proposal.similar_handles,
+            "proposed_condition": proposal.proposed_condition,
         }
         self.log("compiling operator intent with pending synthesis proposal context")
         intent_command = self.command_from_llm_intent(
@@ -1500,12 +1894,21 @@ class OperatorStationSession:
         if intent_command.kind == "accept_proposal":
             self.pending_synthesis_proposal = None
             self.log(f"synthesis proposal approved by operator: {proposal.handle}")
-            result = self._try_synthesize_primitive(
-                proposal.handle,
-                proposal.original_utterance,
-                proposal.intent,
-                proposal.cap_match,
-            )
+            if proposal.handle.startswith("claims."):
+                proposal_intent = self._intent_with_claims_filter_plan(proposal)
+                result = self._try_synthesize_claims_filter(
+                    proposal.handle,
+                    proposal.original_utterance,
+                    proposal_intent,
+                    proposal.cap_match,
+                )
+            else:
+                result = self._try_synthesize_primitive(
+                    proposal.handle,
+                    proposal.original_utterance,
+                    proposal.intent,
+                    proposal.cap_match,
+                )
             if result is None:
                 return (
                     f"Synthesis of '{proposal.handle}' was not available — "
@@ -1530,7 +1933,7 @@ class OperatorStationSession:
         if scene is None:
             return None
         doors = scene.find(object_type="door")
-        return {
+        summary = {
             "agent_position": {"x": scene.agent_x, "y": scene.agent_y},
             "visible_doors": [
                 {
@@ -1542,6 +1945,9 @@ class OperatorStationSession:
                 for d in doors
             ],
         }
+        if self.active_claims is not None and self.active_claims.is_valid_for(scene):
+            summary["active_claims"] = self.active_claims.compact_summary()
+        return summary
 
     def _try_compose_grounding_result(
         self,
@@ -1559,9 +1965,16 @@ class OperatorStationSession:
             return None
 
         normalized = _normalize_utterance(utterance)
-        if "euclidean" in normalized:
-            return None
-        claims = self._ensure_ranked_door_claims()
+        ranked_handle = self._ranked_handle_from_verification(verif_result)
+        if "euclidean" in normalized and ranked_handle is None:
+            # Use the synthesized euclidean handle if it has already been registered.
+            euc = "grounding.all_doors.ranked.euclidean.agent"
+            spec = self.capability_registry.lookup(euc)
+            if spec is not None and spec.implementation_status == "implemented":
+                ranked_handle = euc
+            else:
+                return None
+        claims = self._ensure_ranked_door_claims(ranked_handle)
         if isinstance(claims, str):
             return OperatorCommand(
                 kind="missing_skills",
@@ -1644,8 +2057,24 @@ class OperatorStationSession:
 
         return None
 
-    def _ensure_ranked_door_claims(self) -> StationActiveClaims | str:
-        handle = "grounding.all_doors.ranked.manhattan.agent"
+    def _ranked_handle_from_verification(
+        self,
+        verif_result: IntentVerificationResult,
+    ) -> str | None:
+        for signal in verif_result.signals:
+            handle = signal.required_handle
+            if "all_doors.ranked" not in handle:
+                continue
+            spec = self.capability_registry.lookup(handle)
+            if spec is not None and spec.implementation_status == "implemented":
+                return handle
+        return None
+
+    def _ensure_ranked_door_claims(
+        self,
+        handle: str | None = None,
+    ) -> StationActiveClaims | str:
+        handle = handle or "grounding.all_doors.ranked.manhattan.agent"
         spec = self.capability_registry.lookup(handle)
         if spec is None:
             return f"Capability '{handle}' is not registered. I cannot compose that result."
@@ -1657,21 +2086,35 @@ class OperatorStationSession:
         scene = self._ensure_scene_model()
         if scene is None:
             return "No scene data available yet."
-        if self.active_claims is not None and self.active_claims.is_valid_for(scene):
+        if (
+            self.active_claims is not None
+            and self.active_claims.is_valid_for(scene)
+            and self.active_claims.last_grounding_query.get("primitive") == handle
+        ):
             return self.active_claims
         doors = scene.find(object_type="door")
         if not doors:
             return "No doors visible in the current scene."
-        ranked = sorted(
-            [(scene.manhattan_distance_from_agent(d), d) for d in doors],
-            key=lambda pair: (pair[0], pair[1].color or "", pair[1].x, pair[1].y),
-        )
+        fn = self.capability_registry.get_synthesized_callable(handle)
+        if fn is not None:
+            try:
+                ranked = fn(
+                    scene,
+                    {"object_type": "door", "color": None, "exclude_colors": []},
+                )
+            except Exception as exc:  # noqa: BLE001
+                return f"Synthesized primitive '{handle}' raised an error: {exc}"
+        else:
+            ranked = sorted(
+                [(scene.manhattan_distance_from_agent(d), d) for d in doors],
+                key=lambda pair: (pair[0], pair[1].color or "", pair[1].x, pair[1].y),
+            )
         self._write_ranked_claims(
             ranked,
             {
                 "object_type": "door",
                 "relation": "all",
-                "distance_metric": "manhattan",
+                "distance_metric": self._metric_from_grounding_handle(handle),
                 "distance_reference": "agent",
                 "primitive": handle,
             },
@@ -2123,7 +2566,13 @@ class OperatorStationSession:
         *,
         include_navigation_hint: bool = True,
     ) -> str:
-        lines = ["DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT"]
+        metric = str(
+            claims.last_grounding_query.get("distance_metric")
+            or self._metric_from_grounding_handle(
+                str(claims.last_grounding_query.get("primitive", ""))
+            )
+        )
+        lines = [f"DOORS RANKED BY {metric.upper()} DISTANCE FROM AGENT"]
         for i, entry in enumerate(claims.ranked_scene_doors):
             lines.append(f"  {i + 1}. {self._entry_label(entry)}")
         if include_navigation_hint:
@@ -2552,6 +3001,10 @@ class OperatorStationSession:
             self.pending_clarification = None
             self.log("new operator intent cancelled pending clarification")
             return self.execute_command(command)
+        # A synthesis proposal supersedes the old clarification.
+        if command.kind == "synthesis_proposal":
+            self.pending_clarification = None
+            return command.payload["message"]
         # A new arbitration fired a clarification — _arbitrate_gap already replaced
         # self.pending_clarification with the new pending. Return the new message directly.
         if command.kind == "clarification":
@@ -2757,26 +3210,44 @@ class OperatorStationSession:
             doors = scene.find(object_type="door")
             if not doors:
                 return "No doors visible in the current scene."
-            ranked = sorted(
-                [(scene.manhattan_distance_from_agent(d), d) for d in doors],
-                key=lambda pair: (pair[0], pair[1].color or ""),
-            )
+            fn = self.capability_registry.get_synthesized_callable(handle)
+            if fn is not None:
+                try:
+                    ranked = fn(
+                        scene,
+                        {"object_type": "door", "color": None, "exclude_colors": []},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return f"Synthesized primitive '{handle}' raised an error: {exc}"
+            else:
+                ranked = sorted(
+                    [(scene.manhattan_distance_from_agent(d), d) for d in doors],
+                    key=lambda pair: (pair[0], pair[1].color or ""),
+                )
+            metric = self._metric_from_grounding_handle(handle)
             self._write_ranked_claims(
                 ranked,
                 {
                     "object_type": "door",
                     "relation": "all",
-                    "distance_metric": "manhattan",
+                    "distance_metric": metric,
                     "distance_reference": "agent",
                     "primitive": handle,
                 },
             )
-            lines = ["DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT"]
+            lines = [f"DOORS RANKED BY {metric.upper()} DISTANCE FROM AGENT"]
             for i, (dist, d) in enumerate(ranked):
                 lines.append(f"  {i + 1}. {d.color} door@({d.x},{d.y}) distance={dist}")
             lines.append("\n(I can navigate to any specific door — tell me which color.)")
             return "\n".join(lines)
         return f"No display handler implemented for grounding primitive: {handle}"
+
+    def _metric_from_grounding_handle(self, handle: str) -> str:
+        if ".euclidean." in handle:
+            return "euclidean"
+        if ".manhattan." in handle:
+            return "manhattan"
+        return "manhattan"
 
     def _execute_approved_substitute(
         self,
@@ -2907,14 +3378,19 @@ class OperatorStationSession:
 
     def _write_ranked_claims(
         self,
-        ranked_pairs: list[tuple[int, SceneObject]],
+        ranked_pairs: list[tuple[float, SceneObject]],
         selector: dict[str, Any],
     ) -> None:
         scene = self.memory.scene_model
         if scene is None or not ranked_pairs:
             return
+        metric = selector.get("distance_metric") or selector.get("metric")
+        provenance = selector.get("primitive")
         entries = [
-            GroundedDoorEntry(color=obj.color, x=obj.x, y=obj.y, distance=dist)
+            GroundedDoorEntry(
+                color=obj.color, x=obj.x, y=obj.y, distance=dist,
+                metric=metric, provenance=provenance,
+            )
             for dist, obj in ranked_pairs
         ]
         self.active_claims = StationActiveClaims(

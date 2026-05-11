@@ -190,6 +190,14 @@ def main() -> int:
     checks["get_synthesized_callable_works"] = callable(
         reg.get_synthesized_callable(handle)
     )
+    alias_handle = "grounding.all_doors.ranked.euclidean.agent"
+    alias_after = reg.lookup(alias_handle)
+    checks["ranked_euclidean_alias_promoted"] = (
+        alias_after is not None and alias_after.implementation_status == "implemented"
+    )
+    checks["ranked_euclidean_alias_callable"] = callable(
+        reg.get_synthesized_callable(alias_handle)
+    )
 
     # ── 8. Synthesized callable produces correct output ───────────────────
     fn = reg.get_synthesized_callable(handle)
@@ -216,8 +224,6 @@ def main() -> int:
         }
 
     session = _make_session()
-    # Inject a LLMSynthesizer with fake transport
-    from jeenom.primitive_synthesizer import LLMSynthesizer
     session.synthesizer = LLMSynthesizer(api_key="fake", transport=fake_transport)
     # Warm scene
     _run(lambda: session.handle_utterance("go to the red door"))
@@ -227,10 +233,22 @@ def main() -> int:
         lambda: session.handle_utterance("go to the closest door using euclidean distance")
     )
     checks["synthesis_triggered_and_responded"] = isinstance(response, str) and len(response) > 0
+    if session.pending_synthesis_proposal is not None:
+        response = _run(lambda: session.handle_utterance("yes"))
     # After synthesis, the spec should now be implemented in the session registry
     spec_synth = session.capability_registry.lookup(handle)
     checks["session_spec_promoted_to_implemented"] = (
         spec_synth is not None and spec_synth.implementation_status == "implemented"
+    )
+    session_alias = session.capability_registry.lookup(alias_handle)
+    checks["session_ranked_alias_promoted"] = (
+        session_alias is not None and session_alias.implementation_status == "implemented"
+    )
+    all_doors_response = _run(
+        lambda: session.resume_arbitration_offer(alias_handle)
+    )
+    checks["session_ranked_alias_displays_euclidean"] = (
+        "DOORS RANKED BY EUCLIDEAN DISTANCE FROM AGENT" in all_doors_response
     )
 
     # ── 10. Second call uses synthesized primitive without re-synthesizing ─
@@ -239,7 +257,49 @@ def main() -> int:
     )
     checks["second_call_succeeds"] = isinstance(response2, str) and len(response2) > 0
 
-    # ── 11. Golden path unaffected ────────────────────────────────────────
+    # ── 11. Validation repair loop retries once after malformed code ──────
+    repair_calls = {"count": 0}
+
+    def repair_transport(payload):
+        repair_calls["count"] += 1
+        if repair_calls["count"] == 1:
+            return {
+                "function_name": fn_name,
+                "function_body": (
+                    "def grounding_closest_door_euclidean_agent(scene, selector):\n"
+                    "    return sorted([\n"
+                    "        (math.sqrt((d.x - scene.agent_x) ** 2 + (d.y - scene.agent_y) ** 2), d)\n"
+                    "        for d in scene.find(object_type='door')\n"
+                    "    )\n"
+                ),
+                "description": "Malformed first attempt.",
+            }
+        checks["repair_prompt_includes_validation_error"] = (
+            "validation failure" in payload["system_prompt"].lower()
+            and "SyntaxError" in payload["system_prompt"]
+        )
+        return {
+            "function_name": fn_name,
+            "function_body": CORRECT_EUCLIDEAN_CODE,
+            "description": "Corrected Euclidean grounding.",
+        }
+
+    repair_session = _make_session()
+    repair_session.synthesizer = LLMSynthesizer(api_key="fake", transport=repair_transport)
+    _run(lambda: repair_session.handle_utterance("go to the red door"))
+    _run(
+        lambda: repair_session.handle_utterance("go to the closest door using euclidean distance")
+    )
+    repair_response = _run(lambda: repair_session.handle_utterance("yes"))
+    repair_spec = repair_session.capability_registry.lookup(handle)
+    checks["repair_loop_called_twice"] = repair_calls["count"] == 2
+    checks["repair_loop_registers_after_second_candidate"] = (
+        repair_spec is not None and repair_spec.implementation_status == "implemented"
+    )
+    checks["repair_loop_response_non_empty"] = isinstance(repair_response, str) and len(repair_response) > 0
+    checks.setdefault("repair_prompt_includes_validation_error", False)
+
+    # ── 12. Golden path unaffected ────────────────────────────────────────
     session_golden = _make_session()
     result_golden = _run(lambda: session_golden.handle_utterance("go to the red door"))
     checks["golden_path_still_works"] = "RUN COMPLETE" in result_golden or "task_complete" in result_golden

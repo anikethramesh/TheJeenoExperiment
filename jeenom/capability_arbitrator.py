@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -30,6 +31,34 @@ from .schemas import (
     ArbitrationDecision,
     SchemaValidationError,
 )
+
+
+def _condition_from_utterance(utterance: str) -> dict[str, Any] | None:
+    """Best-effort fallback for non-LLM arbitration tests.
+
+    The LLM arbitrator is expected to populate proposed_condition. This parser is
+    only a guardrail for the deterministic SmokeTestArbitrator path.
+    """
+    text = " ".join(utterance.lower().strip().split())
+    number_match = re.search(r"\b(\d+(?:\.\d+)?)\b", text)
+    if not number_match:
+        return None
+    if any(term in text for term in ("above", "greater than", "more than", "over", "exceeds")):
+        comparison = "above"
+    elif any(term in text for term in ("at least", "minimum", "no less than")):
+        comparison = "at_least"
+    elif any(term in text for term in ("below", "less than", "under")):
+        comparison = "below"
+    elif any(term in text for term in ("at most", "within", "no more than")):
+        comparison = "at_most"
+    else:
+        comparison = "above"
+    metric = "euclidean" if "euclidean" in text else "manhattan" if "manhattan" in text else None
+    return {
+        "threshold": float(number_match.group(1)),
+        "comparison": comparison,
+        "metric": metric,
+    }
 
 
 def arbitration_decision_json_schema() -> dict[str, Any]:
@@ -47,6 +76,22 @@ def arbitration_decision_json_schema() -> dict[str, Any]:
             "operator_message": {"type": "string"},
             "proposed_handle": {"type": ["string", "null"]},
             "proposed_description": {"type": ["string", "null"]},
+            "proposed_condition": {
+                "type": ["object", "null"],
+                "properties": {
+                    "threshold": {"type": ["number", "null"]},
+                    "comparison": {
+                        "type": ["string", "null"],
+                        "enum": ["above", "below", "within", "at_least", "at_most", None],
+                    },
+                    "metric": {
+                        "type": ["string", "null"],
+                        "enum": ["manhattan", "euclidean", None],
+                    },
+                },
+                "required": ["threshold", "comparison", "metric"],
+                "additionalProperties": False,
+            },
         },
         "required": [
             "decision_type",
@@ -57,6 +102,7 @@ def arbitration_decision_json_schema() -> dict[str, Any]:
             "operator_message",
             "proposed_handle",
             "proposed_description",
+            "proposed_condition",
         ],
         "additionalProperties": False,
     }
@@ -86,6 +132,11 @@ def _parse_arbitration_decision(data: Any) -> ArbitrationDecision:
         operator_message=str(data.get("operator_message", "")),
         proposed_handle=data.get("proposed_handle") or None,
         proposed_description=data.get("proposed_description") or None,
+        proposed_condition=(
+            dict(data["proposed_condition"])
+            if isinstance(data.get("proposed_condition"), dict)
+            else None
+        ),
     )
 
 
@@ -147,12 +198,14 @@ class SmokeTestArbitrator(ArbitratorBackend):
                     + ", ".join(synthesizable_handles)
                     + ". Synthesis is not yet active (Phase 7.7)."
                 ),
+                proposed_handle=synthesizable_handles[0],
+                proposed_condition=_condition_from_utterance(utterance),
             )
         return ArbitrationDecision(
             decision_type="refuse",
             safe_to_execute=False,
             reason="Unsupported capability.",
-            operator_message="That capability is not supported.",
+            operator_message="I cannot safely execute that capability yet.",
         )
 
 
@@ -221,6 +274,13 @@ class LLMArbitrator(ArbitratorBackend):
             "  NO imports allowed. NO environment, NO filesystem, NO randomness.\n"
             "  Signature: fn(scene, selector) → list[tuple[float, SceneObject]]\n"
             "  selector is a dict with keys: object_type, color, exclude_colors, relation, etc.\n"
+            "\n"
+            "Claims-filter API available when scene_summary.active_claims is present:\n"
+            "  entries = active_claims.ranked_doors — typed GroundedDoorEntry list\n"
+            "  GroundedDoorEntry: .color, .object_type, .x, .y, .distance, .metric\n"
+            "  condition is a dict with keys: threshold, comparison, metric\n"
+            "  Signature: fn(entries, condition) → list[GroundedDoorEntry]\n"
+            "  Claims filters must preserve entry objects and order; they never access scene/env.\n"
         )
         system_prompt = (
             "You are the JEENOM capability arbitrator. The operator gave an instruction "
@@ -229,26 +289,33 @@ class LLMArbitrator(ArbitratorBackend):
             + scene_api + "\n"
             "Decision types:\n"
             "  'synthesize' — The operator's request can be expressed as a NEW pure Python\n"
-            "                 grounding function using ONLY the SceneModel API above.\n"
+            "                 grounding function using ONLY the SceneModel API above, OR as a\n"
+            "                 pure claims-filter over active_claims.ranked_doors when those\n"
+            "                 claims are available in scene_summary.\n"
             "                 Use this when:\n"
             "                   - The request involves a spatial/mathematical computation\n"
             "                     over visible objects (distance metrics, conditionals,\n"
             "                     relative direction, thresholds, inter-object distances)\n"
             "                   - The computation is deterministic and pure (no I/O)\n"
-            "                   - It can be expressed as fn(scene, selector) → ranked list\n"
+            "                   - It can be expressed as fn(scene, selector) → ranked list,\n"
+            "                     or for claims filters as fn(entries, condition) → filtered list\n"
             "                 When synthesize:\n"
             "                   - proposed_handle: a dotted handle name like\n"
             "                     'grounding.closest_door.euclidean.agent' or\n"
             "                     'grounding.conditional_target.distance_threshold'\n"
             "                   - proposed_description: one sentence describing what the\n"
             "                     function computes (used as the synthesis prompt)\n"
+            "                   - proposed_condition: for claims.filter.threshold.* handles,\n"
+            "                     include {'threshold': number, 'comparison': one of above/below/"
+            "within/at_least/at_most, 'metric': manhattan|euclidean}; otherwise null\n"
             "                   - safe_to_execute=false always\n"
             "                   - suggested_handle=null\n"
             "                 Examples:\n"
             "                   - 'euclidean distance to closest door'\n"
             "                     → proposed_handle='grounding.closest_door.euclidean.agent'\n"
-            "                   - 'go to purple door if less than 6 units away else yellow'\n"
-            "                     → proposed_handle='grounding.conditional_target.distance_threshold'\n"
+            "                   - 'go to the door whose euclidean distance is above 6'\n"
+            "                     with active ranked claims present\n"
+            "                     → proposed_handle='claims.filter.threshold.euclidean'\n"
             "                   - 'door to my left'\n"
             "                     → proposed_handle='grounding.closest_door.relative_direction.agent'\n"
             "                   - 'door closest to the blue box'\n"
@@ -276,6 +343,24 @@ class LLMArbitrator(ArbitratorBackend):
             "    choose synthesize. Do NOT deflect to clarify for computable requests.\n"
             "  - proposed_handle and proposed_description must be set when synthesize.\n"
             "  - The station may actuate a robot — unintended motion has consequences.\n"
+            "  - CRITICAL — Conditional/threshold filters over existing ranked claims use claims primitives:\n"
+            "    If the operator's utterance contains ANY conditional constraint on distance\n"
+            "    or position (e.g., 'above X', 'below Y', 'within N', 'more than X',\n"
+            "    'less than Y', 'at least', 'at most', 'farther than', 'closer than',\n"
+            "    'greater than', 'exceeds') AND scene_summary.active_claims.ranked_doors\n"
+            "    is present, choose synthesize for a claims-filter primitive — even when\n"
+            "    a related distance primitive is already implemented.\n"
+            "    The threshold changes the semantics: euclidean-distance ≠ euclidean-above-10.\n"
+            "    Example: 'door with euclidean distance above 10'\n"
+            "      → proposed_handle='claims.filter.threshold.euclidean'\n"
+            "      → proposed_description='Filter active ranked door claims by a parametric\n"
+            "        Euclidean distance threshold carried in condition[threshold].'\n"
+            "      → proposed_condition={'threshold': 10, 'comparison': 'above', 'metric': 'euclidean'}\n"
+            "    Example: 'door with manhattan distance below 5'\n"
+            "      → proposed_handle='claims.filter.threshold.manhattan'\n"
+            "      → proposed_condition={'threshold': 5, 'comparison': 'below', 'metric': 'manhattan'}\n"
+            "  - CRITICAL — Relative direction requires synthesize:\n"
+            "    'door to my left/right/behind' → new primitive, not substitute.\n"
         )
         user_payload: dict[str, Any] = {
             "utterance": utterance,

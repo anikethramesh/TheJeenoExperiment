@@ -53,7 +53,8 @@ OPERATOR_INTENT_TYPES = (
     "unsupported",
     "ambiguous",
 )
-OPERATOR_CLAIM_REFERENCES = ("next_closest", "other_door")
+OPERATOR_CLAIM_REFERENCES = ("next_closest", "other_door", "threshold_filter")
+GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
 OPERATOR_OBJECT_TYPES = ("door",)
 OPERATOR_COLORS = ("red", "green", "blue", "yellow", "purple", "grey")
@@ -88,7 +89,7 @@ ARBITRATION_DECISION_TYPES = (
     "synthesize",
     "refuse",
 )
-PRIMITIVE_SPEC_TYPES = ("task", "grounding", "sensing", "action")
+PRIMITIVE_SPEC_TYPES = ("task", "grounding", "sensing", "action", "claims")
 PRIMITIVE_IMPLEMENTATION_STATUSES = (
     "implemented",
     "unsupported",
@@ -422,10 +423,11 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
         "required_capabilities",
         "preserved_constraints",
     )
+    optional_keys = ("comparison",)
     missing = [key for key in required_keys if key not in plan]
     if missing:
         raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    extra = sorted(set(plan) - set(required_keys))
+    extra = sorted(set(plan) - set(required_keys) - set(optional_keys))
     if extra:
         raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
 
@@ -483,6 +485,11 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
         "distance_value": _ensure_optional_int(
             plan.get("distance_value"),
             f"{label}.distance_value",
+        ),
+        "comparison": _ensure_optional_str_enum(
+            plan.get("comparison"),
+            GROUNDING_QUERY_COMPARISONS,
+            f"{label}.comparison",
         ),
         "tie_policy": _ensure_optional_str_enum(
             plan.get("tie_policy"),
@@ -582,6 +589,7 @@ class GroundingQueryPlan:
     color: str | None = None
     exclude_colors: list[str] = field(default_factory=list)
     distance_value: int | None = None
+    comparison: str | None = None
     tie_policy: str | None = "clarify"
     answer_fields: list[str] = field(default_factory=list)
     required_capabilities: list[str] = field(default_factory=list)
@@ -969,10 +977,21 @@ class GroundedDoorEntry:
     color: str | None
     x: int
     y: int
-    distance: int
+    distance: float  # float for Euclidean and other non-integer metrics
+    object_type: str = "door"
+    metric: str | None = None       # e.g. "manhattan", "euclidean"
+    provenance: str | None = None   # primitive handle that produced this entry
 
     def as_dict(self) -> dict[str, Any]:
-        return {"type": "door", "color": self.color, "x": self.x, "y": self.y}
+        return {
+            "type": self.object_type,
+            "color": self.color,
+            "x": self.x,
+            "y": self.y,
+            "distance": self.distance,
+            "metric": self.metric,
+            "provenance": self.provenance,
+        }
 
 
 @dataclass
@@ -1033,6 +1052,7 @@ class ArbitrationDecision:
     operator_message: str = ""
     proposed_handle: str | None = None
     proposed_description: str | None = None
+    proposed_condition: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.decision_type not in ARBITRATION_DECISION_TYPES:
@@ -1378,6 +1398,10 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "items": {"type": "string", "enum": list(OPERATOR_COLORS)},
             },
             "distance_value": {"type": ["integer", "null"]},
+            "comparison": {
+                "type": ["string", "null"],
+                "enum": [*GROUNDING_QUERY_COMPARISONS, None],
+            },
             "tie_policy": {
                 "type": ["string", "null"],
                 "enum": [*GROUNDING_QUERY_TIE_POLICIES, None],

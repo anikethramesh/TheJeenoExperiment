@@ -5,12 +5,23 @@ from typing import Any
 
 from .primitive_library import (
     ACTION_PRIMITIVES,
+    CLAIMS_FILTER_PRIMITIVES,
     GROUNDING_PRIMITIVES,
     SENSING_PRIMITIVES,
     TASK_PRIMITIVES,
     PrimitiveSpec as RuntimePrimitiveSpec,
 )
 from .schemas import PrimitiveManifest, PrimitiveSpec, TargetSelector
+
+
+_SYNTHESIZED_ALIASES = {
+    "grounding.closest_door.euclidean.agent": (
+        "grounding.all_doors.ranked.euclidean.agent",
+    ),
+    "grounding.all_doors.ranked.euclidean.agent": (
+        "grounding.closest_door.euclidean.agent",
+    ),
+}
 
 
 def _runtime_binding(spec: RuntimePrimitiveSpec) -> dict[str, Any] | None:
@@ -118,6 +129,7 @@ def minigrid_manifest_dict() -> dict[str, Any]:
         ("grounding", GROUNDING_PRIMITIVES),
         ("sensing", SENSING_PRIMITIVES),
         ("action", ACTION_PRIMITIVES),
+        ("claims", CLAIMS_FILTER_PRIMITIVES),
     ):
         primitives.extend(
             _manifest_spec(layer=layer, source_name=name, spec=spec)
@@ -208,15 +220,39 @@ class CapabilityRegistry:
             safe_to_synthesize=False,
             runtime_binding={"kind": "python_synthesized", "value": handle},
         )
-        self._by_name[handle] = promoted_schema
+        self._promote_synthesized_schema(handle, promoted_schema, fn)
+        for alias in _SYNTHESIZED_ALIASES.get(handle, ()):
+            alias_spec = self._by_name.get(alias)
+            if alias_spec is not None and alias_spec.implementation_status == "synthesizable":
+                alias_schema = SchemaSpec(
+                    name=alias,
+                    primitive_type=alias_spec.primitive_type,
+                    layer=alias_spec.layer,
+                    description=alias_spec.description + " [synthesized alias]",
+                    inputs=list(alias_spec.inputs),
+                    outputs=list(alias_spec.outputs),
+                    side_effects=list(alias_spec.side_effects),
+                    implementation_status="implemented",
+                    safe_to_synthesize=False,
+                    runtime_binding={"kind": "python_synthesized", "value": handle},
+                )
+                self._promote_synthesized_schema(alias, alias_schema, fn)
+        return True
+
+    def _promote_synthesized_schema(
+        self,
+        handle: str,
+        schema: PrimitiveSpec,
+        fn: Any,
+    ) -> None:
+        self._by_name[handle] = schema
         self._synthesized_callables[handle] = fn
         # Keep manifest.primitives in sync so compact_summary() and help_text()
         # immediately reflect the promoted status.
         for i, p in enumerate(self.manifest.primitives):
             if p.name == handle:
-                self.manifest.primitives[i] = promoted_schema
+                self.manifest.primitives[i] = schema
                 break
-        return True
 
     def get_synthesized_callable(self, handle: str) -> Any | None:
         """Return the validated callable for a synthesized primitive, or None."""
@@ -319,6 +355,11 @@ class CapabilityRegistry:
             for item in summary.get("action", [])
             if item["status"] == "implemented"
         ]
+        claims = [
+            item["name"]
+            for item in summary.get("claims", [])
+            if item["status"] == "implemented"
+        ]
         synthesizable = [
             item["name"]
             for items in summary.values()
@@ -338,6 +379,7 @@ class CapabilityRegistry:
             f"grounding={', '.join(executable_grounding) or 'none'}\n"
             f"sensing={', '.join(sensing) or 'none'}\n"
             f"actions={', '.join(actions) or 'none'}\n"
+            f"claims={', '.join(claims) or 'none'}\n"
             f"synthesizable={', '.join(synthesizable) or 'none'}\n"
             f"unsupported={', '.join(unsupported) or 'none'}"
         )

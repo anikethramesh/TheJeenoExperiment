@@ -103,10 +103,7 @@ class IntentVerifier:
         if m:
             ordinal = m.group(1)
             direction = m.group(2)
-            if direction in ("farthest", "furthest"):
-                handle = f"grounding.farthest_door.{metric}.agent"
-            else:
-                handle = f"grounding.nth_closest_door.{metric}.agent"
+            handle = f"grounding.all_doors.ranked.{metric}.agent"
             signals.append(IntentSignal(
                 signal_type=SIGNAL_ORDINAL,
                 detected_term=f"{ordinal} {direction}",
@@ -119,7 +116,7 @@ class IntentVerifier:
                 signals.append(IntentSignal(
                     signal_type=SIGNAL_SUPERLATIVE,
                     detected_term=term,
-                    required_handle=f"grounding.farthest_door.{metric}.agent",
+                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
                 ))
                 break  # one superlative signal is enough
 
@@ -130,7 +127,7 @@ class IntentVerifier:
                     signals.append(IntentSignal(
                         signal_type=SIGNAL_CARDINALITY,
                         detected_term=label,
-                        required_handle=f"grounding.ranked_doors.{metric}.agent",
+                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
                     ))
                     break
 
@@ -187,10 +184,7 @@ class IntentVerifier:
         if m:
             ordinal = m.group(1)
             direction = m.group(2)
-            if direction in ("farthest", "furthest"):
-                handle = f"grounding.farthest_door.{metric}.agent"
-            else:
-                handle = f"grounding.nth_closest_door.{metric}.agent"
+            handle = f"grounding.all_doors.ranked.{metric}.agent"
             signals.append(IntentSignal(
                 signal_type=SIGNAL_ORDINAL,
                 detected_term=f"{ordinal} {direction}",
@@ -202,7 +196,7 @@ class IntentVerifier:
                 signals.append(IntentSignal(
                     signal_type=SIGNAL_SUPERLATIVE,
                     detected_term=term,
-                    required_handle=f"grounding.farthest_door.{metric}.agent",
+                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
                 ))
                 break
 
@@ -212,7 +206,7 @@ class IntentVerifier:
                     signals.append(IntentSignal(
                         signal_type=SIGNAL_CARDINALITY,
                         detected_term=label,
-                        required_handle=f"grounding.ranked_doors.{metric}.agent",
+                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
                     ))
                     break
 

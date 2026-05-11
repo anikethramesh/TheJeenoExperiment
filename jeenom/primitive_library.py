@@ -132,6 +132,19 @@ GROUNDING_PRIMITIVES: dict[str, PrimitiveSpec] = {
         runtime_kind="python",
         runtime_value="ground_all_doors_ranked_manhattan",
     ),
+    "all_doors.ranked.euclidean.agent": PrimitiveSpec(
+        name="all_doors.ranked.euclidean.agent",
+        consumes=("scene.door_candidates", "agent_pose"),
+        produces=("ranked_door_list", "distances"),
+        description=(
+            "List all visible doors ranked by Euclidean distance from the agent. "
+            "Query only — no target is selected and no motion occurs."
+        ),
+        implementation_status="synthesizable",
+        safe_to_synthesize=True,
+        runtime_kind=None,
+        runtime_value=None,
+    ),
     "claims.last_grounded_target": PrimitiveSpec(
         name="claims.last_grounded_target",
         consumes=("active_claims.last_grounded_target",),
@@ -248,6 +261,36 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         description="Emit the MiniGrid done action.",
         runtime_kind="env_action",
         runtime_value=6,
+    ),
+}
+
+
+CLAIMS_FILTER_PRIMITIVES: dict[str, PrimitiveSpec] = {
+    "filter.threshold.euclidean": PrimitiveSpec(
+        name="filter.threshold.euclidean",
+        consumes=("active_claims.ranked_scene_doors", "condition"),
+        produces=("filtered_entries",),
+        description=(
+            "Filter euclidean-ranked GroundedDoorEntry claims by a distance threshold. "
+            "Parametric: fn(entries, condition) where condition carries threshold (float) "
+            "and comparison ('above'|'below'|'within'|'at_least'|'at_most'). "
+            "Only operates on typed ActiveClaims entries — never accesses SceneModel or env."
+        ),
+        implementation_status="synthesizable",
+        safe_to_synthesize=True,
+    ),
+    "filter.threshold.manhattan": PrimitiveSpec(
+        name="filter.threshold.manhattan",
+        consumes=("active_claims.ranked_scene_doors", "condition"),
+        produces=("filtered_entries",),
+        description=(
+            "Filter manhattan-ranked GroundedDoorEntry claims by a distance threshold. "
+            "Parametric: fn(entries, condition) where condition carries threshold (float) "
+            "and comparison ('above'|'below'|'within'|'at_least'|'at_most'). "
+            "Only operates on typed ActiveClaims entries — never accesses SceneModel or env."
+        ),
+        implementation_status="synthesizable",
+        safe_to_synthesize=True,
     ),
 }
 
