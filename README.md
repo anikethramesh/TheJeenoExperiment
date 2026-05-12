@@ -1,4 +1,4 @@
-# JEENOM (Just-In-Time Embodied Execution Networked Orchestration Model)
+# JEENO (Just-In-Time Embodied Execution Networked Orchestration Model)
 
 JEENOM is an advanced, agentic capability architecture currently being built and tested within the [MiniGrid](https://minigrid.farama.org/) gridworld environment. It translates natural language instructions into validated, executable intents through an LLM compiler, grounding requests against a persistent scene model and a rigid capability registry. 
 
