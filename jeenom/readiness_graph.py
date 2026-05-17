@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from .capability_registry import CapabilityRegistry
 from .schemas import (
+    EnvironmentAssumption,
+    EnvironmentIdentity,
     ReadinessGraph,
     ReadinessNode,
     RequestPlan,
@@ -47,17 +49,74 @@ def _claims_status(
     return None, None
 
 
+def _actual_for_assumption(
+    assumption: EnvironmentAssumption,
+    environment_identity: EnvironmentIdentity | None,
+) -> dict[str, object] | None:
+    if environment_identity is None:
+        return None
+    if assumption.kind == "env_id":
+        return {"env_id": environment_identity.env_id}
+    if assumption.kind == "seed":
+        return {"seed": environment_identity.seed}
+    if assumption.kind == "grid_size":
+        return {
+            "grid_width": environment_identity.grid_width,
+            "grid_height": environment_identity.grid_height,
+        }
+    if assumption.kind == "task_family":
+        return {"task_family": environment_identity.task_family}
+    if assumption.kind == "environment_fingerprint":
+        return {"fingerprint": environment_identity.fingerprint()}
+    if assumption.kind == "layout_summary":
+        return {"summary": dict(environment_identity.summary)}
+    return None
+
+
+def _evaluate_assumptions(
+    step: RequestPlanStep,
+    plan: RequestPlan,
+    environment_identity: EnvironmentIdentity | None,
+) -> tuple[list[str], list[str], str]:
+    assumptions = {
+        assumption.assumption_id: assumption
+        for assumption in plan.environment_assumptions
+    }
+    violated: list[str] = []
+    diagnostic: list[str] = []
+    reasons: list[str] = []
+    for assumption_id in step.environment_assumption_ids:
+        assumption = assumptions.get(assumption_id)
+        if assumption is None:
+            continue
+        actual = _actual_for_assumption(assumption, environment_identity)
+        if actual != assumption.expected:
+            if assumption.required:
+                violated.append(assumption_id)
+                reasons.append(
+                    f"{assumption_id} expected {assumption.expected} got {actual}"
+                )
+            else:
+                diagnostic.append(assumption_id)
+    return violated, diagnostic, "; ".join(reasons)
+
+
 def evaluate_request_plan(
     plan: RequestPlan,
     *,
     registry: CapabilityRegistry,
     active_claims: StationActiveClaims | None = None,
     claims_valid: bool = False,
+    environment_identity: EnvironmentIdentity | None = None,
 ) -> ReadinessGraph:
     nodes: list[ReadinessNode] = []
     statuses_by_step: dict[str, str] = {}
+    graph_violated_assumptions: list[str] = []
+    graph_diagnostic_assumptions: list[str] = []
 
     for step in plan.steps:
+        violated_assumptions: list[str] = []
+        diagnostic_assumptions: list[str] = []
         blocking_dependencies = [
             dep
             for dep in step.depends_on
@@ -67,16 +126,25 @@ def evaluate_request_plan(
             status = "blocked_by_dependency"
             reason = "Blocked by non-executable dependency."
         else:
-            claims_status, claims_reason = _claims_status(
-                step,
-                active_claims=active_claims,
-                claims_valid=claims_valid,
+            violated_assumptions, diagnostic_assumptions, assumption_reason = (
+                _evaluate_assumptions(step, plan, environment_identity)
             )
-            if claims_status is not None:
-                status = claims_status
-                reason = claims_reason or ""
+            graph_violated_assumptions.extend(violated_assumptions)
+            graph_diagnostic_assumptions.extend(diagnostic_assumptions)
+            if violated_assumptions:
+                status = "environment_assumption_failed"
+                reason = f"Environment assumption failed: {assumption_reason}"
             else:
-                status, reason = _status_for_primitive(step, registry)
+                claims_status, claims_reason = _claims_status(
+                    step,
+                    active_claims=active_claims,
+                    claims_valid=claims_valid,
+                )
+                if claims_status is not None:
+                    status = claims_status
+                    reason = claims_reason or ""
+                else:
+                    status, reason = _status_for_primitive(step, registry)
 
         statuses_by_step[step.step_id] = status
         nodes.append(
@@ -88,6 +156,8 @@ def evaluate_request_plan(
                 required_handle=step.required_handle,
                 reason=reason,
                 blocking_dependencies=blocking_dependencies,
+                violated_assumption_ids=violated_assumptions if not blocking_dependencies else [],
+                diagnostic_assumption_ids=diagnostic_assumptions if not blocking_dependencies else [],
             )
         )
 
@@ -109,6 +179,8 @@ def evaluate_request_plan(
         next_action=next_action,
         blocking_step_id=blocking.step_id if blocking is not None else None,
         explanation=explanation,
+        violated_assumption_ids=list(dict.fromkeys(graph_violated_assumptions)),
+        diagnostic_assumption_ids=list(dict.fromkeys(graph_diagnostic_assumptions)),
     )
 
 

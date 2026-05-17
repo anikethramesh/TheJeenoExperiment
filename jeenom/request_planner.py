@@ -3,7 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .schemas import OperatorIntent, RequestPlan, RequestPlanStep
+from .schemas import (
+    EnvironmentAssumption,
+    EnvironmentIdentity,
+    OperatorIntent,
+    RequestPlan,
+    RequestPlanStep,
+)
 
 
 _COLORS = ("red", "green", "blue", "yellow", "purple", "grey")
@@ -128,6 +134,84 @@ def _target_handle(intent: OperatorIntent) -> str | None:
     return None
 
 
+def build_environment_assumptions(
+    environment_identity: EnvironmentIdentity | None,
+) -> list[EnvironmentAssumption]:
+    if environment_identity is None:
+        return []
+    assumptions: list[EnvironmentAssumption] = []
+    if environment_identity.env_id is not None:
+        assumptions.append(
+            EnvironmentAssumption(
+                assumption_id="env.env_id",
+                kind="env_id",
+                expected={"env_id": environment_identity.env_id},
+                required=True,
+                description="Plan was recorded for this environment id.",
+            )
+        )
+    if (
+        environment_identity.grid_width is not None
+        and environment_identity.grid_height is not None
+    ):
+        assumptions.append(
+            EnvironmentAssumption(
+                assumption_id="env.grid_size",
+                kind="grid_size",
+                expected={
+                    "grid_width": environment_identity.grid_width,
+                    "grid_height": environment_identity.grid_height,
+                },
+                required=True,
+                description="Plan assumes this MiniGrid size.",
+            )
+        )
+    if environment_identity.task_family is not None:
+        assumptions.append(
+            EnvironmentAssumption(
+                assumption_id="env.task_family",
+                kind="task_family",
+                expected={"task_family": environment_identity.task_family},
+                required=True,
+                description="Plan assumes this task family.",
+            )
+        )
+    assumptions.append(
+        EnvironmentAssumption(
+            assumption_id="env.seed",
+            kind="seed",
+            expected={"seed": environment_identity.seed},
+            required=False,
+            description="Diagnostic seed captured when the plan was recorded.",
+        )
+    )
+    assumptions.append(
+        EnvironmentAssumption(
+            assumption_id="env.fingerprint",
+            kind="environment_fingerprint",
+            expected={"fingerprint": environment_identity.fingerprint()},
+            required=False,
+            description="Diagnostic stable environment fingerprint.",
+        )
+    )
+    assumptions.append(
+        EnvironmentAssumption(
+            assumption_id="env.layout_summary",
+            kind="layout_summary",
+            expected={"summary": dict(environment_identity.summary)},
+            required=False,
+            description="Diagnostic object/layout summary captured with the plan.",
+        )
+    )
+    return assumptions
+
+
+def _assumption_ids_for_environment(
+    assumptions: list[EnvironmentAssumption],
+) -> list[str]:
+    return [assumption.assumption_id for assumption in assumptions]
+
+
 def _operation_from_query_plan(plan: dict[str, Any] | None) -> str:
     if plan is None:
         return "answer"
@@ -144,6 +228,7 @@ def build_request_plan(
     intent: OperatorIntent,
     *,
     active_claims_summary: dict[str, Any] | None = None,
+    environment_identity: EnvironmentIdentity | None = None,
 ) -> RequestPlan:
     """Build a typed, dependency-aware request plan from validated operator intent.
 
@@ -155,6 +240,8 @@ def build_request_plan(
     objective_type = _objective_type(intent)
     expected_response = _expected_response(intent)
     steps: list[RequestPlanStep] = []
+    environment_assumptions = build_environment_assumptions(environment_identity)
+    environment_assumption_ids = _assumption_ids_for_environment(environment_assumptions)
     plan = intent.grounding_query_plan
     metric = _metric_from_text_or_plan(utterance, plan)
     comparison = _comparison_from_text_or_plan(utterance, plan)
@@ -242,12 +329,13 @@ def build_request_plan(
                     operation="rank",
                     required_handle=ranked_handle,
                     inputs={"object_type": plan.get("object_type", "door")},
-                    outputs=["active_claims.ranked_scene_doors"],
-                    constraints={
-                        "metric": metric,
-                        "reference": plan.get("reference") or "agent",
-                    },
-                )
+                outputs=["active_claims.ranked_scene_doors"],
+                constraints={
+                    "metric": metric,
+                    "reference": plan.get("reference") or "agent",
+                },
+                environment_assumption_ids=environment_assumption_ids,
+            )
             )
     elif intent.target_selector is not None:
         handle = _target_handle(intent)
@@ -260,6 +348,7 @@ def build_request_plan(
                 inputs={"target_selector": intent.target_selector},
                 outputs=["grounded_target"],
                 constraints=dict(intent.target_selector),
+                environment_assumption_ids=environment_assumption_ids,
             )
         )
 
@@ -281,6 +370,7 @@ def build_request_plan(
                 },
                 memory_reads=["active_claims.ranked_scene_doors"],
                 scene_fingerprint_required=True,
+                environment_assumption_ids=environment_assumption_ids,
             )
         )
 
@@ -314,6 +404,7 @@ def build_request_plan(
                 tie_policy=plan.get("tie_policy") or "clarify",
                 memory_reads=[source],
                 scene_fingerprint_required=True,
+                environment_assumption_ids=environment_assumption_ids,
             )
         )
 
@@ -344,6 +435,7 @@ def build_request_plan(
                     "episodic.last_task",
                     "episodic.last_result",
                 ],
+                environment_assumption_ids=environment_assumption_ids,
             )
         )
 
@@ -391,4 +483,5 @@ def build_request_plan(
         steps=steps,
         preservation_signals=_signals(utterance),
         expected_response=expected_response,
+        environment_assumptions=environment_assumptions,
     )

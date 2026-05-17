@@ -28,6 +28,7 @@ from jeenom.request_planner import build_request_plan
 from jeenom.run_demo import prewarm_jit_cache, run_episode
 from jeenom.schemas import (
     EvidenceFrame,
+    EnvironmentIdentity,
     ExecutionContext,
     ExecutionContract,
     ArbitrationDecision,
@@ -2528,6 +2529,15 @@ class TestStationActiveClaims(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("CLAIM", result.upper())
 
+    def test_next_closest_without_claims_reports_ranked_grounding_prerequisite(self):
+        session = self._make_session()
+
+        result = self._run_with_env(lambda: session.handle_utterance("next closest door"))
+
+        self.assertIn("No active grounding claims", result)
+        self.assertIn("which door is closest by manhattan distance from you?", result)
+        self.assertIn("ranked door grounding", result)
+
     def test_claims_cleared_on_reset(self):
         """reset() must clear active_claims."""
         session = self._make_session()
@@ -2599,6 +2609,89 @@ class TestStationActiveClaims(unittest.TestCase):
         import dataclasses
         fake_scene = dataclasses.replace(scene, agent_x=scene.agent_x + 5, step_count=9999)
         self.assertFalse(session.active_claims.is_valid_for(fake_scene))
+
+    def test_claims_reject_different_environment_identity(self):
+        scene = SceneModel(
+            agent_x=1,
+            agent_y=1,
+            agent_dir=0,
+            grid_width=8,
+            grid_height=8,
+            objects=[],
+            source="idle_sense",
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            step_count=0,
+        )
+        env_a = EnvironmentIdentity(
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            grid_width=8,
+            grid_height=8,
+            task_family="go_to_object",
+            summary={"objects": []},
+        )
+        env_b = EnvironmentIdentity.from_dict({**env_a.as_dict(), "seed": 43})
+        entry = GroundedDoorEntry(color="red", x=2, y=2, distance=2)
+        claims = StationActiveClaims(
+            scene_fingerprint=(1, 1, 0),
+            ranked_scene_doors=[entry],
+            last_grounded_target=entry,
+            last_grounded_rank=0,
+            last_grounding_query={},
+            environment_fingerprint=env_a.fingerprint(),
+            environment_identity=env_a,
+        )
+
+        self.assertTrue(claims.is_valid_for(scene, environment_identity=env_a))
+        self.assertFalse(claims.is_valid_for(scene, environment_identity=env_b))
+
+    def test_legacy_claim_without_environment_is_stale_when_current_identity_exists(self):
+        scene = SceneModel(
+            agent_x=1,
+            agent_y=1,
+            agent_dir=0,
+            grid_width=8,
+            grid_height=8,
+            objects=[],
+            source="idle_sense",
+            step_count=0,
+        )
+        env = EnvironmentIdentity(
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            grid_width=8,
+            grid_height=8,
+            task_family="go_to_object",
+            summary={"objects": []},
+        )
+        entry = GroundedDoorEntry(color="red", x=2, y=2, distance=2)
+        claims = StationActiveClaims(
+            scene_fingerprint=(1, 1, 0),
+            ranked_scene_doors=[entry],
+            last_grounded_target=entry,
+            last_grounded_rank=0,
+            last_grounding_query={},
+        )
+
+        self.assertTrue(claims.is_valid_for(scene))
+        self.assertFalse(claims.is_valid_for(scene, environment_identity=env))
+
+    def test_environment_change_invalidates_claims_and_scene_before_reuse(self):
+        session = self._make_session()
+        self._run_with_env(lambda: session.handle_utterance(
+            "which door is closest by manhattan distance"
+        ))
+        self.assertIsNotNone(session.active_claims)
+        self.assertIsNotNone(session.memory.scene_model)
+        session.seed = 43
+
+        result = self._run_with_env(lambda: session.handle_utterance("next closest door"))
+
+        self.assertIn("Scene has changed", result)
+        self.assertIsNone(session.active_claims)
+        self.assertIsNone(session.memory.scene_model)
+        self.assertIsNone(session.last_result)
 
 
 class TestGroundingResultComposition(unittest.TestCase):
@@ -3304,6 +3397,33 @@ class TestLLMSemanticQueryPlanner(unittest.TestCase):
 
 
 class JeenomPhase795RequestPlanTests(unittest.TestCase):
+    def _direct_red_door_intent(self) -> OperatorIntent:
+        return OperatorIntent(
+            intent_type="task_instruction",
+            canonical_instruction="go to the red door",
+            task_type="go_to_object",
+            target={"color": "red", "object_type": "door"},
+            confidence=1.0,
+            reason="Direct red door task.",
+        )
+
+    def _environment_identity(
+        self,
+        *,
+        env_id: str = "MiniGrid-GoToDoor-8x8-v0",
+        seed: int = 42,
+        grid_width: int = 8,
+        grid_height: int = 8,
+    ) -> EnvironmentIdentity:
+        return EnvironmentIdentity(
+            env_id=env_id,
+            seed=seed,
+            grid_width=grid_width,
+            grid_height=grid_height,
+            task_family="go_to_object",
+            summary={"objects": [{"type": "door", "color": "red", "x": 5, "y": 6}]},
+        )
+
     def _threshold_intent(self) -> OperatorIntent:
         plan = {
             "object_type": "door",
@@ -3399,6 +3519,86 @@ class JeenomPhase795RequestPlanTests(unittest.TestCase):
             session.memory.episodic_memory["last_readiness_graph"]["next_action"],
             "propose_synthesis",
         )
+
+    def test_environment_assumptions_same_environment_pass(self):
+        env = self._environment_identity()
+        plan = build_request_plan(
+            "go to the red door",
+            self._direct_red_door_intent(),
+            environment_identity=env,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=CapabilityRegistry.minigrid_default(),
+            environment_identity=env,
+        )
+
+        self.assertGreater(len(plan.environment_assumptions), 0)
+        self.assertTrue(plan.steps[-1].environment_assumption_ids)
+        self.assertEqual(graph.violated_assumption_ids, [])
+        self.assertEqual(graph.graph_status, "executable")
+
+    def test_environment_assumption_seed_mismatch_is_diagnostic_only(self):
+        env = self._environment_identity(seed=42)
+        changed_seed = self._environment_identity(seed=43)
+        plan = build_request_plan(
+            "go to the red door",
+            self._direct_red_door_intent(),
+            environment_identity=env,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=CapabilityRegistry.minigrid_default(),
+            environment_identity=changed_seed,
+        )
+
+        self.assertIn("env.seed", graph.diagnostic_assumption_ids)
+        self.assertIn("env.fingerprint", graph.diagnostic_assumption_ids)
+        self.assertEqual(graph.violated_assumption_ids, [])
+        self.assertNotEqual(graph.graph_status, "environment_assumption_failed")
+
+    def test_environment_assumption_required_env_mismatch_blocks_readiness(self):
+        env = self._environment_identity(env_id="MiniGrid-GoToDoor-8x8-v0")
+        changed_env = self._environment_identity(env_id="MiniGrid-GoToDoor-16x16-v0")
+        plan = build_request_plan(
+            "go to the red door",
+            self._direct_red_door_intent(),
+            environment_identity=env,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=CapabilityRegistry.minigrid_default(),
+            environment_identity=changed_env,
+        )
+
+        self.assertEqual(graph.graph_status, "environment_assumption_failed")
+        self.assertEqual(graph.next_action, "refuse")
+        self.assertIn("env.env_id", graph.violated_assumption_ids)
+        self.assertIn("env.env_id", graph.nodes[-1].violated_assumption_ids)
+
+    def test_operator_station_records_assumption_diagnostics(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(transport=build_test_llm_transport(), api_key="test"),
+            memory_root=Path(tempfile.mkdtemp()),
+            render_mode="none",
+            verbose=False,
+        )
+        session.current_environment_identity = self._environment_identity()
+        _ = session.command_from_operator_intent(
+            self._direct_red_door_intent(),
+            "go to the red door",
+        )
+        plan = session.last_request_plan
+        self.assertIsNotNone(plan)
+        changed_env = self._environment_identity(env_id="MiniGrid-GoToDoor-16x16-v0")
+        graph = evaluate_request_plan(
+            plan,
+            registry=session.capability_registry,
+            environment_identity=changed_env,
+        )
+
+        self.assertIn("env.env_id", graph.violated_assumption_ids)
+        self.assertEqual(graph.graph_status, "environment_assumption_failed")
 
 
 if __name__ == "__main__":

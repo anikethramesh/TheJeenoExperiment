@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
@@ -129,6 +131,7 @@ READINESS_NODE_STATUSES = (
     "unsupported",
     "stale_claims",
     "blocked_by_dependency",
+    "environment_assumption_failed",
 )
 READINESS_NEXT_ACTIONS = (
     "execute_task",
@@ -169,6 +172,12 @@ def _ensure_str(value: Any, label: str) -> str:
     if not isinstance(value, str):
         raise SchemaValidationError(f"{label} must be a string")
     return value
+
+
+def _ensure_optional_str(value: Any, label: str) -> str | None:
+    if value is None:
+        return None
+    return _ensure_str(value, label)
 
 
 def _ensure_bool(value: Any, label: str) -> bool:
@@ -674,6 +683,7 @@ class RequestPlanStep:
     memory_reads: list[str] = field(default_factory=list)
     memory_writes: list[str] = field(default_factory=list)
     scene_fingerprint_required: bool = False
+    environment_assumption_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Any) -> RequestPlanStep:
@@ -730,6 +740,10 @@ class RequestPlanStep:
                 mapping.get("scene_fingerprint_required", False),
                 "RequestPlanStep.scene_fingerprint_required",
             ),
+            environment_assumption_ids=_ensure_str_list(
+                mapping.get("environment_assumption_ids", []),
+                "RequestPlanStep.environment_assumption_ids",
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -747,6 +761,54 @@ class RequestPlanStep:
             "memory_reads": list(self.memory_reads),
             "memory_writes": list(self.memory_writes),
             "scene_fingerprint_required": self.scene_fingerprint_required,
+            "environment_assumption_ids": list(self.environment_assumption_ids),
+        }
+
+
+@dataclass
+class EnvironmentAssumption:
+    assumption_id: str
+    kind: str
+    expected: dict[str, Any] = field(default_factory=dict)
+    source: str = "environment_identity"
+    required: bool = True
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "EnvironmentAssumption":
+        mapping = _ensure_mapping(data, "EnvironmentAssumption")
+        return cls(
+            assumption_id=_ensure_str(
+                mapping.get("assumption_id"),
+                "EnvironmentAssumption.assumption_id",
+            ),
+            kind=_ensure_str(mapping.get("kind"), "EnvironmentAssumption.kind"),
+            expected=_ensure_dict(
+                mapping.get("expected", {}),
+                "EnvironmentAssumption.expected",
+            ),
+            source=_ensure_str(
+                mapping.get("source", "environment_identity"),
+                "EnvironmentAssumption.source",
+            ),
+            required=_ensure_bool(
+                mapping.get("required", True),
+                "EnvironmentAssumption.required",
+            ),
+            description=_ensure_str(
+                mapping.get("description", ""),
+                "EnvironmentAssumption.description",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "assumption_id": self.assumption_id,
+            "kind": self.kind,
+            "expected": dict(self.expected),
+            "source": self.source,
+            "required": self.required,
+            "description": self.description,
         }
 
 
@@ -759,6 +821,7 @@ class RequestPlan:
     steps: list[RequestPlanStep] = field(default_factory=list)
     preservation_signals: list[str] = field(default_factory=list)
     expected_response: str = "refuse"
+    environment_assumptions: list[EnvironmentAssumption] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Any) -> RequestPlan:
@@ -774,6 +837,10 @@ class RequestPlan:
             "RequestPlan.expected_response",
         )
         raw_steps = _ensure_list(mapping.get("steps", []), "RequestPlan.steps")
+        raw_assumptions = _ensure_list(
+            mapping.get("environment_assumptions", []),
+            "RequestPlan.environment_assumptions",
+        )
         return cls(
             request_id=_ensure_str(mapping.get("request_id"), "RequestPlan.request_id"),
             original_utterance=_ensure_str(
@@ -794,6 +861,10 @@ class RequestPlan:
                 "RequestPlan.preservation_signals",
             ),
             expected_response=expected_response or "refuse",
+            environment_assumptions=[
+                EnvironmentAssumption.from_dict(item)
+                for item in raw_assumptions
+            ],
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -805,6 +876,10 @@ class RequestPlan:
             "steps": [step.as_dict() for step in self.steps],
             "preservation_signals": list(self.preservation_signals),
             "expected_response": self.expected_response,
+            "environment_assumptions": [
+                assumption.as_dict()
+                for assumption in self.environment_assumptions
+            ],
         }
 
 
@@ -817,6 +892,8 @@ class ReadinessNode:
     required_handle: str | None = None
     reason: str = ""
     blocking_dependencies: list[str] = field(default_factory=list)
+    violated_assumption_ids: list[str] = field(default_factory=list)
+    diagnostic_assumption_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Any) -> ReadinessNode:
@@ -840,6 +917,14 @@ class ReadinessNode:
                 mapping.get("blocking_dependencies", []),
                 "ReadinessNode.blocking_dependencies",
             ),
+            violated_assumption_ids=_ensure_str_list(
+                mapping.get("violated_assumption_ids", []),
+                "ReadinessNode.violated_assumption_ids",
+            ),
+            diagnostic_assumption_ids=_ensure_str_list(
+                mapping.get("diagnostic_assumption_ids", []),
+                "ReadinessNode.diagnostic_assumption_ids",
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -851,6 +936,8 @@ class ReadinessNode:
             "required_handle": self.required_handle,
             "reason": self.reason,
             "blocking_dependencies": list(self.blocking_dependencies),
+            "violated_assumption_ids": list(self.violated_assumption_ids),
+            "diagnostic_assumption_ids": list(self.diagnostic_assumption_ids),
         }
 
 
@@ -862,6 +949,8 @@ class ReadinessGraph:
     next_action: str = "refuse"
     blocking_step_id: str | None = None
     explanation: str = ""
+    violated_assumption_ids: list[str] = field(default_factory=list)
+    diagnostic_assumption_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Any) -> ReadinessGraph:
@@ -893,6 +982,14 @@ class ReadinessGraph:
                 mapping.get("explanation", ""),
                 "ReadinessGraph.explanation",
             ),
+            violated_assumption_ids=_ensure_str_list(
+                mapping.get("violated_assumption_ids", []),
+                "ReadinessGraph.violated_assumption_ids",
+            ),
+            diagnostic_assumption_ids=_ensure_str_list(
+                mapping.get("diagnostic_assumption_ids", []),
+                "ReadinessGraph.diagnostic_assumption_ids",
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -903,6 +1000,8 @@ class ReadinessGraph:
             "next_action": self.next_action,
             "blocking_step_id": self.blocking_step_id,
             "explanation": self.explanation,
+            "violated_assumption_ids": list(self.violated_assumption_ids),
+            "diagnostic_assumption_ids": list(self.diagnostic_assumption_ids),
         }
 
 
@@ -1298,6 +1397,66 @@ class GroundedDoorEntry:
 
 
 @dataclass
+class EnvironmentIdentity:
+    """Stable identity for the world/task context, separate from scene state."""
+
+    env_id: str | None = None
+    seed: int | str | None = None
+    grid_width: int | None = None
+    grid_height: int | None = None
+    mission: str | None = None
+    task_family: str | None = None
+    scene_fingerprint: str | None = None
+    summary: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "env_id": self.env_id,
+            "seed": self.seed,
+            "grid_width": self.grid_width,
+            "grid_height": self.grid_height,
+            "mission": self.mission,
+            "task_family": self.task_family,
+            "scene_fingerprint": self.scene_fingerprint,
+            "summary": dict(self.summary),
+            "fingerprint": self.fingerprint(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "EnvironmentIdentity":
+        mapping = _ensure_mapping(data, "EnvironmentIdentity")
+        seed = mapping.get("seed")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, (int, str))):
+            raise SchemaValidationError("EnvironmentIdentity.seed must be an integer, string, or null")
+        return cls(
+            env_id=_ensure_optional_str(mapping.get("env_id"), "EnvironmentIdentity.env_id"),
+            seed=seed,
+            grid_width=_ensure_optional_int(mapping.get("grid_width"), "EnvironmentIdentity.grid_width"),
+            grid_height=_ensure_optional_int(mapping.get("grid_height"), "EnvironmentIdentity.grid_height"),
+            mission=_ensure_optional_str(mapping.get("mission"), "EnvironmentIdentity.mission"),
+            task_family=_ensure_optional_str(mapping.get("task_family"), "EnvironmentIdentity.task_family"),
+            scene_fingerprint=_ensure_optional_str(
+                mapping.get("scene_fingerprint"),
+                "EnvironmentIdentity.scene_fingerprint",
+            ),
+            summary=_ensure_dict(mapping.get("summary", {}), "EnvironmentIdentity.summary"),
+        )
+
+    def fingerprint(self) -> str:
+        stable = {
+            "env_id": self.env_id,
+            "seed": self.seed,
+            "grid_width": self.grid_width,
+            "grid_height": self.grid_height,
+            "mission": self.mission,
+            "task_family": self.task_family,
+            "summary": self.summary,
+        }
+        payload = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass
 class StationActiveClaims:
     """Session-scoped claims produced by grounding queries.
 
@@ -1310,9 +1469,22 @@ class StationActiveClaims:
     last_grounded_target: GroundedDoorEntry
     last_grounded_rank: int
     last_grounding_query: dict[str, Any]
+    environment_fingerprint: str | None = None
+    environment_identity: EnvironmentIdentity | None = None
 
-    def is_valid_for(self, scene: SceneModel) -> bool:
-        return self.scene_fingerprint == (scene.agent_x, scene.agent_y, scene.step_count)
+    def is_valid_for(
+        self,
+        scene: SceneModel,
+        environment_identity: EnvironmentIdentity | None = None,
+    ) -> bool:
+        scene_valid = self.scene_fingerprint == (scene.agent_x, scene.agent_y, scene.step_count)
+        if not scene_valid:
+            return False
+        if environment_identity is None:
+            return True
+        if self.environment_fingerprint is None:
+            return False
+        return self.environment_fingerprint == environment_identity.fingerprint()
 
     def next_ranked(self) -> tuple[GroundedDoorEntry, int] | tuple[None, None]:
         rank = self.last_grounded_rank + 1
@@ -1336,6 +1508,7 @@ class StationActiveClaims:
                 f"{d.color}@{d.distance}" for d in self.ranked_scene_doors
             ],
             "last_rank": self.last_grounded_rank,
+            "environment_fingerprint": self.environment_fingerprint,
         }
 
 

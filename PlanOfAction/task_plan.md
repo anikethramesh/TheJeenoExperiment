@@ -1904,17 +1904,44 @@ Out of scope:
 - Primitive synthesis beyond the existing safe synthesis policy.
 - Replacing PlanCache or runtime Sense/Spine execution.
 
+#### Phase 8 — Cross-Environment Operational Adaptation
+Implement Phase 8 as staged eval-gated architecture work, not as one large feature dump.
 
-### Phase 8 — GoToObject/general object variant
-Status: planned.
+Phase 8 goal: make JEENOM transfer operational structure across changing MiniGrid environments by reusing valid plans/claims/primitives, detecting invalid reuse, repairing mismatches through sparse operator input, and continuing execution safely.
 
-Goal:
-Extend the existing go_to_object recipe beyond doors to supported MiniGrid object types.
+Core invariant: stale claims or invalid reused plans must never execute silently.
 
+Implement stages in order:
 
-### Phase 8.5 — Readiness-only transfer demo
-Status: planned.
-Same Understanding, different primitive set. MiniGrid executable; Jackal/Nav2 partial/executable depending primitives.
+1. Environment identity + stale claim safety.
+   Add environment fingerprints and claim freshness. Build `phase8_environment_change_stale_claim_probe.py`. Gate: environment changes mark prior claims stale and block/refresh them before execution.
+
+2. Explicit environment assumptions.
+   Add first-class `EnvironmentAssumption` objects with IDs at plan and step level. Build `phase8_environment_assumption_probe.py`. Gate: invalid reuse points to a specific violated assumption.
+
+3. Conservative RequestPlan reuse.
+   Add plan cache, reuse history, and `can_reuse_plan()`. Default reuse policy is `if_valid`, not `always`. Build `phase8_plan_reuse_same_semantics_probe.py`. Gate: same semantic task transfers across different layout without operator re-specification.
+
+4. Mismatch detection.
+   Add `jeenom/mismatch.py` and typed mismatches: `STALE_CLAIMS`, `EXPECTED_TARGET_ABSENT`, `CHANGED_DISTANCE_RELATIONS`, `UNSUPPORTED_GROUNDING`, `MISSING_PRIMITIVE_IN_REGISTRY`, `CONSTRAINT_WEAKENING`. Build missing-target, changed-grounding, and constraint-preservation probes. Gate: unsafe execution is blocked and no constraints silently disappear.
+
+5. Repair loop.
+   Add `jeenom/repair_loop.py` with repair actions `REFRESH_CLAIMS`, `REGROUND`, `CLARIFY`, `SYNTHESIZE`, `ABORT`. Add `RepairEvent` logging and readiness re-evaluation after repair. Build `phase8_operational_repair_probe.py`. Gate: a blocking mismatch is repaired with a narrow operator intervention and execution resumes.
+
+6. Synthesized primitive provenance + reuse.
+   Extend capability registry with provenance, validation fixtures, reuse history, and failure tracking. Build primitive reuse and primitive extension probes. Gate: valid synthesized primitives are reused; invalid primitive reuse is blocked.
+
+7. Intervention metrics + full transfer eval.
+   Add `InterventionMetrics` and `minimal_shot_transfer_probe.py`. Gate: full environment progression completes with valid reuse accepted, invalid reuse rejected, repairs logged, operator interventions counted, primitive reuse measured, and render-time guarantees preserved.
+
+Every stage must include:
+
+* unit tests for the mechanism,
+* one integration test through `OperatorStationSession`,
+* one eval probe that emits metrics,
+* regression check for existing golden paths.
+
+Do not proceed to the next stage until the current stage gate passes.
 
 ### Phase 9 — Failure/replan/operator ask
 Status: planned.

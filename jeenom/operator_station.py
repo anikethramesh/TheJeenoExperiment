@@ -24,6 +24,7 @@ from .plan_cache import PlanCache
 from .primitive_library import TASK_PRIMITIVES
 from .schemas import (
     ArbitrationTrace,
+    EnvironmentIdentity,
     GroundedDoorEntry,
     OperatorIntent,
     ProcedureRecipe,
@@ -330,6 +331,8 @@ class OperatorStationSession:
         self.pending_clarification: PendingClarification | None = None
         self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
         self.active_claims: StationActiveClaims | None = None
+        self.current_environment_identity: EnvironmentIdentity | None = None
+        self.last_environment_invalidation_reason: str | None = None
         self.last_request_plan: RequestPlan | None = None
         self.last_readiness_graph: ReadinessGraph | None = None
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
@@ -725,25 +728,24 @@ class OperatorStationSession:
         return OperatorCommand(kind="unsupported", utterance=utterance)
 
     def _record_request_plan(self, utterance: str, intent: OperatorIntent) -> None:
+        claims_valid = self._claims_valid_for_current_environment()
         active_summary = (
             self.active_claims.compact_summary()
-            if self.active_claims is not None
+            if self.active_claims is not None and claims_valid
             else None
         )
         request_plan = build_request_plan(
             utterance,
             intent,
             active_claims_summary=active_summary,
+            environment_identity=self.current_environment_identity,
         )
-        claims_valid = False
-        scene = self.memory.scene_model
-        if scene is not None and self.active_claims is not None:
-            claims_valid = self.active_claims.is_valid_for(scene)
         readiness_graph = evaluate_request_plan(
             request_plan,
             registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
+            environment_identity=self.current_environment_identity,
         )
         self.last_request_plan = request_plan
         self.last_readiness_graph = readiness_graph
@@ -993,7 +995,7 @@ class OperatorStationSession:
                 utterance=utterance,
                 payload={"message": "No active grounded target for that reference."},
             )
-        if not self.active_claims.is_valid_for(scene):
+        if not self._claims_valid_for_current_environment(scene):
             self.active_claims = None
             return OperatorCommand(
                 kind="ambiguous",
@@ -2074,7 +2076,7 @@ class OperatorStationSession:
                 for d in doors
             ],
         }
-        if self.active_claims is not None and self.active_claims.is_valid_for(scene):
+        if self.active_claims is not None and self._claims_valid_for_current_environment(scene):
             summary["active_claims"] = self.active_claims.compact_summary()
         return summary
 
@@ -2217,7 +2219,7 @@ class OperatorStationSession:
             return "No scene data available yet."
         if (
             self.active_claims is not None
-            and self.active_claims.is_valid_for(scene)
+            and self._claims_valid_for_current_environment(scene)
             and self.active_claims.last_grounding_query.get("primitive") == handle
         ):
             return self.active_claims
@@ -3487,7 +3489,16 @@ class OperatorStationSession:
         for the initial observation, then closes it.
         """
         if self.memory.scene_model is not None:
-            return self.memory.scene_model
+            scene = self.memory.scene_model
+            identity = self._build_environment_identity(scene)
+            current = self.current_environment_identity
+            if current is None or current.fingerprint() == identity.fingerprint():
+                self.current_environment_identity = identity
+                return scene
+            self.log("environment_identity_changed")
+            self.active_claims = None
+            self.memory.scene_model = None
+            self.last_environment_invalidation_reason = "environment_identity_changed"
         adapter = self.preview_adapter or self.task_adapter
         close_after = False
         if adapter is None:
@@ -3503,7 +3514,94 @@ class OperatorStationSession:
         finally:
             if close_after:
                 adapter.close()
-        return self.memory.scene_model
+        scene = self.memory.scene_model
+        if scene is not None:
+            self.current_environment_identity = self._build_environment_identity(scene)
+        return scene
+
+    def _task_family_for_env(self) -> str | None:
+        if "GoToDoor" in self.env_id:
+            return "go_to_object"
+        if "MiniGrid" in self.env_id:
+            return "minigrid"
+        return None
+
+    def _scene_state_fingerprint(self, scene: SceneModel) -> str:
+        return (
+            f"agent=({scene.agent_x},{scene.agent_y},{scene.agent_dir});"
+            f"step={scene.step_count}"
+        )
+
+    def _build_environment_identity(self, scene: SceneModel) -> EnvironmentIdentity:
+        objects = sorted(
+            (
+                {
+                    "type": obj.object_type,
+                    "color": obj.color,
+                    "x": obj.x,
+                    "y": obj.y,
+                    "state": obj.state,
+                }
+                for obj in scene.objects
+            ),
+            key=lambda item: (
+                str(item["type"]),
+                str(item["color"]),
+                int(item["x"]),
+                int(item["y"]),
+                str(item["state"]),
+            ),
+        )
+        return EnvironmentIdentity(
+            env_id=self.env_id or scene.env_id,
+            seed=self.seed if self.seed is not None else scene.seed,
+            grid_width=scene.grid_width,
+            grid_height=scene.grid_height,
+            mission=self._last_scene_mission(),
+            task_family=self._task_family_for_env(),
+            scene_fingerprint=self._scene_state_fingerprint(scene),
+            summary={
+                "object_count": len(objects),
+                "objects": objects,
+            },
+        )
+
+    def _update_current_environment_identity(self, scene: SceneModel) -> bool:
+        identity = self._build_environment_identity(scene)
+        current = self.current_environment_identity
+        changed = current is not None and current.fingerprint() != identity.fingerprint()
+        if changed:
+            self.log("environment_identity_changed")
+            self.active_claims = None
+            self.memory.scene_model = None
+            self.last_environment_invalidation_reason = "environment_identity_changed"
+        self.current_environment_identity = identity
+        return changed
+
+    def _last_scene_mission(self) -> str | None:
+        sample = self.memory.episodic_memory.get("last_world_sample")
+        if not isinstance(sample, dict):
+            return None
+        mission = sample.get("mission")
+        return mission if isinstance(mission, str) else None
+
+    def _claims_valid_for_current_environment(self, scene: SceneModel | None = None) -> bool:
+        if self.active_claims is None:
+            return False
+        scene = scene or self.memory.scene_model
+        if scene is None:
+            return False
+        identity = self._build_environment_identity(scene)
+        current = self.current_environment_identity
+        if current is not None and current.fingerprint() != identity.fingerprint():
+            self.log("environment_identity_changed")
+            self.active_claims = None
+            self.memory.scene_model = None
+            self.current_environment_identity = identity
+            self.last_environment_invalidation_reason = "environment_identity_changed"
+            return False
+        self.current_environment_identity = identity
+        return self.active_claims.is_valid_for(scene, environment_identity=identity)
 
     def _write_ranked_claims(
         self,
@@ -3522,27 +3620,37 @@ class OperatorStationSession:
             )
             for dist, obj in ranked_pairs
         ]
+        identity = self.current_environment_identity or self._build_environment_identity(scene)
+        self.current_environment_identity = identity
+        self.last_environment_invalidation_reason = None
         self.active_claims = StationActiveClaims(
             scene_fingerprint=(scene.agent_x, scene.agent_y, scene.step_count),
             ranked_scene_doors=entries,
             last_grounded_target=entries[0],
             last_grounded_rank=0,
             last_grounding_query=dict(selector),
+            environment_fingerprint=identity.fingerprint(),
+            environment_identity=identity,
         )
 
     def _resolve_claim_reference(self, ref_type: str) -> dict[str, Any]:
         scene = self.memory.scene_model
-        if scene is None:
-            return {"ok": False, "message": "No scene data available."}
-        if self.active_claims is None:
+        if self.last_environment_invalidation_reason == "environment_identity_changed":
             return {
                 "ok": False,
                 "message": (
-                    "No active grounding claims. "
-                    "Try 'which door is closest by Manhattan distance?' first."
+                    "Scene has changed since the last grounding "
+                    "(environment_identity_changed). Please re-ground."
                 ),
             }
-        if not self.active_claims.is_valid_for(scene):
+        if self.active_claims is None:
+            return {
+                "ok": False,
+                "message": self._missing_claim_reference_prerequisite(ref_type),
+            }
+        if scene is None:
+            return {"ok": False, "message": "No scene data available."}
+        if not self._claims_valid_for_current_environment(scene):
             self.active_claims = None
             return {
                 "ok": False,
@@ -3582,6 +3690,41 @@ class OperatorStationSession:
             return {"ok": True, "target": entry.as_dict(), "distance": entry.distance}
 
         return {"ok": False, "message": f"Unknown claim reference: {ref_type}"}
+
+    def _missing_claim_reference_prerequisite(self, ref_type: str) -> str:
+        if ref_type == "next_closest":
+            return self._grounding_prerequisite_message(
+                relation="ranked",
+                object_type="door",
+                metric="manhattan",
+                reference="agent",
+            )
+        if ref_type == "other_door":
+            return self._grounding_prerequisite_message(
+                relation="selected",
+                object_type="door",
+                metric="manhattan",
+                reference="agent",
+            )
+        return "No active grounding claims. Ground the relevant target first."
+
+    def _grounding_prerequisite_message(
+        self,
+        *,
+        relation: str,
+        object_type: str,
+        metric: str | None,
+        reference: str | None,
+    ) -> str:
+        metric_part = f" by {metric} distance" if metric is not None else ""
+        reference_part = " from you" if reference == "agent" else ""
+        if relation == "ranked":
+            needed = f"a ranked {object_type} grounding"
+            query = f"which {object_type} is closest{metric_part}{reference_part}?"
+        else:
+            needed = f"a selected {object_type} grounding"
+            query = f"which {object_type} should I use{metric_part}{reference_part}?"
+        return f"No active grounding claims for that reference. First ask: {query} ({needed})."
 
     def compose_known_task(self, instruction: str) -> TaskRequest:
         parsed = _parse_go_to_object_utterance(instruction)
@@ -3843,6 +3986,7 @@ class OperatorStationSession:
         self.pending_clarification = None
         self.pending_synthesis_proposal = None
         self.active_claims = None
+        self.last_environment_invalidation_reason = None
         self.last_request_plan = None
         self.last_readiness_graph = None
         self.memory.reset_episode()

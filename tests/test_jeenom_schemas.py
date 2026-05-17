@@ -3,12 +3,15 @@ from __future__ import annotations
 import unittest
 
 from jeenom.schemas import (
+    EnvironmentAssumption,
+    EnvironmentIdentity,
     GroundingQueryPlan,
     OperatorIntent,
     PrimitiveManifest,
     PrimitiveCall,
     ProcedureRecipe,
     ReadinessGraph,
+    ReadinessNode,
     RequestPlan,
     SchemaValidationError,
     SensePlanTemplate,
@@ -20,6 +23,126 @@ from jeenom.schemas import (
 
 
 class JeenomSchemaTests(unittest.TestCase):
+    def test_environment_identity_round_trip_and_stable_fingerprint(self):
+        identity = EnvironmentIdentity(
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            grid_width=8,
+            grid_height=8,
+            mission="go to the red door",
+            task_family="go_to_object",
+            scene_fingerprint="agent=(1,1,0);step=0",
+            summary={"objects": [{"type": "door", "color": "red", "x": 5, "y": 6}]},
+        )
+        round_trip = EnvironmentIdentity.from_dict(identity.as_dict())
+
+        self.assertEqual(round_trip.env_id, identity.env_id)
+        self.assertEqual(round_trip.summary, identity.summary)
+        self.assertEqual(round_trip.fingerprint(), identity.fingerprint())
+
+    def test_environment_identity_fingerprint_uses_stable_fields_only(self):
+        base = EnvironmentIdentity(
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            grid_width=8,
+            grid_height=8,
+            mission="go to the red door",
+            task_family="go_to_object",
+            scene_fingerprint="agent=(1,1,0);step=0",
+            summary={"objects": [{"type": "door", "color": "red", "x": 5, "y": 6}]},
+        )
+        same_environment_new_scene = EnvironmentIdentity.from_dict(
+            {**base.as_dict(), "scene_fingerprint": "agent=(2,1,0);step=3"}
+        )
+        other_env = EnvironmentIdentity.from_dict(
+            {**base.as_dict(), "env_id": "MiniGrid-GoToDoor-16x16-v0"}
+        )
+        other_seed = EnvironmentIdentity.from_dict({**base.as_dict(), "seed": 43})
+
+        self.assertEqual(base.fingerprint(), same_environment_new_scene.fingerprint())
+        self.assertNotEqual(base.fingerprint(), other_env.fingerprint())
+        self.assertNotEqual(base.fingerprint(), other_seed.fingerprint())
+
+    def test_environment_assumption_round_trip(self):
+        assumption = EnvironmentAssumption(
+            assumption_id="env.grid_size",
+            kind="grid_size",
+            expected={"grid_width": 8, "grid_height": 8},
+            source="environment_identity",
+            required=True,
+            description="Grid size captured with the plan.",
+        )
+        round_trip = EnvironmentAssumption.from_dict(assumption.as_dict())
+
+        self.assertEqual(round_trip.assumption_id, "env.grid_size")
+        self.assertEqual(round_trip.expected["grid_width"], 8)
+        self.assertTrue(round_trip.required)
+
+    def test_request_plan_schema_accepts_environment_assumptions(self):
+        plan = RequestPlan.from_dict(
+            {
+                "request_id": "req-env",
+                "original_utterance": "go to the red door",
+                "objective_type": "task",
+                "objective_summary": "navigate",
+                "expected_response": "execute_task",
+                "preservation_signals": ["color.red", "object_type.door"],
+                "environment_assumptions": [
+                    {
+                        "assumption_id": "env.env_id",
+                        "kind": "env_id",
+                        "expected": {"env_id": "MiniGrid-GoToDoor-8x8-v0"},
+                        "source": "environment_identity",
+                        "required": True,
+                        "description": "Plan environment id.",
+                    }
+                ],
+                "steps": [
+                    {
+                        "step_id": "execute_task",
+                        "layer": "task",
+                        "operation": "execute",
+                        "required_handle": "task.go_to_object.door",
+                        "outputs": ["task_result"],
+                        "environment_assumption_ids": ["env.env_id"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(plan.environment_assumptions[0].assumption_id, "env.env_id")
+        self.assertEqual(plan.steps[0].environment_assumption_ids, ["env.env_id"])
+
+    def test_readiness_schema_accepts_assumption_diagnostics(self):
+        graph = ReadinessGraph.from_dict(
+            {
+                "request_id": "req-env",
+                "graph_status": "environment_assumption_failed",
+                "next_action": "refuse",
+                "blocking_step_id": "execute_task",
+                "explanation": "execute_task: Environment assumption failed",
+                "violated_assumption_ids": ["env.env_id"],
+                "diagnostic_assumption_ids": ["env.seed"],
+                "nodes": [
+                    {
+                        "step_id": "execute_task",
+                        "status": "environment_assumption_failed",
+                        "layer": "task",
+                        "operation": "execute",
+                        "required_handle": "task.go_to_object.door",
+                        "reason": "Environment assumption failed",
+                        "blocking_dependencies": [],
+                        "violated_assumption_ids": ["env.env_id"],
+                        "diagnostic_assumption_ids": ["env.seed"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(graph.violated_assumption_ids, ["env.env_id"])
+        self.assertEqual(graph.diagnostic_assumption_ids, ["env.seed"])
+        self.assertIsInstance(graph.nodes[0], ReadinessNode)
+
     def test_primitive_params_schema_uses_azure_safe_array_shape(self):
         schema = primitive_params_json_schema()
 
