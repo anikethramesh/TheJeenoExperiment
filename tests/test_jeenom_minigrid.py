@@ -2779,6 +2779,34 @@ class TestGroundingResultComposition(unittest.TestCase):
         self.assertIn("yellow door@(11,2)", response)
         self.assertIsNone(session.last_result)
 
+    def test_second_highest_distance_normalizes_to_second_farthest_task(self):
+        session = self._make_session(seed=12)
+        response = self._run_with_env(
+            lambda: session.handle_utterance(
+                "go to the door with the second highest manhattan distance"
+            )
+        )
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("ordinal falls inside a distance tie", response)
+        self.assertIn("green door@(9,0)", response)
+        self.assertIn("yellow door@(11,2)", response)
+        self.assertIsNone(session.last_result)
+
+    def test_second_highest_distance_query_normalizes_to_ranked_answer(self):
+        session = self._make_session(seed=8)
+        response = self._run_with_env(
+            lambda: session.handle_utterance(
+                "whats the door with the second highest manhattan distance from you"
+            )
+        )
+
+        self.assertIn("CLARIFY", response)
+        self.assertIn("ordinal falls inside a distance tie", response)
+        self.assertIn("red door@(10,7)", response)
+        self.assertIn("blue door@(12,3)", response)
+        self.assertIsNone(session.last_result)
+
     def test_distance_reference_uses_ranked_claims_and_executes_unique_match(self):
         session = self._make_session()
         response = self._run_with_env(

@@ -1919,6 +1919,9 @@ Implement stages in order:
 2. Explicit environment assumptions.
    Add first-class `EnvironmentAssumption` objects with IDs at plan and step level. Build `phase8_environment_assumption_probe.py`. Gate: invalid reuse points to a specific violated assumption.
 
+2.5. Semantic distance-ordinal normalization bug fix.
+   Add a deterministic normalization layer for ordinal distance language such as "second highest Manhattan distance" so clear task/query utterances compile to ranked door plans instead of unsupported/synthesis fallbacks. Gate: highest/largest/greatest distance normalizes to descending ordinal semantics, lowest/smallest/minimum distance normalizes to ascending ordinal semantics, and existing render-time guarantees remain unchanged.
+
 3. Conservative RequestPlan reuse.
    Add plan cache, reuse history, and `can_reuse_plan()`. Default reuse policy is `if_valid`, not `always`. Build `phase8_plan_reuse_same_semantics_probe.py`. Gate: same semantic task transfers across different layout without operator re-specification.
 

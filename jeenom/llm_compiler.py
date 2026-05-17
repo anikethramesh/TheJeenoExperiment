@@ -10,6 +10,7 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from .primitive_library import library_payload, primitive_names
+from .semantic_normalizer import normalize_distance_ordinal
 from .schemas import (
     EvidenceFrame,
     ExecutionContract,
@@ -523,6 +524,49 @@ class SmokeTestCompiler(CompilerBackend):
             r"(closest|nearest|farthest|furthest)\b",
             normalized,
         )
+        ordinal_semantics = normalize_distance_ordinal(normalized)
+        if ordinal_semantics is not None:
+            semantic_ranked_handle = (
+                f"grounding.all_doors.ranked.{ordinal_semantics.metric}.agent"
+            )
+            return OperatorIntent(
+                intent_type="task_instruction" if is_navigation else "status_query",
+                status_query=None if is_navigation else "ground_target",
+                task_type="go_to_object" if is_navigation else None,
+                target_selector=None,
+                grounding_query_plan={
+                    "object_type": "door",
+                    "operation": "select" if is_navigation else "answer",
+                    "primitive_handle": semantic_ranked_handle,
+                    "metric": ordinal_semantics.metric,
+                    "reference": "agent",
+                    "order": ordinal_semantics.order,
+                    "ordinal": ordinal_semantics.ordinal,
+                    "color": None,
+                    "exclude_colors": [],
+                    "distance_value": None,
+                    "tie_policy": "clarify",
+                    "answer_fields": ["target", "distance"],
+                    "required_capabilities": (
+                        [semantic_ranked_handle, "task.go_to_object.door"]
+                        if is_navigation
+                        else [semantic_ranked_handle]
+                    ),
+                    "preserved_constraints": ordinal_semantics.preserved_constraints,
+                },
+                capability_status=(
+                    "executable"
+                    if ordinal_semantics.metric == "manhattan"
+                    else "synthesizable"
+                ),
+                required_capabilities=(
+                    [semantic_ranked_handle, "task.go_to_object.door"]
+                    if is_navigation
+                    else [semantic_ranked_handle]
+                ),
+                confidence=0.9,
+                reason="Deterministic semantic normalizer emitted a ranked ordinal distance plan.",
+            )
         if (
             not is_navigation
             and

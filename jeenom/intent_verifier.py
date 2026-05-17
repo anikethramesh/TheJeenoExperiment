@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .semantic_normalizer import normalize_distance_ordinal
+
 if TYPE_CHECKING:
     from .schemas import OperatorIntent
 
@@ -99,16 +101,28 @@ class IntentVerifier:
         # ── Ordinal signals ────────────────────────────────────────────────
         # Check ordinal before superlative so "second farthest" is not
         # collapsed into plain "farthest".
-        m = _ORDINAL_PATTERN.search(normalized)
-        if m:
-            ordinal = m.group(1)
-            direction = m.group(2)
-            handle = f"grounding.all_doors.ranked.{metric}.agent"
+        ordinal_semantics = normalize_distance_ordinal(normalized)
+        if ordinal_semantics is not None:
+            handle = f"grounding.all_doors.ranked.{ordinal_semantics.metric}.agent"
             signals.append(IntentSignal(
                 signal_type=SIGNAL_ORDINAL,
-                detected_term=f"{ordinal} {direction}",
+                detected_term=(
+                    f"{ordinal_semantics.ordinal_word} "
+                    f"{ordinal_semantics.direction_term}"
+                ),
                 required_handle=handle,
             ))
+        else:
+            m = _ORDINAL_PATTERN.search(normalized)
+            if m:
+                ordinal = m.group(1)
+                direction = m.group(2)
+                handle = f"grounding.all_doors.ranked.{metric}.agent"
+                signals.append(IntentSignal(
+                    signal_type=SIGNAL_ORDINAL,
+                    detected_term=f"{ordinal} {direction}",
+                    required_handle=handle,
+                ))
 
         # ── Superlative signals ────────────────────────────────────────────
         for term in _SUPERLATIVE_TERMS:
@@ -180,16 +194,28 @@ class IntentVerifier:
         metric = _detect_metric(normalized)
         signals: list[IntentSignal] = []
 
-        m = _ORDINAL_PATTERN.search(normalized)
-        if m:
-            ordinal = m.group(1)
-            direction = m.group(2)
-            handle = f"grounding.all_doors.ranked.{metric}.agent"
+        ordinal_semantics = normalize_distance_ordinal(normalized)
+        if ordinal_semantics is not None:
+            handle = f"grounding.all_doors.ranked.{ordinal_semantics.metric}.agent"
             signals.append(IntentSignal(
                 signal_type=SIGNAL_ORDINAL,
-                detected_term=f"{ordinal} {direction}",
+                detected_term=(
+                    f"{ordinal_semantics.ordinal_word} "
+                    f"{ordinal_semantics.direction_term}"
+                ),
                 required_handle=handle,
             ))
+        else:
+            m = _ORDINAL_PATTERN.search(normalized)
+            if m:
+                ordinal = m.group(1)
+                direction = m.group(2)
+                handle = f"grounding.all_doors.ranked.{metric}.agent"
+                signals.append(IntentSignal(
+                    signal_type=SIGNAL_ORDINAL,
+                    detected_term=f"{ordinal} {direction}",
+                    required_handle=handle,
+                ))
 
         for term in _SUPERLATIVE_TERMS:
             if not signals and term in normalized:
