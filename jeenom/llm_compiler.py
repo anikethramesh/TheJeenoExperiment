@@ -10,7 +10,7 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from .primitive_library import library_payload, primitive_names
-from .semantic_normalizer import normalize_distance_ordinal
+from .semantic_normalizer import normalize_distance_ordinal, get_semantic_constraints
 from .schemas import (
     EvidenceFrame,
     ExecutionContract,
@@ -1267,6 +1267,15 @@ class LLMCompiler(CompilerBackend):
                 ],
             },
         }
+        semantic_bounds = get_semantic_constraints()
+        advertised_constraints = (
+            " STRICT VOCABULARY CONSTRAINTS: You must map ordinals and distance concepts using "
+            "ONLY the exact terms supported by the semantic normalizer. Supported ordinals: "
+            + ", ".join(semantic_bounds["ordinals"]) + ". "
+            "Supported descending terms: " + ", ".join(semantic_bounds["descending_distance_terms"]) + ". "
+            "Supported ascending terms: " + ", ".join(semantic_bounds["ascending_distance_terms"]) + ". "
+            "Do not invent new ordinals or distance terms."
+        )
         return self._compile_or_fallback(
             method_name="compile_operator_intent",
             schema_name="jeenom_operator_intent",
@@ -1404,6 +1413,7 @@ class LLMCompiler(CompilerBackend):
                     "new, unrelated instruction."
                     if pending_proposal else ""
                 )
+                + advertised_constraints
             ),
             user_payload=payload,
             fallback_call=lambda: self.fallback.compile_operator_intent(

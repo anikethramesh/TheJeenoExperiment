@@ -64,7 +64,7 @@ def main() -> int:
         )
 
         changed_seed = _make_session(seed=43)
-        changed_seed._ensure_scene_model()
+        changed_seed.handle_utterance("what doors do you see?")
         seed_graph = evaluate_request_plan(
             plan,
             registry=session.capability_registry,
@@ -76,7 +76,7 @@ def main() -> int:
         )
 
         changed_env = _make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=42)
-        changed_env._ensure_scene_model()
+        changed_env.handle_utterance("what doors do you see?")
         env_graph = evaluate_request_plan(
             plan,
             registry=session.capability_registry,

@@ -1922,6 +1922,14 @@ Implement stages in order:
 2.5. Semantic distance-ordinal normalization bug fix.
    Add a deterministic normalization layer for ordinal distance language such as "second highest Manhattan distance" so clear task/query utterances compile to ranked door plans instead of unsupported/synthesis fallbacks. Gate: highest/largest/greatest distance normalizes to descending ordinal semantics, lowest/smallest/minimum distance normalizes to ascending ordinal semantics, and existing render-time guarantees remain unchanged.
 
+2.6. Bug Fix.
+   Status: done.
+   Fix metric defaulting in semantic normalizer so missing metrics trigger a clarification loop instead of silently defaulting to Manhattan. Expand ordinal vocabulary up to tenth. Remove leaking abstractions in probes where test cases manually invoke private methods like `_ensure_scene_model()`. Gate: Metric defaults to None, ordinal parsing accepts larger numbers, probes do not use private Station methods.
+
+2.7. Vocabulary Advertising Capability.
+   Status: done.
+   Dynamically advertise the semantic normalizer's deterministic constraints (e.g., supported ordinals and distance terms) directly to the LLM via its system prompt. Added dynamic numeric ordinal parsing (`11th`, `42nd`). Gate: The LLM compiler extracts bounded constraints from semantic_normalizer.py to keep the generator in sync with the verifier, reducing plan rejections without hardcoding prompt strings.
+
 3. Conservative RequestPlan reuse.
    Add plan cache, reuse history, and `can_reuse_plan()`. Default reuse policy is `if_valid`, not `always`. Build `phase8_plan_reuse_same_semantics_probe.py`. Gate: same semantic task transfers across different layout without operator re-specification.
 

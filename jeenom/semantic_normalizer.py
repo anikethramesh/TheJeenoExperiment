@@ -6,15 +6,17 @@ from dataclasses import dataclass
 
 _ORDINALS: dict[str, int] = {
     "first": 1,
-    "1st": 1,
     "second": 2,
-    "2nd": 2,
     "third": 3,
-    "3rd": 3,
     "fourth": 4,
-    "4th": 4,
     "fifth": 5,
-    "5th": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+    "eleventh": 11,
+    "twelfth": 12,
 }
 
 _DESCENDING_DISTANCE_TERMS = (
@@ -47,7 +49,7 @@ class DistanceOrdinalSemantics:
     ordinal: int
     order: str
     direction_term: str
-    metric: str
+    metric: str | None
 
     @property
     def canonical_direction(self) -> str:
@@ -60,9 +62,27 @@ class DistanceOrdinalSemantics:
             self.direction_term,
             self.canonical_direction,
             "door",
-            self.metric,
         ]
+        if self.metric is not None:
+            constraints.append(self.metric)
         return list(dict.fromkeys(constraints))
+
+
+def _extract_ordinal(text: str) -> tuple[str, int, int, int] | None:
+    numeric_match = re.search(r"\b(\d+)(st|nd|rd|th)\b", text)
+    if numeric_match:
+        word = numeric_match.group(0)
+        value = int(numeric_match.group(1))
+        return (word, value, numeric_match.start(), numeric_match.end())
+        
+    word_pattern = "|".join(re.escape(word) for word in _ORDINALS)
+    word_match = re.search(rf"\b({word_pattern})\b", text)
+    if word_match:
+        word = word_match.group(1)
+        value = _ORDINALS[word]
+        return (word, value, word_match.start(), word_match.end())
+        
+    return None
 
 
 def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
@@ -76,19 +96,18 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
     if "door" not in normalized or "distance" not in normalized:
         return None
 
-    ordinal_pattern = "|".join(re.escape(word) for word in _ORDINALS)
-    ordinal_match = re.search(rf"\b(?P<ordinal>{ordinal_pattern})\b", normalized)
-    if ordinal_match is None:
+    extracted = _extract_ordinal(normalized)
+    if extracted is None:
         return None
 
-    ordinal_word = ordinal_match.group("ordinal")
-    after_ordinal = normalized[ordinal_match.end(): ordinal_match.end() + 96]
+    ordinal_word, ordinal_val, start_idx, end_idx = extracted
+    after_ordinal = normalized[end_idx: end_idx + 96]
 
     for term in _DESCENDING_DISTANCE_TERMS:
         if re.search(rf"\b{re.escape(term)}\b", after_ordinal):
             return DistanceOrdinalSemantics(
                 ordinal_word=ordinal_word,
-                ordinal=_ORDINALS[ordinal_word],
+                ordinal=ordinal_val,
                 order="descending",
                 direction_term=term,
                 metric=_detect_metric(normalized),
@@ -98,7 +117,7 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
         if re.search(rf"\b{re.escape(term)}\b", after_ordinal):
             return DistanceOrdinalSemantics(
                 ordinal_word=ordinal_word,
-                ordinal=_ORDINALS[ordinal_word],
+                ordinal=ordinal_val,
                 order="ascending",
                 direction_term=term,
                 metric=_detect_metric(normalized),
@@ -107,7 +126,18 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
     return None
 
 
-def _detect_metric(normalized: str) -> str:
+def _detect_metric(normalized: str) -> str | None:
     if "euclidean" in normalized:
         return "euclidean"
-    return "manhattan"
+    if "manhattan" in normalized:
+        return "manhattan"
+    return None
+
+
+def get_semantic_constraints() -> dict[str, list[str]]:
+    """Export the exact deterministic vocabulary constraints so the LLM compiler can advertise them."""
+    return {
+        "ordinals": list(_ORDINALS.keys()) + ["any numeric ordinal like 11th or 42nd"],
+        "descending_distance_terms": list(_DESCENDING_DISTANCE_TERMS),
+        "ascending_distance_terms": list(_ASCENDING_DISTANCE_TERMS),
+    }
