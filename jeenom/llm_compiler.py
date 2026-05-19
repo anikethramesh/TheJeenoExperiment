@@ -1074,6 +1074,10 @@ class SmokeTestCompiler(CompilerBackend):
             or "what can you see" in normalized
             or "look around" in normalized
             or "around you" in normalized
+            or ("what doors" in normalized and ("see" in normalized or "there" in normalized or "visible" in normalized or "around" in normalized))
+            or ("which doors" in normalized and ("see" in normalized or "there" in normalized or "visible" in normalized or "available" in normalized))
+            or ("doors do you see" in normalized)
+            or ("do you see any door" in normalized)
         ):
             return OperatorIntent(
                 intent_type="status_query",

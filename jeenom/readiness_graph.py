@@ -78,6 +78,8 @@ def _evaluate_assumptions(
     plan: RequestPlan,
     environment_identity: EnvironmentIdentity | None,
 ) -> tuple[list[str], list[str], str]:
+    if environment_identity is None:
+        return [], [], ""
     assumptions = {
         assumption.assumption_id: assumption
         for assumption in plan.environment_assumptions

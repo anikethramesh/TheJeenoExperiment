@@ -1930,6 +1930,27 @@ Implement stages in order:
    Status: done.
    Dynamically advertise the semantic normalizer's deterministic constraints (e.g., supported ordinals and distance terms) directly to the LLM via its system prompt. Added dynamic numeric ordinal parsing (`11th`, `42nd`). Gate: The LLM compiler extracts bounded constraints from semantic_normalizer.py to keep the generator in sync with the verifier, reducing plan rejections without hardcoding prompt strings.
 
+2.8. Bug fixes.
+   Status: done.
+
+   Two targeted fixes with no behaviour change to passing paths:
+
+   1. readiness_graph._evaluate_assumptions: when environment_identity=None, skip assumption
+      checking entirely and return empty violated/diagnostic lists. Previously, a None identity
+      caused _actual_for_assumption to return None for every field, making None != expected
+      true for all assumptions including required ones. This caused graph_status=
+      environment_assumption_failed for any plan evaluated before the session had built its
+      first environment identity, even when the operator's session was correct.
+
+   2. SmokeTestCompiler scene-query pattern gap: "what doors do you see?" and similar
+      phrasings ("doors do you see", "do you see any door", "which doors are there/visible")
+      were classified as unsupported. They now route to status_query=scene, matching the
+      behaviour of "what do you see around you". This ensures those utterances call
+      _ensure_scene_model(), which populates current_environment_identity as a side effect.
+
+   Gate: phase8_environment_assumption_probe.py passes all 8 checks including
+   changed_seed_reported_as_diagnostic. eval_master.py: 26/26.
+
 3. Conservative RequestPlan reuse.
    Add plan cache, reuse history, and `can_reuse_plan()`. Default reuse policy is `if_valid`, not `always`. Build `phase8_plan_reuse_same_semantics_probe.py`. Gate: same semantic task transfers across different layout without operator re-specification.
 
