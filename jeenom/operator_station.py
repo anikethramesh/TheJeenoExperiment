@@ -21,6 +21,7 @@ from .memory import OperationalMemory
 from .minigrid_envs import ensure_custom_minigrid_envs_registered
 from .minigrid_adapter import MiniGridAdapter
 from .plan_cache import PlanCache
+from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .primitive_library import TASK_PRIMITIVES
 from .schemas import (
     ArbitrationTrace,
@@ -292,6 +293,7 @@ class OperatorStationSession:
         max_loops: int = 128,
         use_cache: bool = True,
         verbose: bool = False,
+        request_plan_reuse_cache: PlanReuseCache | None = None,
     ) -> None:
         ensure_custom_minigrid_envs_registered()
         self.env_id = env_id
@@ -335,6 +337,10 @@ class OperatorStationSession:
         self.last_environment_invalidation_reason: str | None = None
         self.last_request_plan: RequestPlan | None = None
         self.last_readiness_graph: ReadinessGraph | None = None
+        self.request_plan_reuse_cache: PlanReuseCache = (
+            request_plan_reuse_cache if request_plan_reuse_cache is not None else PlanReuseCache()
+        )
+        self.last_plan_reuse_verdict: ReuseVerdict | None = None
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
         self.last_arbitration_trace: ArbitrationTrace | None = None
         self.synthesizer: SynthesizerBackend = build_synthesizer(compiler_name)
@@ -734,26 +740,77 @@ class OperatorStationSession:
             if self.active_claims is not None and claims_valid
             else None
         )
-        request_plan = build_request_plan(
+
+        # Build a fresh plan to compute the structural key and check against cache.
+        # Plan construction is deterministic and cheap (no LLM calls).
+        fresh_plan = build_request_plan(
             utterance,
             intent,
             active_claims_summary=active_summary,
             environment_identity=self.current_environment_identity,
         )
+
+        cached_entry = self.request_plan_reuse_cache.lookup(fresh_plan)
+        if cached_entry is not None:
+            verdict = self.request_plan_reuse_cache.can_reuse(
+                cached_entry,
+                registry=self.capability_registry,
+                environment_identity=self.current_environment_identity,
+            )
+            self.last_plan_reuse_verdict = verdict
+            self.request_plan_reuse_cache.record_reuse(
+                cached_entry.key,
+                verdict.verdict,
+                verdict.reason,
+                env_id=self.env_id,
+                seed=self.seed,
+            )
+            if verdict.verdict == "reuse":
+                # Structure is proven valid — use the fresh plan (which carries the
+                # current environment_assumptions) as last_request_plan so that the
+                # plan is always up-to-date.  Update the cache entry so future
+                # lookups also get the current plan.
+                cached_entry.plan = fresh_plan
+                readiness_graph = evaluate_request_plan(
+                    fresh_plan,
+                    registry=self.capability_registry,
+                    active_claims=self.active_claims,
+                    claims_valid=claims_valid,
+                    environment_identity=self.current_environment_identity,
+                )
+                self.last_request_plan = fresh_plan
+                self.last_readiness_graph = readiness_graph
+                self.memory.episodic_memory["last_request_plan"] = fresh_plan.as_dict()
+                self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+                self.log(
+                    f"request plan reused: key={cached_entry.key} "
+                    f"steps={len(fresh_plan.steps)} "
+                    f"graph_status={readiness_graph.graph_status}"
+                )
+                return
+        else:
+            self.last_plan_reuse_verdict = None
+
+        # Fresh compile path — no matching cache entry or reuse was rejected.
         readiness_graph = evaluate_request_plan(
-            request_plan,
+            fresh_plan,
             registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
         )
-        self.last_request_plan = request_plan
+        self.last_request_plan = fresh_plan
         self.last_readiness_graph = readiness_graph
-        self.memory.episodic_memory["last_request_plan"] = request_plan.as_dict()
+        self.memory.episodic_memory["last_request_plan"] = fresh_plan.as_dict()
         self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+
+        # Store plans that are immediately executable so future turns can reuse them.
+        if readiness_graph.graph_status == "executable":
+            self.request_plan_reuse_cache.store(fresh_plan)
+
         self.log(
             "request plan: "
-            f"steps={len(request_plan.steps)} "
+            f"steps={len(fresh_plan.steps)} "
             f"graph_status={readiness_graph.graph_status} "
             f"next_action={readiness_graph.next_action}"
         )

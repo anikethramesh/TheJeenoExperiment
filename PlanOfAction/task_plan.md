@@ -1952,7 +1952,26 @@ Implement stages in order:
    changed_seed_reported_as_diagnostic. eval_master.py: 26/26.
 
 3. Conservative RequestPlan reuse.
-   Add plan cache, reuse history, and `can_reuse_plan()`. Default reuse policy is `if_valid`, not `always`. Build `phase8_plan_reuse_same_semantics_probe.py`. Gate: same semantic task transfers across different layout without operator re-specification.
+   Status: done.
+
+   Added jeenom/plan_reuse.py with PlanReuseCache, PlanReuseEntry, ReuseVerdict, and
+   ReuseHistoryRecord. plan_semantic_key() builds a stable structural hash over objective_type
+   and step (layer, operation, required_handle, constraint fingerprint), independent of
+   utterance phrasing or request_id. can_reuse() runs the ReadinessGraph over the stored plan
+   against the current environment identity; if environment_identity is None it always returns
+   recompile (unverifiable assumptions → do not reuse). Reuse policy is if_valid: reuse only
+   when graph_status=executable; recompile on environment_assumption_failed; refresh_claims on
+   stale claims. On reuse, the fresh plan (carrying current env assumptions) replaces the stale
+   cached plan so last_request_plan is always up-to-date. PlanReuseCache is passable across
+   sessions as a constructor argument to enable cross-session transfer.
+
+   OperatorStationSession gains request_plan_reuse_cache and last_plan_reuse_verdict. Plans
+   that evaluate as immediately executable are stored after first compile. Subsequent requests
+   with matching structure check the cache before the ReadinessGraph; if verdict=reuse the fresh
+   plan is used and the entry is refreshed. Reuse history records every verdict (reuse,
+   recompile, refresh_claims), env_id, and seed.
+
+   Gate: evals/phase8_plan_reuse_probe.py 10/10. eval_master.py 27/27.
 
 4. Mismatch detection.
    Add `jeenom/mismatch.py` and typed mismatches: `STALE_CLAIMS`, `EXPECTED_TARGET_ABSENT`, `CHANGED_DISTANCE_RELATIONS`, `UNSUPPORTED_GROUNDING`, `MISSING_PRIMITIVE_IN_REGISTRY`, `CONSTRAINT_WEAKENING`. Build missing-target, changed-grounding, and constraint-preservation probes. Gate: unsafe execution is blocked and no constraints silently disappear.
