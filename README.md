@@ -1,6 +1,22 @@
-# JEENO (Just-In-Time Embodied Execution Networked Orchestration Model)
+# TLDR
 
-JEENOM is an advanced, agentic capability architecture currently being built and tested within the [MiniGrid](https://minigrid.farama.org/) gridworld environment. It translates natural language instructions into validated, executable intents through an LLM compiler, grounding requests against a persistent scene model and a rigid capability registry. 
+While world models and robot policies are getting increasingly more powerful, the deployment of robots is something we still need to do case by case. This is called the **deployment friction problem** in robotics.
+
+The main reason this happens is that robots don't have **cognition**. That is, they can't build an understanding of the world that binds together their perception and action capabilities. JEENO is an experiment in building robot understanding as an **externalised, queryable, and auditable layer**.
+
+JEENO will enable a robot to have:
+
+- a **persistent task representation** that survives across turns and across deployments
+- the ability to **ask the right clarifying question** when a brief is ambiguous, rather than guessing or failing
+- an **inspectable understanding** that an operator can query, correct, and re-ground in real time
+
+**The Vision:** Any new robot can register itself with JEENO by exposing its primitives — and the understanding layer runs on top, unchanged. 
+
+
+# JEENO (Just-In-Time Embodied Execution Networked Operational Model)
+
+
+JEENO is an advanced, agentic capability architecture currently being built and tested within the [MiniGrid](https://minigrid.farama.org/) gridworld environment. It translates natural language instructions into validated, executable intents through an LLM compiler, grounding requests against a persistent scene model and a rigid capability registry. 
 
 ## Features
 
@@ -17,13 +33,14 @@ JEENOM is currently configured to run with **MiniGrid**, which is itself a **Gym
 
 ## Planned Scope of Work
 
-The architecture is being built in phases according to the Capability Ladder (`PlanOfAction/task_plan.md`). We are currently at **Phase 7.95**.
-
-Future phases include:
+We're currently at:
 - **Phase 8 (General Object Handling):** Expanding beyond door navigation to general objects, enabling tasks like "pick up the red key" or "unlock the blue door".
+
+Future phases:
 - **Phase 9 (Operator Correction):** Supporting mid-run execution interruptions and corrections.
 - **Phase 10 (Multi-Step Task Planning):** Allowing the compiler to compose multi-step action plans from sequential natural language requests.
 - **Phase 11 (Continuous World Execution):** Moving away from independent, isolated episodes to a continuous world model where the agent accumulates state without environment resets.
+
 
 ## Installation and Usage
 
