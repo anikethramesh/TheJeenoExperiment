@@ -413,6 +413,51 @@ class SmokeTestCompiler(CompilerBackend):
             if normalized_quick in _REJECT:
                 return OperatorIntent(intent_type="reject_proposal", confidence=1.0, reason="")
         normalized = " ".join(utterance.lower().strip().split())
+
+        # Concept teach — check BEFORE door_match so "when i say X go to Y" isn't hijacked.
+        _teach_m_early = re.match(
+            r"^(?:when|if) (?:i )?say (\S+)[,.]?\s+"
+            r"(?:you need to\s+|please\s+|i want you to\s+|just\s+|automatically\s+)?(.+?)$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if _teach_m_early:
+            cname = _teach_m_early.group(1).strip().strip("'\"")
+            cutterance = _teach_m_early.group(2).strip()
+            cutterance = re.sub(
+                r"[.!]?\s*(?:can you\s+|please\s+|ok\s+|alright\s+)?"
+                r"(?:remember|keep|store|save)(?:\s+(?:that|this))?\s*[?.!]*\s*$",
+                "",
+                cutterance,
+                flags=re.IGNORECASE,
+            ).strip().strip("'\"")
+            if cname and cutterance:
+                return OperatorIntent(
+                    intent_type="concept_teach",
+                    concept_name=cname,
+                    concept_utterance=cutterance,
+                    confidence=0.85,
+                    reason="Deterministic fallback matched natural-language concept-teach pattern.",
+                )
+
+        # Bare "X means Y" concept teach — check before door_match.
+        _bare_means_early = re.match(r"^(\S+) means (.+)$", normalized)
+        if _bare_means_early:
+            cname = _bare_means_early.group(1).strip().strip("'\"")
+            cutterance = _bare_means_early.group(2).strip().strip("'\"")
+            _reserved = {
+                "manhattan", "euclidean", "distance", "closest", "door", "red",
+                "blue", "green", "yellow", "purple", "grey", "gray",
+            }
+            if cname.lower() not in _reserved and cutterance:
+                return OperatorIntent(
+                    intent_type="concept_teach",
+                    concept_name=cname,
+                    concept_utterance=cutterance,
+                    confidence=0.8,
+                    reason="Deterministic fallback matched bare 'X means Y' concept-teach pattern.",
+                )
+
         color_pattern = r"red|green|blue|yellow|purple|grey|gray"
         door_match = re.search(
             rf"\b(?:go to|go the|reach|find|get to|head to|navigate to)\s+"
@@ -1248,6 +1293,8 @@ class LLMCompiler(CompilerBackend):
                     "status_query",
                     "cache_query",
                     "claim_reference",
+                    "concept_teach",
+                    "concept_recall",
                     "reset",
                     "quit",
                     "accept_proposal",
@@ -1268,6 +1315,7 @@ class LLMCompiler(CompilerBackend):
                     "delivery_target",
                     "ground_target",
                     "cache",
+                    "concepts",
                 ],
             },
         }
@@ -1400,6 +1448,26 @@ class LLMCompiler(CompilerBackend):
                 "Requests to clear/delete/forget only the current delivery target should be "
                 "knowledge_update with knowledge_update={delivery_target:null}; this is not "
                 "a motion task. "
+                "CONCEPT INTENT TYPES: The station supports named operator concepts — "
+                "shorthand labels that expand to full instructions. "
+                "When the operator teaches a new shorthand — e.g. 'when I say bingo, go to "
+                "the red door', 'if I say scout you need to go to the red door, can you "
+                "remember that?', 'define bingo as go to the blue door', 'remember patrol "
+                "means go to the closest door by manhattan distance' — emit "
+                "intent_type='concept_teach' with concept_name set to the shorthand label "
+                "(e.g. 'bingo') and concept_utterance set to the full instruction it expands "
+                "to (e.g. 'go to the red door'). Strip trailing memory confirmation phrases "
+                "like 'can you remember that', 'please remember this', 'remember that' from "
+                "concept_utterance. Strip leading modifiers like 'automatically', 'always', "
+                "'just', 'please' from concept_utterance. Set required_capabilities=[]. "
+                "When the operator invokes a known concept by name — e.g. 'bingo', "
+                "'run bingo', 'execute scout', 'do patrol' — emit intent_type='concept_recall' "
+                "with concept_name set to the label. The station will look up and execute "
+                "the stored concept. Set required_capabilities=[]. "
+                "Do NOT classify concept-teach utterances as task_instruction. "
+                "Do NOT try to execute the concept's underlying instruction yourself. "
+                "Concepts listing query 'list concepts', 'what concepts do you know', "
+                "'what do you remember' maps to status_query=concepts. "
                 "For status queries and claim references with no grounding or task "
                 "requirements, emit required_capabilities=[]."
                 + (

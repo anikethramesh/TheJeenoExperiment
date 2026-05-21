@@ -21,6 +21,8 @@ from .memory import OperationalMemory
 from .minigrid_envs import ensure_custom_minigrid_envs_registered
 from .minigrid_adapter import MiniGridAdapter
 from .plan_cache import PlanCache
+from .knowledge_base import KnowledgeBase, NamedConcept
+from .mismatch import MismatchDetector, OperationalMismatch, default_detector
 from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .primitive_library import TASK_PRIMITIVES
 from .schemas import (
@@ -98,6 +100,27 @@ def _normalize_utterance(utterance: str) -> str:
         if stripped == text:
             return text
         text = stripped
+
+
+def _looks_like_bare_label(normalized: str) -> bool:
+    """True for single-word utterances that look like an operator concept label.
+
+    Must be long enough to be distinctive (>=4 chars), purely alphabetic, and
+    not a common English word that the LLM could meaningfully interpret.
+    """
+    _common_words = {
+        "quit", "exit", "bye", "cancel", "reset", "help", "status",
+        "cache", "done", "back", "next", "stop", "show", "list",
+        "what", "which", "where", "when", "find", "goto", "move",
+        "go", "get", "run", "yes", "okay", "sure", "red", "blue",
+        "green", "yellow", "purple", "grey", "gray",
+    }
+    return (
+        " " not in normalized
+        and len(normalized) >= 4
+        and normalized.isalpha()
+        and normalized not in _common_words
+    )
 
 
 def _looks_like_question(normalized_utterance: str) -> bool:
@@ -200,6 +223,45 @@ def classify_utterance(utterance: str) -> OperatorCommand:
         normalized,
     ):
         return OperatorCommand(kind="task_instruction", utterance=text)
+
+    # Concept teach — explicit syntax: "remember X means Y" / "define X as Y"
+    _concept_teach_m = re.match(
+        r"^(?:remember|teach|define)\s+(.+?)\s+(?:means|as|is shorthand for)\s+(.+)$",
+        normalized,
+    )
+    if _concept_teach_m:
+        cname = _concept_teach_m.group(1).strip().strip("'\"")
+        cutterance = _concept_teach_m.group(2).strip().strip("'\"")
+        return OperatorCommand(
+            kind="concept_teach",
+            utterance=text,
+            payload={"name": cname, "utterance": cutterance},
+        )
+
+    # Natural-language concept teach patterns ("when I say X, Y" / "X means Y") are
+    # intentionally omitted here — they route through the LLM / SmokeTestCompiler which
+    # now emit concept_teach as a first-class intent type (Phase 8.4.5).
+
+    # Concept forget: "forget concept X" / "forget X"
+    _concept_forget_m = re.match(r"^forget(?:\s+concept)?\s+(.+)$", normalized)
+    if _concept_forget_m:
+        cname = _concept_forget_m.group(1).strip().strip("'\"")
+        return OperatorCommand(
+            kind="concept_forget",
+            utterance=text,
+            payload={"name": cname},
+        )
+
+    # Concept list
+    if normalized in {
+        "what concepts do you know",
+        "list concepts",
+        "show concepts",
+        "concepts",
+        "what have you learned",
+        "what do you remember",
+    }:
+        return OperatorCommand(kind="status_query", utterance=text, payload={"query": "concepts"})
 
     target_fact = _parse_target_fact(normalized)
     if target_fact is not None:
@@ -341,6 +403,11 @@ class OperatorStationSession:
             request_plan_reuse_cache if request_plan_reuse_cache is not None else PlanReuseCache()
         )
         self.last_plan_reuse_verdict: ReuseVerdict | None = None
+        self.last_operational_mismatches: list[OperationalMismatch] = []
+        # KB lives alongside knowledge.yaml in memory_dir (always persistent)
+        self.knowledge_base = KnowledgeBase(
+            storage_path=self.memory.memory_dir / "knowledge_base.json"
+        )
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
         self.last_arbitration_trace: ArbitrationTrace | None = None
         self.synthesizer: SynthesizerBackend = build_synthesizer(compiler_name)
@@ -414,8 +481,26 @@ class OperatorStationSession:
             pending_response = self.handle_pending_clarification(utterance, command)
             if pending_response is not None:
                 return pending_response
+        if command.kind == "concept_teach":
+            return self.teach_concept(command.payload["name"], command.payload["utterance"])
+        if command.kind == "concept_forget":
+            return self.forget_concept(command.payload["name"])
         if command.kind == "unresolved":
             command = self._command_from_active_claim_text(utterance) or command
+            if command.kind == "unresolved":
+                concept_command = self._command_from_concept(utterance)
+                if concept_command is not None:
+                    command = concept_command
+            if command.kind == "unresolved" and _looks_like_bare_label(
+                _normalize_utterance(utterance.strip())
+            ):
+                label = _normalize_utterance(utterance.strip())
+                return (
+                    f"I don't recognise '{label}' as a command or a known concept.\n"
+                    f"To teach it as a shorthand, say:\n"
+                    f"  remember {label} means <full instruction>\n"
+                    f"Example: remember {label} means go to the red door"
+                )
             if command.kind == "unresolved":
                 self.log("deterministic fast path unresolved; compiling operator intent")
                 command = self.command_from_llm_intent(utterance)
@@ -430,6 +515,10 @@ class OperatorStationSession:
             return self.reset(clear_memory=bool(command.payload.get("clear_memory")))
         if command.kind == "clarification":
             return command.payload["message"]
+        if command.kind == "concept_teach":
+            return self.teach_concept(command.payload["name"], command.payload["utterance"])
+        if command.kind == "concept_forget":
+            return self.forget_concept(command.payload["name"])
         if command.kind == "cache_query":
             return self.cache_summary()
         if command.kind == "status_query":
@@ -557,6 +646,45 @@ class OperatorStationSession:
 
         if intent.intent_type in {"accept_proposal", "reject_proposal"}:
             return OperatorCommand(kind=intent.intent_type, utterance=utterance)
+
+        if intent.intent_type == "concept_teach":
+            name = (intent.concept_name or "").strip()
+            expansion = (intent.concept_utterance or "").strip()
+            if not name or not expansion:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": "Please specify both a name and an instruction for the concept."},
+                )
+            return OperatorCommand(
+                kind="concept_teach",
+                utterance=utterance,
+                payload={"name": name, "utterance": expansion},
+            )
+
+        if intent.intent_type == "concept_recall":
+            name = (intent.concept_name or "").strip()
+            if not name:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": "Please specify the concept name to recall."},
+                )
+            concept = self.knowledge_base.recall(name)
+            if concept is None:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={
+                        "message": (
+                            f"I don't know a concept named '{name}'.\n"
+                            f"To teach it, say: remember {name} means <full instruction>"
+                        )
+                    },
+                )
+            expanded = concept.utterance
+            self.log(f"concept_recall: '{name}' → '{expanded}'")
+            return OperatorCommand(kind="task_instruction", utterance=expanded)
 
         if intent.intent_type == "claim_reference":
             if intent.claim_reference == "threshold_filter":
@@ -782,6 +910,7 @@ class OperatorStationSession:
                 self.last_readiness_graph = readiness_graph
                 self.memory.episodic_memory["last_request_plan"] = fresh_plan.as_dict()
                 self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+                self._run_mismatch_detection(fresh_plan)
                 self.log(
                     f"request plan reused: key={cached_entry.key} "
                     f"steps={len(fresh_plan.steps)} "
@@ -808,12 +937,27 @@ class OperatorStationSession:
         if readiness_graph.graph_status == "executable":
             self.request_plan_reuse_cache.store(fresh_plan)
 
+        self._run_mismatch_detection(fresh_plan)
         self.log(
             "request plan: "
             f"steps={len(fresh_plan.steps)} "
             f"graph_status={readiness_graph.graph_status} "
             f"next_action={readiness_graph.next_action}"
         )
+
+    def _run_mismatch_detection(self, plan: RequestPlan) -> None:
+        """Run mismatch detection and store results in last_operational_mismatches."""
+        mismatches = default_detector.detect(
+            plan,
+            registry=self.capability_registry,
+            scene_model=self.memory.scene_model,
+            active_claims=self.active_claims,
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_operational_mismatches = mismatches
+        if mismatches:
+            types = [m.mismatch_type for m in mismatches]
+            self.log(f"mismatch detection: {len(mismatches)} mismatch(es): {types}")
 
     def _command_from_grounding_query_plan(
         self,
@@ -2313,6 +2457,11 @@ class OperatorStationSession:
 
     def _command_from_active_claim_text(self, utterance: str) -> OperatorCommand | None:
         normalized = _normalize_utterance(utterance)
+        # Concept-teach prefixes embed a navigation verb ("go to") inside the phrase
+        # but are not themselves navigation requests — skip them so the utterance
+        # can be routed to the LLM / SmokeTestCompiler for concept_teach handling.
+        if re.match(r"^(?:when|if)\s+(?:i\s+)?say\b", normalized):
+            return None
         if not self._utterance_requests_navigation(normalized):
             return None
         color = self._color_reference_in_utterance(normalized)
@@ -4028,6 +4177,83 @@ class OperatorStationSession:
         self.close_preview()
         self.close_task_window()
 
+    def teach_concept(self, name: str, utterance: str) -> str:
+        """Teach a named concept and pre-compile its plan into the reuse cache."""
+        plan = None
+        try:
+            intent = self.compiler.compile_operator_intent(
+                utterance,
+                memory=self.memory,
+                scene_summary=None,
+                capability_manifest=self.capability_registry.compact_summary(),
+                active_claims_summary=None,
+            )
+            from .request_planner import build_request_plan
+            from .readiness_graph import evaluate_request_plan
+
+            candidate = build_request_plan(
+                utterance,
+                intent,
+                active_claims_summary=None,
+                environment_identity=self.current_environment_identity,
+            )
+            graph = evaluate_request_plan(
+                candidate,
+                registry=self.capability_registry,
+                active_claims=None,
+                claims_valid=False,
+                environment_identity=self.current_environment_identity,
+            )
+            if graph.graph_status == "executable":
+                plan = candidate
+                self.request_plan_reuse_cache.store(plan)
+        except Exception:
+            pass
+
+        concept = self.knowledge_base.teach(name, utterance, plan=plan)
+        plan_status = "plan pre-compiled and cached" if plan is not None else "no plan (will compile on first recall)"
+        self.log(f"concept taught: name={concept.name!r} utterance={concept.utterance!r} {plan_status}")
+        return (
+            f"CONCEPT STORED\n"
+            f"name={concept.name!r}\n"
+            f"utterance={concept.utterance!r}\n"
+            f"plan_cached={plan is not None}"
+        )
+
+    def forget_concept(self, name: str) -> str:
+        if self.knowledge_base.forget(name):
+            self.log(f"concept forgotten: {name!r}")
+            return f"CONCEPT FORGOTTEN: {name!r}"
+        return f"CONCEPT NOT FOUND: {name!r} (nothing forgotten)"
+
+    def _command_from_concept(self, utterance: str) -> OperatorCommand | None:
+        """Resolve a bare concept name to the concept's expanded utterance."""
+        normalized = _normalize_utterance(utterance.strip())
+        concept = self.knowledge_base.recall(normalized) or self.knowledge_base.recall(utterance.strip())
+        if concept is None:
+            # Try stripping execution-verb prefixes: "execute bingo", "run scout", "do alpha"
+            m = re.match(r"^(?:execute|run|do)\s+(.+)$", normalized)
+            if m:
+                concept = self.knowledge_base.recall(m.group(1).strip())
+        if concept is None:
+            return None
+        self.log(f"concept {concept.name!r} resolved to: {concept.utterance!r}")
+        expanded = concept.utterance
+        expanded_command = classify_utterance(expanded)
+        if expanded_command.kind == "unresolved":
+            expanded_command = self.command_from_llm_intent(expanded)
+        return expanded_command
+
+    def concepts_summary(self) -> str:
+        concepts = self.knowledge_base.all_concepts()
+        if not concepts:
+            return "CONCEPTS\n(none — teach a concept with: remember <name> means <utterance>)"
+        lines = ["CONCEPTS"]
+        for c in concepts:
+            plan_tag = " [plan cached]" if c.plan is not None else ""
+            lines.append(f"  {c.name!r} → {c.utterance!r}{plan_tag}  (recalled {c.recall_count}x)")
+        return "\n".join(lines)
+
     def apply_knowledge_update(self, payload: dict[str, Any]) -> str:
         self.log("updating durable target knowledge")
         for key in ("target_color", "target_type", "delivery_target"):
@@ -4054,6 +4280,8 @@ class OperatorStationSession:
             self.memory.update_knowledge("delivery_target", None, persist=False)
             self.memory.update_knowledge("last_task_type", None, persist=False)
             self.memory.update_knowledge("last_instruction", None)
+            for concept in list(self.knowledge_base.all_concepts()):
+                self.knowledge_base.forget(concept.name)
             return "RESET: episodic state and durable knowledge cleared"
         return "RESET: episodic state cleared; durable knowledge kept"
 
@@ -4068,6 +4296,8 @@ class OperatorStationSession:
             return self.delivery_target_summary()
         if query == "help":
             return self.capability_registry.help_text()
+        if query == "concepts":
+            return self.concepts_summary()
         knowledge = self.memory.knowledge
         return (
             "STATUS\n"

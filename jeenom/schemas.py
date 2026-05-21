@@ -48,6 +48,8 @@ OPERATOR_INTENT_TYPES = (
     "status_query",
     "claim_reference",
     "cache_query",
+    "concept_teach",
+    "concept_recall",
     "reset",
     "quit",
     "accept_proposal",
@@ -56,6 +58,15 @@ OPERATOR_INTENT_TYPES = (
     "ambiguous",
 )
 OPERATOR_CLAIM_REFERENCES = ("next_closest", "other_door", "threshold_filter")
+
+# Unified claim scope vocabulary.
+# All facts held by the station are Claims. They differ in authority, scope, and
+# invalidation policy — not in kind.
+#   "grounding" — derived from scene observation; session-scoped; scene-fingerprinted;
+#                 invalidated when the scene changes (StationActiveClaims).
+#   "operator"  — asserted by the operator; durable across restarts; invalidated only
+#                 by explicit retraction (KnowledgeBase, OperationalMemory.knowledge).
+CLAIM_SCOPES = ("grounding", "operator")
 GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
 OPERATOR_OBJECT_TYPES = ("door",)
@@ -76,6 +87,7 @@ OPERATOR_STATUS_QUERIES = (
     "delivery_target",
     "ground_target",
     "cache",
+    "concepts",
 )
 OPERATOR_CONTROLS = ("reset", "quit")
 OPERATOR_CAPABILITY_STATUSES = (
@@ -1058,6 +1070,9 @@ class OperatorIntent:
     clear_memory: bool = False
     confidence: float = 0.0
     reason: str = ""
+    # concept_teach / concept_recall fields
+    concept_name: str | None = None
+    concept_utterance: str | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> OperatorIntent:
@@ -1120,6 +1135,13 @@ class OperatorIntent:
                 "OperatorIntent.canonical_instruction",
             )
 
+        concept_name = _ensure_optional_str(
+            mapping.get("concept_name"), "OperatorIntent.concept_name"
+        )
+        concept_utterance = _ensure_optional_str(
+            mapping.get("concept_utterance"), "OperatorIntent.concept_utterance"
+        )
+
         raw_required = mapping.get("required_capabilities")
         if raw_required is None:
             required_capabilities: list[str] = []
@@ -1148,6 +1170,8 @@ class OperatorIntent:
             ),
             confidence=_ensure_float(mapping.get("confidence"), "OperatorIntent.confidence"),
             reason=_ensure_str(mapping.get("reason", ""), "OperatorIntent.reason"),
+            concept_name=concept_name,
+            concept_utterance=concept_utterance,
         )
         intent._validate_supported_shape()
         return intent
@@ -1193,6 +1217,14 @@ class OperatorIntent:
         elif self.intent_type == "quit":
             if self.control not in {None, "quit"}:
                 raise SchemaValidationError("quit control must be quit or null")
+        elif self.intent_type == "concept_teach":
+            if not self.concept_name:
+                raise SchemaValidationError("concept_teach requires concept_name")
+            if not self.concept_utterance:
+                raise SchemaValidationError("concept_teach requires concept_utterance")
+        elif self.intent_type == "concept_recall":
+            if not self.concept_name:
+                raise SchemaValidationError("concept_recall requires concept_name")
 
 
 @dataclass
@@ -1958,6 +1990,20 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "clear_memory": {"type": "boolean"},
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             "reason": {"type": "string"},
+            "concept_name": {
+                "type": ["string", "null"],
+                "description": (
+                    "For concept_teach: the operator-defined shorthand label (e.g. 'bingo'). "
+                    "For concept_recall: the name of the concept to execute."
+                ),
+            },
+            "concept_utterance": {
+                "type": ["string", "null"],
+                "description": (
+                    "For concept_teach: the full instruction the label expands to "
+                    "(e.g. 'go to the red door'). Null for concept_recall."
+                ),
+            },
         },
         "required": [
             "intent_type",

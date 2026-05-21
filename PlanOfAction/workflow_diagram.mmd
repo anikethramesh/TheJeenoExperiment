@@ -14,13 +14,13 @@ flowchart LR
     subgraph M["Operational Memory<br>what carries across time"]
       U1["Understanding<br>task recipes / reusable patterns"]
       I1["Embodied Intelligence<br>substrate & primitive bindings"]
-      K1["Knowledge<br>deployment facts / history"]
+      K1["Operator Claims<br>named concepts / deployment facts<br>durable, operator-asserted"]
     end
 
     R["ReadinessGraph<br>per-step verdicts<br>execute / clarify / synthesize / refuse"]
 
     subgraph A["Active Operational Model<br>what is true now"]
-      CL["Claims"]
+      CL["Grounding Claims<br>scene-fingerprinted / session-scoped<br>derived from observation"]
       PR["Procedure"]
       ES["Execution State"]
       PG["Provenance"]
@@ -60,7 +60,8 @@ flowchart LR
   CS --- O
 
   M --> R
-  CL -. "ActiveClaims<br>scene fingerprint + provenance" .-> R
+  CL -. "grounding claims<br>scene fingerprint + provenance" .-> R
+  K1 -. "operator claims<br>durable / explicit retraction" .-> R
   SPL -. sensing handles .-> R
   APL -. action handles .-> R
   R --> A

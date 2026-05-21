@@ -1973,8 +1973,158 @@ Implement stages in order:
 
    Gate: evals/phase8_plan_reuse_probe.py 10/10. eval_master.py 27/27.
 
+3.5. Named Concept Knowledge Base.
+   Status: done.
+
+   Added jeenom/knowledge_base.py with NamedConcept and KnowledgeBase. A NamedConcept
+   carries a name (operator shorthand), an utterance (the full expanded form), an optional
+   pre-compiled RequestPlan, stored_at, recall_count, and tags. KnowledgeBase supports teach,
+   recall, forget, search, and persist/load (JSON in memory_root/knowledge_base.json).
+
+   Teach eagerly compiles the concept's utterance, evaluates the resulting RequestPlan via
+   ReadinessGraph, and seeds it into PlanReuseCache if executable. Subsequent recalls
+   resolve the concept name → expanded utterance → existing compile/reuse/execute pipeline
+   transparently. The Phase 8.3 cache reuse verdict fires on the pre-seeded plan so recalls
+   incur zero recompile overhead after the first teach.
+
+   classify_utterance (module-level) gains three deterministic patterns:
+   - concept_teach: "remember X means Y" / "define X as Y" / "teach X as Y"
+   - concept_forget: "forget [concept] X"
+   - concepts list: "list concepts" / "what concepts do you know" / "what do you remember"
+
+   handle_utterance dispatches concept_teach and concept_forget before LLM compilation.
+   Concept recall runs in the unresolved branch between active-claims resolution and LLM
+   compile: if the bare utterance matches a known concept name, it is expanded and re-
+   classified, keeping the full intent pipeline intact without special-casing.
+
+   clear memory / forget everything clears all concepts alongside durable delivery_target
+   knowledge. Plain reset keeps concepts (they are durable, like delivery_target).
+
+   Persistence survives session restarts: new sessions at the same memory_root reload
+   concepts including their serialised RequestPlans.
+
+   Gate: evals/phase835_knowledge_base_probe.py 13/13. eval_master.py 28/28.
+
 4. Mismatch detection.
-   Add `jeenom/mismatch.py` and typed mismatches: `STALE_CLAIMS`, `EXPECTED_TARGET_ABSENT`, `CHANGED_DISTANCE_RELATIONS`, `UNSUPPORTED_GROUNDING`, `MISSING_PRIMITIVE_IN_REGISTRY`, `CONSTRAINT_WEAKENING`. Build missing-target, changed-grounding, and constraint-preservation probes. Gate: unsafe execution is blocked and no constraints silently disappear.
+   Status: done.
+
+   Added jeenom/mismatch.py with OperationalMismatch (fields: mismatch_type, step_id,
+   description, severity, affected_assumption_ids, recommended_repair) and MismatchDetector.
+   Detection is diagnostic only — ReadinessGraph remains the execution gate. The station
+   records last_operational_mismatches after every plan evaluation; Phase 8.5 repair loop
+   consumes them.
+
+   Six typed mismatches:
+
+   STALE_CLAIMS — active claims scene fingerprint does not match current scene (agent moved
+     or step count changed since grounding). severity=warning, repair=refresh_claims.
+
+   REQUIRED_ENTITY_ABSENT — a required entity/target/condition assumed by the plan is absent
+     from current claims or scene evidence. Definition is substrate-independent; MiniGrid
+     red-door absence is one implementation. severity=critical, repair=reground_target.
+
+   GROUNDING_RELATION_INVALIDATED — a grounding predicate (distance ranking, tie resolution,
+     candidate set, or selected-target predicate) no longer holds against the current scene.
+     Fires when the claims fingerprint IS valid but recomputed grounding would give a
+     different result (e.g., door ordering has changed). severity=warning, repair=refresh_claims.
+
+   UNSUPPORTED_GROUNDING — a plan step requires a grounding primitive whose implementation_
+     status is "unsupported" or "synthesizable". severity=warning, repair=clarify_operator.
+
+   MISSING_PRIMITIVE_IN_REGISTRY — a plan step references a required_handle that does not
+     exist in the capability registry at all. severity=critical, repair=recompile.
+
+   CONSTRAINT_WEAKENING — a plan step carries a semantic constraint (exclude_colors, ordinal,
+     comparison) for which no implemented enforcing primitive exists in the registry. Silent
+     execution would silently drop the constraint. severity=warning, repair=recompile.
+
+   OperatorStationSession gains last_operational_mismatches: list[OperationalMismatch].
+   Detection runs in _run_mismatch_detection(), called from _record_request_plan() on both
+   the reuse path and the fresh-compile path. Mismatches are logged but do not alter dispatch.
+
+   Gate: evals/phase84_mismatch_detection_probe.py 10/10. eval_master.py 29/29.
+
+4.5. Bug Fix — First-Class Concept Intent Types (Phase 8.4.5).
+   Status: done.
+
+   Problem:
+   Natural-language concept-teach utterances such as "when I say scout go to the red door"
+   were silently misclassified as task_instructions and immediately executed, because:
+
+   1. `classify_utterance` contained fragile `re.search`-based patterns for "when i say X, Y"
+      and "X means Y" that were removed in a prior cleanup, but a deeper path was missed:
+      `_command_from_active_claim_text` uses `_utterance_requests_navigation()` which calls
+      `re.search` (substring match) and matched "go to" embedded inside the concept-teach
+      phrase — returning a task_instruction before the LLM/SmokeTestCompiler was ever reached.
+
+   2. `concept_teach` and `concept_recall` were not first-class `OPERATOR_INTENT_TYPES`, so
+      the LLM could not emit them as typed intents. The SmokeTestCompiler also did not have
+      concept-teach patterns, meaning natural-language teaches had no compile path at all.
+
+   3. Even when SmokeTestCompiler added concept-teach patterns, they appeared after the
+      `door_match` block, so "when i say X go to the red door" was hijacked by door_match
+      before reaching the concept-teach branch.
+
+   Fixes:
+   - jeenom/schemas.py: added "concept_teach" and "concept_recall" to OPERATOR_INTENT_TYPES.
+     Added "concepts" to OPERATOR_STATUS_QUERIES. Added concept_name: str | None and
+     concept_utterance: str | None fields to OperatorIntent, with from_dict() parsing and
+     _validate_supported_shape() enforcement (concept_teach requires both; concept_recall
+     requires concept_name).
+   - jeenom/llm_compiler.py: SmokeTestCompiler — moved concept-teach patterns (_teach_m_early,
+     _bare_means_early) to before door_match so "when i say X go to Y" is not hijacked.
+     LLMCompiler — added concept_teach/concept_recall to supported intent_types and to the
+     system prompt with guidance on concept_name, concept_utterance, and noise stripping.
+   - jeenom/operator_station.py: removed natural-language concept-teach patterns from
+     classify_utterance (they now route through SmokeTestCompiler/LLM). Added concept_teach
+     and concept_recall handlers to command_from_operator_intent. Added concept_teach and
+     concept_forget to the bottom dispatch of handle_utterance (LLM-routed path, not just the
+     top fast path). Added a guard to _command_from_active_claim_text that returns None early
+     when the utterance starts with "when/if i say" — preventing re.search from matching "go
+     to" as a substring inside a concept-teach phrase and short-circuiting to task_instruction.
+
+   Architectural note:
+   Named concepts are operator-asserted claims (KnowledgeBase), not session-scoped grounding
+   claims. See Phase 8.4.6 for the unified Claim abstraction. Concept execution outputs flow
+   to grounding claims (StationActiveClaims) via the normal task pipeline.
+
+   Gate: evals/phase845_concept_intent_probe.py 19/19.
+
+4.6. Architectural Cleanup — Unified Claim Abstraction (Phase 8.4.6).
+   Status: done.
+
+   Problem:
+   The codebase had three separate stores all implementing the same abstract concept —
+   a fact held by the station about the world — but without a shared name or type
+   hierarchy:
+   - StationActiveClaims: derived from scene observation, session-scoped
+   - KnowledgeBase / NamedConcept: operator-asserted, durable
+   - OperationalMemory.knowledge: operator-asserted, durable
+   The blueprint and diagrams treated ActiveClaims and durable Knowledge as fundamentally
+   different things. The Phase 8.4.5 note even said "named concepts are durable knowledge,
+   not claims" — which was wrong. A NamedConcept satisfies every property of a Claim.
+
+   Fix:
+   Claims are the unified abstraction. Both types are Claims; they differ in authority,
+   scope, and invalidation policy — not in kind:
+   - Grounding claims (StationActiveClaims) — derived, session-scoped, scene-fingerprinted,
+     invalidated when the scene changes.
+   - Operator claims (KnowledgeBase, OperationalMemory.knowledge) — asserted by the
+     operator, durable, invalidated only by explicit retraction.
+
+   Changes (documentation + minimal schema marker, no behavioral change):
+   - PlanOfAction/blueprint.md: Rule 10 last paragraph rewritten with unified Claim
+     definition, grounding vs operator subtypes, and invalidation policies.
+   - PlanOfAction/workflow_diagram.mmd: K1 node renamed to "Operator Claims"; CL node
+     renamed to "Grounding Claims"; added K1 → ReadinessGraph edge for operator claims.
+   - PlanOfAction/flow_of_control.mmd: MemoryUpdate and Answer nodes updated to use
+     "operator claims" / "grounding claims" language.
+   - jeenom/schemas.py: added CLAIM_SCOPES = ("grounding", "operator") constant with
+     docstring explaining the full claim taxonomy.
+   - jeenom/knowledge_base.py: NamedConcept gains claim_scope: str = "operator" field
+     and a docstring explicitly marking it as an operator-asserted claim.
+
+   Gate: eval_master.py all probes pass (no behavioral change).
 
 5. Repair loop.
    Add `jeenom/repair_loop.py` with repair actions `REFRESH_CLAIMS`, `REGROUND`, `CLARIFY`, `SYNTHESIZE`, `ABORT`. Add `RepairEvent` logging and readiness re-evaluation after repair. Build `phase8_operational_repair_probe.py`. Gate: a blocking mismatch is repaired with a narrow operator intervention and execution resumes.

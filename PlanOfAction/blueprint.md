@@ -74,7 +74,18 @@
     degradation. If the request cannot be represented as a valid RequestPlan, the station
     must fail safely and explain the blocking node.
 
-    Durable Knowledge stores operator-taught facts. ActiveClaims store computed scene
-    facts with provenance and scene fingerprint. Episodic memory stores the last plan,
-    target, task, and result. Computed analysis is not durable knowledge unless the
-    operator explicitly promotes it.
+    Claims are the unified abstraction for any fact the station holds about the world.
+    Every claim has a type, authority, scope, provenance, and an invalidation policy:
+
+    - Grounding claims (StationActiveClaims) — derived from scene observation.
+      Session-scoped. Tied to a scene fingerprint (agent pose + step count).
+      Invalidated when the scene changes.
+    - Operator claims (KnowledgeBase, OperationalMemory.knowledge) — asserted directly
+      by the operator. Durable across session restarts. Invalidated only by explicit
+      operator retraction (forget, clear memory). Named concepts and delivery-target
+      facts are both operator claims.
+
+    Both claim types flow into the ReadinessGraph. Grounding claims are never promoted
+    to durable storage unless the operator explicitly asserts them. Computed analysis is
+    not an operator claim unless the operator promotes it. Episodic memory stores the
+    last plan, target, task, and result and is distinct from both claim types.
