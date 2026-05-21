@@ -14,6 +14,7 @@ session memory_root and survive station restarts.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,6 +79,11 @@ class KnowledgeBase:
     future recalls hit the cache rather than recompiling.
     """
 
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Canonical concept key: lowercase, strip leading/trailing non-word characters."""
+        return re.sub(r"^[^\w]+|[^\w]+$", "", name.strip().lower())
+
     def __init__(self, storage_path: Path | None = None) -> None:
         self.storage_path = storage_path
         self._concepts: dict[str, NamedConcept] = {}
@@ -93,7 +99,7 @@ class KnowledgeBase:
         plan: RequestPlan | None = None,
     ) -> NamedConcept:
         """Store a named concept; updates utterance/plan if the name already exists."""
-        key = name.strip().lower()
+        key = self._normalize_name(name)
         existing = self._concepts.get(key)
         if existing is not None:
             existing.utterance = utterance
@@ -101,14 +107,14 @@ class KnowledgeBase:
                 existing.plan = plan
             self.persist()
             return existing
-        concept = NamedConcept(name=name.strip(), utterance=utterance, plan=plan)
+        concept = NamedConcept(name=key, utterance=utterance, plan=plan)
         self._concepts[key] = concept
         self.persist()
         return concept
 
     def forget(self, name: str) -> bool:
         """Remove a concept by name. Returns True if it existed."""
-        key = name.strip().lower()
+        key = self._normalize_name(name)
         if key in self._concepts:
             del self._concepts[key]
             self.persist()
@@ -119,7 +125,7 @@ class KnowledgeBase:
 
     def recall(self, name: str) -> NamedConcept | None:
         """Look up a concept by exact name (case-insensitive). Increments recall_count."""
-        key = name.strip().lower()
+        key = self._normalize_name(name)
         concept = self._concepts.get(key)
         if concept is not None:
             concept.recall_count += 1
@@ -128,7 +134,7 @@ class KnowledgeBase:
 
     def search(self, query: str) -> list[NamedConcept]:
         """Return all concepts whose name or utterance contains query as a substring."""
-        q = query.strip().lower()
+        q = self._normalize_name(query)
         return [c for k, c in self._concepts.items() if q in k or q in c.utterance.lower()]
 
     def all_concepts(self) -> list[NamedConcept]:
@@ -149,7 +155,7 @@ class KnowledgeBase:
             raw = json.loads(self.storage_path.read_text())
             for item in raw:
                 concept = NamedConcept.from_dict(item)
-                self._concepts[concept.name.lower()] = concept
+                self._concepts[self._normalize_name(concept.name)] = concept
         except Exception:
             self._concepts = {}
 

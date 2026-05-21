@@ -1993,8 +1993,11 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "concept_name": {
                 "type": ["string", "null"],
                 "description": (
-                    "For concept_teach: the operator-defined shorthand label (e.g. 'bingo'). "
-                    "For concept_recall: the name of the concept to execute."
+                    "For concept_teach: the operator-defined shorthand label. "
+                    "For concept_recall: the name of the concept to execute. "
+                    "Must be a clean identifier — lowercase, no trailing punctuation or commas. "
+                    "Examples: 'bingo', 'patrol', 'home_base'. "
+                    "Do not include surrounding punctuation from the operator's sentence."
                 ),
             },
             "concept_utterance": {
