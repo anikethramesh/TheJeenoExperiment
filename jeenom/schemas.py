@@ -50,6 +50,10 @@ OPERATOR_INTENT_TYPES = (
     "cache_query",
     "concept_teach",
     "concept_recall",
+    "procedure_recall",
+    "sequence_instruction",
+    "motor_command",
+    "mission_contract",
     "reset",
     "quit",
     "accept_proposal",
@@ -637,6 +641,9 @@ class TaskRequest:
         )
 
 
+TaskContract = TaskRequest  # L3 task — hierarchy alias
+
+
 @dataclass
 class TargetSelector:
     object_type: str
@@ -1073,6 +1080,15 @@ class OperatorIntent:
     # concept_teach / concept_recall fields
     concept_name: str | None = None
     concept_utterance: str | None = None
+    # procedure_recall: ordered list of concept names to execute sequentially
+    concept_steps: list[str] | None = None
+    # sequence_instruction: ordered list of raw task utterances to execute sequentially
+    utterance_steps: list[str] | None = None
+    # motor_command: direct action-primitive execution (bypasses task planning)
+    action_name: str | None = None    # key in ACTION_PRIMITIVES (e.g. "move_forward")
+    repeat_count: int | None = None   # number of times to execute (>= 1)
+    # mission_contract: L4 goal — ordered task sequence with abort-on-failure
+    mission_steps: list[str] | None = None  # raw utterance for each task in the mission
 
     @classmethod
     def from_dict(cls, data: Any) -> OperatorIntent:
@@ -1142,6 +1158,33 @@ class OperatorIntent:
             mapping.get("concept_utterance"), "OperatorIntent.concept_utterance"
         )
 
+        raw_concept_steps = mapping.get("concept_steps")
+        if raw_concept_steps is None:
+            concept_steps: list[str] | None = None
+        elif isinstance(raw_concept_steps, list):
+            concept_steps = [str(s) for s in raw_concept_steps if s is not None]
+        else:
+            concept_steps = None
+
+        raw_utterance_steps = mapping.get("utterance_steps")
+        if raw_utterance_steps is None:
+            utterance_steps: list[str] | None = None
+        elif isinstance(raw_utterance_steps, list):
+            utterance_steps = [str(s) for s in raw_utterance_steps if s is not None]
+        else:
+            utterance_steps = None
+
+        action_name = _ensure_optional_str(
+            mapping.get("action_name"), "OperatorIntent.action_name"
+        )
+        raw_repeat = mapping.get("repeat_count")
+        repeat_count: int | None = None
+        if raw_repeat is not None:
+            try:
+                repeat_count = int(raw_repeat)
+            except (TypeError, ValueError):
+                repeat_count = None
+
         raw_required = mapping.get("required_capabilities")
         if raw_required is None:
             required_capabilities: list[str] = []
@@ -1149,6 +1192,14 @@ class OperatorIntent:
             required_capabilities = [str(h) for h in raw_required if h is not None]
         else:
             required_capabilities = []
+
+        raw_mission_steps = mapping.get("mission_steps")
+        if raw_mission_steps is None:
+            mission_steps: list[str] | None = None
+        elif isinstance(raw_mission_steps, list):
+            mission_steps = [str(s) for s in raw_mission_steps if s is not None]
+        else:
+            mission_steps = None
 
         intent = cls(
             intent_type=intent_type,
@@ -1172,6 +1223,11 @@ class OperatorIntent:
             reason=_ensure_str(mapping.get("reason", ""), "OperatorIntent.reason"),
             concept_name=concept_name,
             concept_utterance=concept_utterance,
+            concept_steps=concept_steps,
+            utterance_steps=utterance_steps,
+            action_name=action_name,
+            repeat_count=repeat_count,
+            mission_steps=mission_steps,
         )
         intent._validate_supported_shape()
         return intent
@@ -1225,6 +1281,26 @@ class OperatorIntent:
         elif self.intent_type == "concept_recall":
             if not self.concept_name:
                 raise SchemaValidationError("concept_recall requires concept_name")
+        elif self.intent_type == "procedure_recall":
+            if not self.concept_steps or len(self.concept_steps) < 2:
+                raise SchemaValidationError(
+                    "procedure_recall requires concept_steps with at least 2 elements"
+                )
+        elif self.intent_type == "sequence_instruction":
+            if not self.utterance_steps or len(self.utterance_steps) < 2:
+                raise SchemaValidationError(
+                    "sequence_instruction requires utterance_steps with at least 2 elements"
+                )
+        elif self.intent_type == "motor_command":
+            if not self.action_name:
+                raise SchemaValidationError("motor_command requires action_name")
+            if self.repeat_count is not None and self.repeat_count < 1:
+                raise SchemaValidationError("motor_command repeat_count must be >= 1")
+        elif self.intent_type == "mission_contract":
+            if not self.mission_steps or len(self.mission_steps) < 2:
+                raise SchemaValidationError(
+                    "mission_contract requires mission_steps with at least 2 task utterances"
+                )
 
 
 @dataclass
@@ -1250,6 +1326,9 @@ class ProcedureRecipe:
             validated=_ensure_bool(mapping.get("validated"), "ProcedureRecipe.validated"),
             rationale=_ensure_str(mapping.get("rationale", ""), "ProcedureRecipe.rationale"),
         )
+
+
+ProcedureContract = ProcedureRecipe  # L2 procedure — hierarchy alias
 
 
 @dataclass
@@ -1296,6 +1375,9 @@ class SensePlanTemplate:
             validated=_ensure_bool(mapping.get("validated"), "SensePlanTemplate.validated"),
             rationale=_ensure_str(mapping.get("rationale", ""), "SensePlanTemplate.rationale"),
         )
+
+
+SensoryCommandTemplate = SensePlanTemplate  # L1 sensory command — hierarchy alias
 
 
 @dataclass
@@ -1600,6 +1682,34 @@ class ArbitrationTrace:
 
 
 @dataclass
+class ObservationClaim:
+    """L1 sensory output stored in Cortex's internal claim store.
+
+    Wraps a raw evidence value with provenance so every fact inside the
+    Cortex execution loop has a traceable source and scope.
+    """
+
+    key: str                      # evidence name, e.g. "target_location"
+    value: Any                    # raw value, e.g. (3, 4) or True
+    source: str = "sense"         # component that produced it
+    level: str = "command"        # "primitive" | "command"
+    confidence: float = 1.0
+    scope: str = "grounding"
+
+
+@dataclass
+class ExecutionClaim:
+    """L1 motor output — provenance record for a completed motor primitive or command."""
+
+    source_primitive: str         # e.g. "move_forward" / "navigate_to_object"
+    level: str                    # "primitive" | "command" | "procedure" | "task"
+    scope: str = "motor"
+    success: bool = True
+    steps_taken: int = 0
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class OperationalEvidence:
     claims: dict[str, Any]
     confidence: float = 1.0
@@ -1618,6 +1728,9 @@ class ExecutionContract:
     params: dict[str, Any] = field(default_factory=dict)
     stop_conditions: list[str] = field(default_factory=list)
     source: str = "cortex"
+
+
+MotorSkillRequest = ExecutionContract  # L3 task motor request — hierarchy alias
 
 
 @dataclass
@@ -1658,6 +1771,9 @@ class SkillPlanTemplate:
         )
 
 
+MotorCommandTemplate = SkillPlanTemplate  # L1 motor command template — hierarchy alias
+
+
 @dataclass
 class ExecutionReport:
     status: str
@@ -1670,6 +1786,21 @@ class ExecutionReport:
 class ExecutionContext:
     active_skill: str
     params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MissionContract:
+    """L4 goal — an ordered sequence of tasks with explicit success conditions.
+
+    Distinct from sequence_instruction (L2 procedure): MissionContract carries
+    abort-on-failure semantics and is the entry point for the Phase 9 repair loop.
+    """
+
+    mission_id: str
+    description: str
+    task_sequence: list[str]          # ordered raw task utterances
+    success_condition: str = "all_complete"
+    abort_on_failure: bool = True
 
 
 @dataclass
@@ -2005,6 +2136,49 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "description": (
                     "For concept_teach: the full instruction the label expands to "
                     "(e.g. 'go to the red door'). Null for concept_recall."
+                ),
+            },
+            "concept_steps": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "description": (
+                    "For procedure_recall: ordered list of concept names to execute "
+                    "sequentially (e.g. ['bingo', 'scout']). Null for all other intents."
+                ),
+            },
+            "utterance_steps": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "description": (
+                    "For sequence_instruction: ordered list of raw task utterances to "
+                    "execute sequentially (e.g. ['go to the red door', 'go to the green door']). "
+                    "Null for all other intents."
+                ),
+            },
+            "action_name": {
+                "type": ["string", "null"],
+                "description": (
+                    "For motor_command: the action primitive key to execute directly "
+                    "(e.g. 'move_forward', 'turn_right', 'turn_left'). "
+                    "Null for all other intents."
+                ),
+            },
+            "repeat_count": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "description": (
+                    "For motor_command: how many times to execute the action. "
+                    "Defaults to 1 if omitted. Null for all other intents."
+                ),
+            },
+            "mission_steps": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "minItems": 2,
+                "description": (
+                    "For mission_contract: ordered list of raw task utterances constituting "
+                    "the mission (e.g. ['go to the red door', 'go to the green door']). "
+                    "Requires at least 2 steps. Null for all other intents."
                 ),
             },
         },

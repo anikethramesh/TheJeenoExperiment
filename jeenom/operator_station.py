@@ -24,7 +24,7 @@ from .plan_cache import PlanCache
 from .knowledge_base import KnowledgeBase, NamedConcept
 from .mismatch import MismatchDetector, OperationalMismatch, default_detector
 from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
-from .primitive_library import TASK_PRIMITIVES
+from .primitive_library import ACTION_PRIMITIVES, TASK_PRIMITIVES
 from .schemas import (
     ArbitrationTrace,
     EnvironmentIdentity,
@@ -231,7 +231,18 @@ def classify_utterance(utterance: str) -> OperatorCommand:
     )
     if _concept_teach_m:
         cname = _concept_teach_m.group(1).strip().strip("'\"")
-        cutterance = _concept_teach_m.group(2).strip().strip("'\"")
+        # Re-match against raw text (commas intact) to preserve CSV procedure sequences.
+        # normalized strips [.,;:] so "bingo, scout, bingo" becomes "bingo scout bingo".
+        _raw_m = re.match(
+            r"^(?:remember|teach|define)\s+(.+?)\s+(?:means|as|is shorthand for)\s+(.+)$",
+            text,
+            re.IGNORECASE,
+        )
+        cutterance = (
+            _raw_m.group(2).strip().strip("'\"")
+            if _raw_m is not None
+            else _concept_teach_m.group(2).strip().strip("'\"")
+        )
         return OperatorCommand(
             kind="concept_teach",
             utterance=text,
@@ -485,6 +496,16 @@ class OperatorStationSession:
             return self.teach_concept(command.payload["name"], command.payload["utterance"])
         if command.kind == "concept_forget":
             return self.forget_concept(command.payload["name"])
+        if command.kind == "procedure_execute":
+            return self._run_procedure(command.payload["steps"], command.utterance)
+        if command.kind == "sequence_execute":
+            return self._run_sequence(command.payload["steps"], command.utterance)
+        if command.kind == "motor_execute":
+            return self._run_motor_command(
+                command.payload["action"], command.payload["count"], command.utterance
+            )
+        if command.kind == "mission_execute":
+            return self._run_mission(command.payload["steps"], command.utterance)
         if command.kind == "unresolved":
             command = self._command_from_active_claim_text(utterance) or command
             if command.kind == "unresolved":
@@ -519,6 +540,16 @@ class OperatorStationSession:
             return self.teach_concept(command.payload["name"], command.payload["utterance"])
         if command.kind == "concept_forget":
             return self.forget_concept(command.payload["name"])
+        if command.kind == "procedure_execute":
+            return self._run_procedure(command.payload["steps"], command.utterance)
+        if command.kind == "sequence_execute":
+            return self._run_sequence(command.payload["steps"], command.utterance)
+        if command.kind == "motor_execute":
+            return self._run_motor_command(
+                command.payload["action"], command.payload["count"], command.utterance
+            )
+        if command.kind == "mission_execute":
+            return self._run_mission(command.payload["steps"], command.utterance)
         if command.kind == "cache_query":
             return self.cache_summary()
         if command.kind == "status_query":
@@ -682,9 +713,77 @@ class OperatorStationSession:
                         )
                     },
                 )
+            # Procedure-type concepts route to _run_procedure, not task_instruction
+            if concept.concept_type == "procedure":
+                return OperatorCommand(
+                    kind="procedure_execute",
+                    utterance=utterance,
+                    payload={"steps": list(concept.steps)},
+                )
             expanded = concept.utterance
             self.log(f"concept_recall: '{name}' → '{expanded}'")
             return OperatorCommand(kind="task_instruction", utterance=expanded)
+
+        if intent.intent_type == "procedure_recall":
+            steps = list(intent.concept_steps or [])
+            if not steps:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": "Please specify the concept names to execute in sequence."},
+                )
+            self.log(f"procedure_recall: steps={steps}")
+            return OperatorCommand(
+                kind="procedure_execute",
+                utterance=utterance,
+                payload={"steps": steps},
+            )
+
+        if intent.intent_type == "sequence_instruction":
+            usteps = list(intent.utterance_steps or [])
+            if not usteps:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": "Please specify the task steps to execute in sequence."},
+                )
+            self.log(f"sequence_instruction: steps={usteps}")
+            return OperatorCommand(
+                kind="sequence_execute",
+                utterance=utterance,
+                payload={"steps": usteps},
+            )
+
+        if intent.intent_type == "motor_command":
+            action = (intent.action_name or "").strip()
+            count = max(1, intent.repeat_count or 1)
+            if not action:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": "Please specify which motor action to perform."},
+                )
+            self.log(f"motor_command: action={action} count={count}")
+            return OperatorCommand(
+                kind="motor_execute",
+                utterance=utterance,
+                payload={"action": action, "count": count},
+            )
+
+        if intent.intent_type == "mission_contract":
+            steps = list(intent.mission_steps or [])
+            if len(steps) < 2:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": "A mission requires at least 2 task steps."},
+                )
+            self.log(f"mission_contract: {len(steps)} steps")
+            return OperatorCommand(
+                kind="mission_execute",
+                utterance=utterance,
+                payload={"steps": steps},
+            )
 
         if intent.intent_type == "claim_reference":
             if intent.claim_reference == "threshold_filter":
@@ -701,6 +800,16 @@ class OperatorStationSession:
             )
 
         if intent.intent_type in {"unsupported", "ambiguous"}:
+            # Pure semantic/schema failure (no declared capabilities) → plain error.
+            # Reserve arbitration for intents where the LLM identified a capability but
+            # the registry says it is missing or synthesizable.
+            if not intent.required_capabilities and not cap_match.missing:
+                reason = intent.reason or "I could not understand that request."
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": f"I didn't understand that: {reason}"},
+                )
             # Route through the arbitrator — it has access to the full capability manifest
             # and SceneModel API surface, so it can recognise synthesisable spatial
             # computations (e.g. threshold filtering) that the LLM compiler missed.
@@ -2462,6 +2571,14 @@ class OperatorStationSession:
         # can be routed to the LLM / SmokeTestCompiler for concept_teach handling.
         if re.match(r"^(?:when|if)\s+(?:i\s+)?say\b", normalized):
             return None
+        # Mission contracts ("mission: X; Y") must route to the compiler, not navigation.
+        # Check raw utterance because _normalize_utterance strips colons/semicolons.
+        if re.match(r"^\s*mission\s*:", utterance, re.IGNORECASE):
+            return None
+        # Sequential utterances ("go to X then go to Y") must not be parsed as a
+        # single navigation command — structural shape takes priority over content.
+        if re.search(r"\b(?:and\s+then|then|followed\s+by)\b", normalized):
+            return None
         if not self._utterance_requests_navigation(normalized):
             return None
         color = self._color_reference_in_utterance(normalized)
@@ -4212,13 +4329,17 @@ class OperatorStationSession:
 
         concept = self.knowledge_base.teach(name, utterance, plan=plan)
         plan_status = "plan pre-compiled and cached" if plan is not None else "no plan (will compile on first recall)"
-        self.log(f"concept taught: name={concept.name!r} utterance={concept.utterance!r} {plan_status}")
-        return (
+        self.log(f"concept taught: name={concept.name!r} utterance={concept.utterance!r} type={concept.concept_type} {plan_status}")
+        result = (
             f"CONCEPT STORED\n"
             f"name={concept.name!r}\n"
+            f"type={concept.concept_type}\n"
             f"utterance={concept.utterance!r}\n"
             f"plan_cached={plan is not None}"
         )
+        if concept.concept_type == "procedure":
+            result += f"\nsteps={concept.steps}"
+        return result
 
     def forget_concept(self, name: str) -> str:
         if self.knowledge_base.forget(name):
@@ -4226,9 +4347,51 @@ class OperatorStationSession:
             return f"CONCEPT FORGOTTEN: {name!r}"
         return f"CONCEPT NOT FOUND: {name!r} (nothing forgotten)"
 
+    def _try_natural_sequence(self, utterance: str) -> OperatorCommand | None:
+        """Detect natural-language sequential patterns like 'do X then Y' or 'X followed by Y'.
+
+        Single-word tokens → procedure_execute (named KB concepts).
+        Multi-word tokens → sequence_execute (raw task utterances).
+        Returns None if no sequential pattern is detected.
+        """
+        normalized = _normalize_utterance(utterance)
+        parts = re.split(r"\b(?:and\s+then|then|followed\s+by)\b", normalized)
+        if len(parts) < 2:
+            return None
+        _pre = re.compile(r"^\s*(?:(?:do|execute|run|perform|also)\s+)?(?:a\s+|the\s+|an\s+)?(?:first\s+)?")
+        _suf = re.compile(r"\s+(?:first|next|also|too)\s*$")
+        cleaned = [_suf.sub("", _pre.sub("", p)).strip() for p in parts]
+        cleaned = [p for p in cleaned if p]
+        if len(cleaned) < 2:
+            return None
+        seq = self.knowledge_base._is_sequence(",".join(cleaned))
+        if seq is not None:
+            return OperatorCommand(kind="procedure_execute", utterance=utterance, payload={"steps": seq})
+        # Multi-word parts that aren't named concepts → raw utterance sequence
+        if all(cleaned):
+            return OperatorCommand(kind="sequence_execute", utterance=utterance, payload={"steps": cleaned})
+        return None
+
     def _command_from_concept(self, utterance: str) -> OperatorCommand | None:
-        """Resolve a bare concept name to the concept's expanded utterance."""
+        """Resolve a bare concept name (or comma-separated sequence) to an OperatorCommand."""
         normalized = _normalize_utterance(utterance.strip())
+
+        # Check if utterance is an anonymous comma-separated sequence of known concepts
+        seq = self.knowledge_base._is_sequence(utterance.strip())
+        if seq is not None:
+            self.log(f"anonymous procedure detected: {seq}")
+            return OperatorCommand(
+                kind="procedure_execute",
+                utterance=utterance,
+                payload={"steps": seq},
+            )
+
+        # Check for natural-language "X then Y" / "X followed by Y" sequences
+        nat_cmd = self._try_natural_sequence(utterance)
+        if nat_cmd is not None:
+            self.log(f"natural-language sequence detected: kind={nat_cmd.kind} steps={nat_cmd.payload.get('steps')}")
+            return nat_cmd
+
         concept = self.knowledge_base.recall(normalized) or self.knowledge_base.recall(utterance.strip())
         if concept is None:
             # Try stripping execution-verb prefixes: "execute bingo", "run scout", "do alpha"
@@ -4237,12 +4400,227 @@ class OperatorStationSession:
                 concept = self.knowledge_base.recall(m.group(1).strip())
         if concept is None:
             return None
-        self.log(f"concept {concept.name!r} resolved to: {concept.utterance!r}")
+
+        self.log(f"concept {concept.name!r} resolved to: {concept.utterance!r} (type={concept.concept_type})")
+
+        # Procedure-type concept — unpack its steps
+        if concept.concept_type == "procedure":
+            return OperatorCommand(
+                kind="procedure_execute",
+                utterance=utterance,
+                payload={"steps": list(concept.steps)},
+            )
+
+        # Atomic concept — expand and dispatch
         expanded = concept.utterance
         expanded_command = classify_utterance(expanded)
         if expanded_command.kind == "unresolved":
             expanded_command = self.command_from_llm_intent(expanded)
         return expanded_command
+
+    def _build_procedure_request_plan(
+        self,
+        steps: list[str],
+        original_utterance: str,
+    ) -> RequestPlan | None:
+        """Build a multi-step RequestPlan from a list of atomic concept names."""
+        from .schemas import RequestPlan, RequestPlanStep
+        import uuid
+
+        plan_steps: list[RequestPlanStep] = []
+        prev_step_id: str | None = None
+        for idx, concept_name in enumerate(steps):
+            concept = self.knowledge_base.recall(concept_name)
+            if concept is None:
+                self.log(f"procedure build failed: concept '{concept_name}' not found")
+                return None
+            if concept.concept_type == "procedure":
+                self.log(f"procedure build failed: nested procedure '{concept_name}' not allowed")
+                return None
+            try:
+                task = self.compose_known_task(concept.utterance)
+            except ValueError:
+                self.log(f"procedure build failed: cannot resolve handle for '{concept.utterance}'")
+                return None
+            step_id = f"step_{idx}"
+            plan_steps.append(
+                RequestPlanStep(
+                    step_id=step_id,
+                    layer="task",
+                    operation="execute",
+                    required_handle="task.go_to_object.door",
+                    implementation_status="implemented",
+                    constraints={"utterance": concept.utterance},
+                    depends_on=[prev_step_id] if prev_step_id is not None else [],
+                )
+            )
+            prev_step_id = step_id
+
+        return RequestPlan(
+            request_id=str(uuid.uuid4()),
+            original_utterance=original_utterance,
+            objective_type="task",
+            objective_summary=f"procedure: {' → '.join(steps)}",
+            steps=plan_steps,
+            expected_response="execute_task",
+        )
+
+    def _run_procedure(self, steps: list[str], original_utterance: str) -> str:
+        """Execute a procedure: build multi-step RequestPlan, gate via ReadinessGraph, run steps."""
+        plan = self._build_procedure_request_plan(steps, original_utterance)
+        if plan is None:
+            return (
+                "PROCEDURE ERROR\n"
+                "Could not build execution plan — one or more steps could not be resolved.\n"
+                "Ensure all concept names are defined as atomic concepts before teaching a procedure."
+            )
+
+        claims_valid = self._claims_valid_for_current_environment()
+        readiness_graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=claims_valid,
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = plan
+        self.last_readiness_graph = readiness_graph
+
+        if readiness_graph.graph_status != "executable":
+            blocking = readiness_graph.blocking_step_id or "unknown"
+            return (
+                f"PROCEDURE BLOCKED\n"
+                f"graph_status={readiness_graph.graph_status}\n"
+                f"blocking_step={blocking}\n"
+                f"{readiness_graph.explanation}"
+            )
+
+        results: list[str] = []
+        for step_idx, step_id_name in enumerate(steps):
+            concept = self.knowledge_base.recall(step_id_name)
+            if concept is None:
+                return f"PROCEDURE ERROR\nConcept '{step_id_name}' disappeared during execution."
+            self.log(f"procedure step {step_idx + 1}/{len(steps)}: {concept.name!r} → {concept.utterance!r}")
+            result = self.run_task(concept.utterance)
+            results.append(self.result_summary(result))
+
+        step_labels = " → ".join(steps)
+        return f"PROCEDURE COMPLETE ({step_labels})\n" + "\n---\n".join(results)
+
+    def _build_sequence_request_plan(
+        self,
+        utterance_steps: list[str],
+        original_utterance: str,
+    ) -> RequestPlan | None:
+        """Build a multi-step RequestPlan from a list of raw task utterances."""
+        from .schemas import RequestPlan, RequestPlanStep
+        import uuid
+
+        plan_steps: list[RequestPlanStep] = []
+        prev_step_id: str | None = None
+        for idx, step_utterance in enumerate(utterance_steps):
+            try:
+                task = self.compose_known_task(step_utterance)
+            except ValueError:
+                self.log(f"sequence build failed: cannot resolve handle for '{step_utterance}'")
+                return None
+            step_id = f"step_{idx}"
+            plan_steps.append(
+                RequestPlanStep(
+                    step_id=step_id,
+                    layer="task",
+                    operation="execute",
+                    required_handle="task.go_to_object.door",
+                    implementation_status="implemented",
+                    constraints={"utterance": step_utterance},
+                    depends_on=[prev_step_id] if prev_step_id is not None else [],
+                )
+            )
+            prev_step_id = step_id
+
+        return RequestPlan(
+            request_id=str(uuid.uuid4()),
+            original_utterance=original_utterance,
+            objective_type="task",
+            objective_summary=f"sequence: {' → '.join(utterance_steps)}",
+            steps=plan_steps,
+            expected_response="execute_task",
+        )
+
+    def _run_sequence(self, utterance_steps: list[str], original_utterance: str) -> str:
+        """Execute a sequence of raw task utterances: build RequestPlan, gate, run each step."""
+        plan = self._build_sequence_request_plan(utterance_steps, original_utterance)
+        if plan is None:
+            return (
+                "SEQUENCE ERROR\n"
+                "Could not build execution plan — one or more steps could not be compiled.\n"
+                "Ensure each step is a valid task instruction (e.g. 'go to the red door')."
+            )
+
+        claims_valid = self._claims_valid_for_current_environment()
+        readiness_graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=claims_valid,
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = plan
+        self.last_readiness_graph = readiness_graph
+
+        if readiness_graph.graph_status != "executable":
+            blocking = readiness_graph.blocking_step_id or "unknown"
+            return (
+                f"SEQUENCE BLOCKED\n"
+                f"graph_status={readiness_graph.graph_status}\n"
+                f"blocking_step={blocking}\n"
+                f"{readiness_graph.explanation}"
+            )
+
+        results: list[str] = []
+        for step_idx, step_utterance in enumerate(utterance_steps):
+            self.log(f"sequence step {step_idx + 1}/{len(utterance_steps)}: {step_utterance!r}")
+            result = self.run_task(step_utterance)
+            results.append(self.result_summary(result))
+
+        step_labels = " → ".join(utterance_steps)
+        return f"PROCEDURE COMPLETE ({step_labels})\n" + "\n---\n".join(results)
+
+    def _run_motor_command(self, action_name: str, count: int, original_utterance: str) -> str:
+        """Execute a motor primitive N times directly, bypassing task planning (Cortex/Spine)."""
+        if action_name not in ACTION_PRIMITIVES:
+            return (
+                f"ERROR: Unknown motor action '{action_name}'.\n"
+                f"Known actions: {sorted(ACTION_PRIMITIVES)}"
+            )
+        actions = [action_name] * count
+        self.log(f"motor_execute: {action_name} × {count}")
+        result = run_demo.run_motor_sequence(
+            env_id=self.env_id,
+            seed=self.seed,
+            render_mode=self.render_mode,
+            actions=actions,
+        )
+        self.last_result = result
+        label = action_name.replace("_", " ")
+        return f"MOTOR COMPLETE ({label} × {count}): {result.get('steps_taken', count)} steps executed."
+
+    def _run_mission(self, steps: list[str], original_utterance: str) -> str:
+        """Execute a mission contract — ordered tasks with abort-on-failure semantics."""
+        results: list[str] = []
+        for step_idx, step_utterance in enumerate(steps):
+            self.log(f"mission step {step_idx + 1}/{len(steps)}: {step_utterance!r}")
+            result = self.run_task(step_utterance)
+            summary = self.result_summary(result)
+            results.append(summary)
+            if not result.get("final_state", {}).get("task_complete", False):
+                return (
+                    f"MISSION ABORTED (step {step_idx + 1} failed: {step_utterance!r})\n"
+                    + "\n---\n".join(results)
+                )
+        step_labels = " → ".join(steps)
+        self.last_result = result  # type: ignore[possibly-undefined]
+        return f"MISSION COMPLETE ({step_labels})\n" + "\n---\n".join(results)
 
     def concepts_summary(self) -> str:
         concepts = self.knowledge_base.all_concepts()
@@ -4251,7 +4629,8 @@ class OperatorStationSession:
         lines = ["CONCEPTS"]
         for c in concepts:
             plan_tag = " [plan cached]" if c.plan is not None else ""
-            lines.append(f"  {c.name!r} → {c.utterance!r}{plan_tag}  (recalled {c.recall_count}x)")
+            type_tag = f" [{c.concept_type}]" if c.concept_type != "atomic" else ""
+            lines.append(f"  {c.name!r} → {c.utterance!r}{type_tag}{plan_tag}  (recalled {c.recall_count}x)")
         return "\n".join(lines)
 
     def apply_knowledge_update(self, payload: dict[str, Any]) -> str:

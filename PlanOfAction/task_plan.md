@@ -2126,14 +2126,192 @@ Implement stages in order:
 
    Gate: eval_master.py all probes pass (no behavioral change).
 
-5. Repair loop.
-   Add `jeenom/repair_loop.py` with repair actions `REFRESH_CLAIMS`, `REGROUND`, `CLARIFY`, `SYNTHESIZE`, `ABORT`. Add `RepairEvent` logging and readiness re-evaluation after repair. Build `phase8_operational_repair_probe.py`. Gate: a blocking mismatch is repaired with a narrow operator intervention and execution resumes.
+4.7. Primitive Composition Foundation (Phase 8.4.7).
+   Status: done.
 
-6. Synthesized primitive provenance + reuse.
-   Extend capability registry with provenance, validation fixtures, reuse history, and failure tracking. Build primitive reuse and primitive extension probes. Gate: valid synthesized primitives are reused; invalid primitive reuse is blocked.
+   Problem:
+   A single concept name ("bingo") is an atomic primitive — a named shorthand for one
+   instruction. The operator also needs to compose primitives into procedures: an ordered
+   sequence of atomic concepts executed in series (e.g. "bingo, scout, bingo" means
+   "execute bingo, then scout, then bingo again"). There was no procedure type and no
+   mechanism to detect or execute such sequences.
 
-7. Intervention metrics + full transfer eval.
-   Add `InterventionMetrics` and `minimal_shot_transfer_probe.py`. Gate: full environment progression completes with valid reuse accepted, invalid reuse rejected, repairs logged, operator interventions counted, primitive reuse measured, and render-time guarantees preserved.
+   Architecture:
+   Blueprint Rule 10 — "OperatorIntent is not the execution plan" — requires that a
+   procedure be compiled to a typed RequestPlan and gated by the ReadinessGraph before
+   any step executes. A simple for-loop is not sufficient.
+
+   Data model changes (jeenom/knowledge_base.py):
+   - NamedConcept gains concept_type: str = "atomic" ("atomic" | "procedure") and
+     steps: list[str] (ordered atomic concept names for procedures).
+   - KnowledgeBase._is_sequence(utterance): detects comma-separated lists of known
+     concept names (>=2 parts); returns the normalized list or None.
+   - KnowledgeBase.teach(): calls _is_sequence(utterance) after normalization; stores
+     concept_type="procedure" and steps=list if a sequence is detected. Otherwise
+     stores as atomic (existing behaviour). Updating an existing concept re-evaluates
+     the type. as_dict / from_dict updated with backward-compat defaults.
+
+   Execution changes (jeenom/operator_station.py):
+   - _command_from_concept(): before the single-concept lookup, calls
+     knowledge_base._is_sequence() on the raw utterance. If a sequence is found,
+     returns OperatorCommand(kind="procedure_execute", payload={"steps": [...]}).
+     If a named concept resolves to concept_type="procedure", also returns
+     procedure_execute with its steps.
+   - _build_procedure_request_plan(steps, original_utterance): builds a RequestPlan
+     with one RequestPlanStep per atomic step (layer="task", operation="execute",
+     required_handle="task.go_to_object.door"), chained via depends_on. Returns None
+     if any concept is missing, nested (procedure-in-procedure), or has an
+     unresolvable handle.
+   - _run_procedure(steps, original_utterance): builds the plan, evaluates via
+     evaluate_request_plan, gates on graph_status == "executable", then executes
+     each atomic step in order via run_task(). Returns a combined result summary.
+   - handle_utterance(): procedure_execute handler added in both the top fast-path
+     dispatch (before the unresolved branch) and the bottom LLM-routed dispatch
+     (after concept_forget).
+
+   Constraints:
+   - No nested procedures: a step that resolves to concept_type="procedure" is
+     rejected at build time with a descriptive error.
+   - No mixed sequences: "bingo, go to the green door" is not supported — all
+     tokens must be known concept names.
+   - Sequence requires concepts to exist at teach time: if "bingo, scout" is taught
+     before either concept is defined, it is stored as a raw atomic utterance
+     (concept_type="atomic") and can be re-taught later.
+
+   Gate: teach bingo and scout as atomic concepts; teach patrol as "bingo, scout,
+   bingo"; "patrol" builds a 3-step RequestPlan, evaluates via ReadinessGraph, and
+   executes bingo→scout→bingo. "bingo, scout, bingo" typed directly also triggers
+   procedure_execute. "bingo" alone continues as atomic (no regression).
+   python evals/phase845_concept_intent_probe.py → 19/19.
+   python evals/eval_master.py → all probes pass.
+
+4.8. Sequential Concept Intent (Phase 8.4.8).
+   Status: done.
+
+   Problem:
+   OperatorIntent.concept_name is singular — the LLM had no field to express "run X
+   then Y" for named KB concepts. Utterances like "do bingo then scout" fell back to
+   unsupported, which the arbitrator misclassified as synthesizable.
+
+   Fix: Added procedure_recall intent type with concept_steps: list[str]. SmokeTestCompiler
+   and LLMCompiler detect "X then Y", "X followed by Y", "execute X first and then Y"
+   patterns and emit procedure_recall with ordered concept_steps. The station routes
+   procedure_recall → OperatorCommand(kind="procedure_execute") → _run_procedure().
+   Also fixed unsupported+empty-capabilities → plain "I didn't understand" (not arbitrator).
+   Also fixed concept_recall for procedure-type concepts to route to procedure_execute.
+
+   Gate: python evals/phase848_sequential_intent_probe.py → 13/13.
+
+4.9. Multi-Step Utterance Intent (Phase 8.4.9).
+   Status: done.
+
+   Problem:
+   procedure_recall+concept_steps only works when every step is a named KB concept.
+   Raw sequential instructions like "go to the red door then go to the green door" 
+   had no schema representation and fell back to unsupported.
+
+   Fix: Added sequence_instruction intent type with utterance_steps: list[str] for raw
+   task utterances. SmokeTestCompiler distinguishes single-word tokens (→ procedure_recall)
+   from multi-word tokens (→ sequence_instruction). Station routes sequence_instruction →
+   OperatorCommand(kind="sequence_execute") → _run_sequence(). Updated _try_natural_sequence
+   to return OperatorCommand (not list[str]) covering both procedure_execute and sequence_execute.
+
+   Abstraction mapping at this point:
+     concept_recall                → single named concept → KB lookup
+     procedure_recall+concept_steps → named concepts in sequence → KB lookup per step
+     sequence_instruction+utterance_steps → raw utterances in sequence → direct compile
+
+   Gate: python evals/phase849_sequence_instruction_probe.py → 13/13.
+
+4.10. Motor Command Composition (Phase 8.5.0).
+   Status: done.
+
+   Problem:
+   The operator could not issue motor-level commands like "go straight for 3 steps"
+   despite action primitives (move_forward, turn_right, turn_left) existing in
+   ACTION_PRIMITIVES/primitive_library.py. These primitives only lived inside the
+   Spine's execution loop and had no operator-level pathway. The architecture had
+   a gap between motor primitives and task primitives.
+
+   Architecture — the full abstraction ladder is now:
+
+     motor primitives   move_forward, turn_right, turn_left, pickup, toggle
+          ↓ compose N repetitions (NEW)
+     motor commands     "go straight for 3 steps" → move_forward × 3
+          ↓ add goal-inference (A* planning)
+     task primitives    "go to the red door" → A* → motor sequence
+
+   Fix: Added motor_command intent type with action_name: str and repeat_count: int
+   fields to OperatorIntent. SmokeTestCompiler parses "go straight for N steps",
+   "turn right twice", etc. Station routes motor_command → OperatorCommand(kind="motor_execute")
+   → _run_motor_command() → run_demo.run_motor_sequence() which bypasses Cortex/Spine
+   entirely and executes adapter.act(action_code) × N directly.
+
+   Files changed:
+   - jeenom/schemas.py: motor_command in OPERATOR_INTENT_TYPES, action_name and
+     repeat_count fields, validation, JSON schema
+   - jeenom/run_demo.py: run_motor_sequence() lightweight execution function
+   - jeenom/llm_compiler.py: _parse_motor_command() helper, SmokeTestCompiler branch,
+     LLM prompt extension
+   - jeenom/operator_station.py: motor_command handler in command_from_operator_intent(),
+     motor_execute dispatch in handle_utterance(), _run_motor_command() method
+
+   Gate: python evals/phase850_motor_command_probe.py → 18/18.
+
+5. Architecture Refactor — Explicit 5-Level Hierarchy + Claim I/O (Phase 8.8–8.11).
+   Status: planned.
+
+   Problem:
+   The 5-level hierarchy (primitive → command → procedure → task → goal) exists implicitly
+   through organic growth but is unnamed, inconsistently typed, and hardcoded in multiple
+   places. Skill→primitive mappings live in two separate locations. Claims have no provenance.
+   There is no Goal/Mission level for multi-task operator contracts.
+
+   Target hierarchy (Motor and Sensory tracks):
+     L0 primitive  — single atomic op           (move_forward, parse_grid_objects)
+     L1 command    — named primitive composition (navigate_to_object, locate_object)
+     L2 procedure  — ordered command sequence   (go_to_object = [locate, navigate, verify, done])
+     L3 task       — goal-directed procedure + plan (go_to_object with params + readiness)
+     L4 goal       — multi-task mission contract   (deliver_to_red_door = [go_to + verify + done])
+
+   Claims are the universal state/evidence interface between levels and the knowledge base.
+
+5.1. Phase 8.8 — Rename and Document (zero behavior change).
+   Status: done.
+   Add type aliases in schemas.py (TaskContract, ProcedureContract, MotorSkillRequest,
+   MotorCommandTemplate, SensoryCommandTemplate). Update blueprint.md with 5-level hierarchy.
+   Gate: all probes pass unchanged.
+
+5.2. Phase 8.9 — Command Registry.
+   Status: done.
+   New jeenom/command_registry.py with MotorCommand and SensoryCommand dataclasses +
+   MOTOR_COMMANDS / SENSORY_COMMANDS dicts. Replace hardcoded if/elif in Cortex.make_evidence_frame()
+   (cortex.py:122–130) and Spine._validate_template() + _coerce_template_for_contract()
+   (spine.py:182–230) with registry lookups.
+   Each command declares primitive_sequence, required_claims, produced_claims, assumptions, and failure_modes.
+   Gate: evals/phase89_command_registry_probe.py passes + all existing probes pass.
+
+5.3. Phase 8.10 — Typed Claims.
+   Status: done.
+   Add ExecutionClaim and ObservationClaim dataclasses to schemas.py.
+  First add claim accessors around Cortex.claims:
+
+  get_claim(key)
+  set_claim(key, claim_or_value)
+  has_claim(key)
+
+  Then migrate Cortex.claims from dict[str, Any] to typed Claim objects behind that interface.
+   update_from_evidence() stores typed claims; make_evidence_frame() reads them.
+   Gate: evals/phase810_typed_claims_probe.py passes + all existing probes pass.
+
+5.4. Phase 8.11 — Mission Contract.
+   Status: done.
+   Add MissionContract dataclass to schemas.py. Add _run_mission() to OperatorStationSession.
+   Add "mission_contract" to OPERATOR_INTENT_TYPES with mission_steps: list[str] field.
+   Gate: evals/phase811_mission_contract_probe.py passes + all existing probes pass.
+
+   Files touched: jeenom/command_registry.py (new), jeenom/schemas.py, jeenom/cortex.py,
+   jeenom/spine.py, jeenom/operator_station.py, PlanOfAction/blueprint.md.
 
 Every stage must include:
 
@@ -2144,9 +2322,24 @@ Every stage must include:
 
 Do not proceed to the next stage until the current stage gate passes.
 
-### Phase 9 — Failure/replan/operator ask
+### Phase 9 — Operational Hardening
 Status: planned.
-Handle missing primitive, ambiguity, no path, blocked task. Ask operator or propose fallback.
+
+Phase 9 goal: close the loop on cross-environment robustness — repair mismatched plans,
+track synthesized primitive provenance, measure intervention cost, and handle failures
+gracefully with operator clarification.
+
+9.1. Repair loop.
+   Add `jeenom/repair_loop.py` with repair actions `REFRESH_CLAIMS`, `REGROUND`, `CLARIFY`, `SYNTHESIZE`, `ABORT`. Add `RepairEvent` logging and readiness re-evaluation after repair. Build `phase91_operational_repair_probe.py`. Gate: a blocking mismatch is repaired with a narrow operator intervention and execution resumes.
+
+9.2. Synthesized primitive provenance + reuse.
+   Extend capability registry with provenance, validation fixtures, reuse history, and failure tracking. Build primitive reuse and primitive extension probes. Gate: valid synthesized primitives are reused; invalid primitive reuse is blocked.
+
+9.3. Intervention metrics + full transfer eval.
+   Add `InterventionMetrics` and `minimal_shot_transfer_probe.py`. Gate: full environment progression completes with valid reuse accepted, invalid reuse rejected, repairs logged, operator interventions counted, primitive reuse measured, and render-time guarantees preserved.
+
+9.4. Failure / replan / operator ask.
+   Handle missing primitive, ambiguity, no path, blocked task. Ask operator or propose fallback. Uses MissionContract (Phase 8.11) abort-on-failure and repair hooks.
 
 ### Phase 10 — Harder MiniGrid integration
 Status: later.

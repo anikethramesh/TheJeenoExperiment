@@ -30,6 +30,9 @@ class NamedConcept:
 
     claim_scope="operator": asserted by the operator, durable across restarts,
     invalidated only by explicit retraction (forget / clear memory).
+
+    concept_type="atomic": a single instruction expansion.
+    concept_type="procedure": an ordered sequence of atomic concept names.
     """
 
     name: str
@@ -39,6 +42,8 @@ class NamedConcept:
     recall_count: int = 0
     tags: list[str] = field(default_factory=list)
     claim_scope: str = "operator"
+    concept_type: str = "atomic"          # "atomic" | "procedure"
+    steps: list[str] = field(default_factory=list)  # procedure: ordered concept names
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +53,8 @@ class NamedConcept:
             "stored_at": self.stored_at,
             "recall_count": self.recall_count,
             "tags": list(self.tags),
+            "concept_type": self.concept_type,
+            "steps": list(self.steps),
         }
 
     @classmethod
@@ -67,6 +74,8 @@ class NamedConcept:
             stored_at=data.get("stored_at", time.time()),
             recall_count=data.get("recall_count", 0),
             tags=list(data.get("tags", [])),
+            concept_type=data.get("concept_type", "atomic"),
+            steps=list(data.get("steps", [])),
         )
 
 
@@ -92,22 +101,47 @@ class KnowledgeBase:
 
     # ── write ─────────────────────────────────────────────────────────────────
 
+    def _is_sequence(self, utterance: str) -> list[str] | None:
+        """Return ordered concept-name list if utterance is a comma-separated sequence of known concepts."""
+        parts = [self._normalize_name(p) for p in utterance.split(",")]
+        if len(parts) < 2:
+            return None
+        if all(parts) and all(self._concepts.get(p) is not None for p in parts):
+            return parts
+        return None
+
     def teach(
         self,
         name: str,
         utterance: str,
         plan: RequestPlan | None = None,
     ) -> NamedConcept:
-        """Store a named concept; updates utterance/plan if the name already exists."""
+        """Store a named concept; updates utterance/plan if the name already exists.
+
+        If utterance is a comma-separated list of known concept names (>=2), the
+        concept is stored as concept_type="procedure" with the resolved steps list.
+        """
         key = self._normalize_name(name)
+        seq = self._is_sequence(utterance)
+        concept_type = "procedure" if seq is not None else "atomic"
+        steps = seq if seq is not None else []
+
         existing = self._concepts.get(key)
         if existing is not None:
             existing.utterance = utterance
+            existing.concept_type = concept_type
+            existing.steps = steps
             if plan is not None:
                 existing.plan = plan
             self.persist()
             return existing
-        concept = NamedConcept(name=key, utterance=utterance, plan=plan)
+        concept = NamedConcept(
+            name=key,
+            utterance=utterance,
+            plan=plan,
+            concept_type=concept_type,
+            steps=steps,
+        )
         self._concepts[key] = concept
         self.persist()
         return concept
@@ -155,7 +189,8 @@ class KnowledgeBase:
             raw = json.loads(self.storage_path.read_text())
             for item in raw:
                 concept = NamedConcept.from_dict(item)
-                self._concepts[self._normalize_name(concept.name)] = concept
+                concept.name = self._normalize_name(concept.name)
+                self._concepts[concept.name] = concept
         except Exception:
             self._concepts = {}
 

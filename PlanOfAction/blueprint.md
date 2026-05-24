@@ -89,3 +89,29 @@
     to durable storage unless the operator explicitly asserts them. Computed analysis is
     not an operator claim unless the operator promotes it. Episodic memory stores the
     last plan, target, task, and result and is distinct from both claim types.
+
+## 5-Level Abstraction Hierarchy
+
+JEENOM's execution stack is organised into five named levels, each with a Motor and Sensory
+track. Claims are the universal I/O at every level boundary.
+
+| Level | Name      | Motor track                         | Sensory track                      | Schema type               |
+|-------|-----------|-------------------------------------|------------------------------------|---------------------------|
+| L0    | primitive | `move_forward`, `turn_right`, …     | `parse_grid_objects`, …            | `ACTION_PRIMITIVES` dict  |
+| L1    | command   | `navigate_to_object` (A* + execute) | `locate_object`, `verify_adjacent` | `MotorCommandTemplate` /  |
+|       |           |                                     |                                    | `SensoryCommandTemplate`  |
+| L2    | procedure | `go_to_object` step sequence        | (same procedure, sense track)      | `ProcedureContract`       |
+| L3    | task      | `go_to_object` with params+readiness| (same task, grounding applied)     | `TaskContract`            |
+| L4    | goal      | multi-task mission contract         | (same goal, abort-on-failure)      | `MissionContract`         |
+
+**Motor track**: Spine executes `MotorCommandTemplate` primitives. Cortex issues `MotorSkillRequest`
+(alias: `ExecutionContract`) to Spine after choosing the active skill.
+
+**Sensory track**: Sense executes `SensoryCommandTemplate` primitives. Cortex reads evidence
+needs from `SENSORY_COMMANDS` registry to build `EvidenceFrame` requests to Sense.
+
+**Claims**: Every level produces and consumes typed Claim objects (`ObservationClaim` for sensory
+outputs, `ExecutionClaim` for motor outputs). The Cortex internal store (`self.claims`) holds
+`ObservationClaim` values keyed by evidence name. `StationActiveClaims` are task-level claims
+held by the operator station (scene-fingerprinted, session-scoped). `KnowledgeBase` holds
+operator-asserted durable claims.

@@ -259,7 +259,15 @@ def _check_active_claims(checks: dict[str, bool]) -> None:
     checks["next_closest_resolves_ok"] = "CLAIM" in result_next.upper() or "door" in result_next.lower()
     checks["next_closest_no_adapter_reset"] = reset_calls == []
 
-    # 4. claims cleared on reset
+    # 4. other_door resolves from claims
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        s_other = _make_session()
+        s_other.handle_utterance("go to the red door")
+        s_other.handle_utterance("which door is closest by manhattan distance")
+        result_other = s_other.handle_utterance("the other door")
+    checks["other_door_resolves"] = result_other is not None and len(result_other) > 0
+
+    # 5. claims cleared on reset
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         s5 = _make_session()
         s5.handle_utterance("go to the red door")

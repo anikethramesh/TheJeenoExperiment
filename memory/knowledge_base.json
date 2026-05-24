@@ -1,10 +1,10 @@
 [
   {
-    "name": "bingo,",
-    "utterance": "go to the yellow door",
+    "name": "bingo",
+    "utterance": "automatically go to the yellow door",
     "plan": {
-      "request_id": "request:746235",
-      "original_utterance": "go to the yellow door",
+      "request_id": "request:472361",
+      "original_utterance": "automatically go to the yellow door",
       "objective_type": "task",
       "objective_summary": "Deterministic operator-intent fallback parsed a door navigation task.",
       "steps": [
@@ -36,6 +36,7 @@
         }
       ],
       "preservation_signals": [
+        "cardinality.all",
         "color.yellow",
         "object_type.door"
       ],
@@ -43,7 +44,58 @@
       "environment_assumptions": []
     },
     "stored_at": 1779362566.0032835,
-    "recall_count": 0,
-    "tags": []
+    "recall_count": 4,
+    "tags": [],
+    "concept_type": "atomic",
+    "steps": []
+  },
+  {
+    "name": "scout",
+    "utterance": "go to the green door",
+    "plan": {
+      "request_id": "request:828864",
+      "original_utterance": "go to the green door",
+      "objective_type": "task",
+      "objective_summary": "Deterministic operator-intent fallback parsed a door navigation task.",
+      "steps": [
+        {
+          "step_id": "execute_task",
+          "layer": "task",
+          "operation": "execute",
+          "required_handle": "task.go_to_object.door",
+          "implementation_status": null,
+          "inputs": {
+            "task_type": "go_to_object",
+            "object_type": "door"
+          },
+          "outputs": [
+            "task_result"
+          ],
+          "depends_on": [],
+          "constraints": {},
+          "tie_policy": "clarify",
+          "memory_reads": [],
+          "memory_writes": [
+            "episodic.last_request_plan",
+            "episodic.last_grounded_target",
+            "episodic.last_task",
+            "episodic.last_result"
+          ],
+          "scene_fingerprint_required": false,
+          "environment_assumption_ids": []
+        }
+      ],
+      "preservation_signals": [
+        "color.green",
+        "object_type.door"
+      ],
+      "expected_response": "execute_task",
+      "environment_assumptions": []
+    },
+    "stored_at": 1779391645.4780068,
+    "recall_count": 2,
+    "tags": [],
+    "concept_type": "atomic",
+    "steps": []
   }
 ]

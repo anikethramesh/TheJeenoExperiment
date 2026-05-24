@@ -14,7 +14,7 @@ from .memory import OperationalMemory
 from .minigrid_envs import ensure_custom_minigrid_envs_registered
 from .minigrid_adapter import MiniGridAdapter
 from .plan_cache import PlanCache, procedure_key
-from .primitive_library import TASK_PRIMITIVES
+from .primitive_library import ACTION_PRIMITIVES, TASK_PRIMITIVES
 from .schemas import (
     EvidenceFrame,
     ExecutionContext,
@@ -35,6 +35,47 @@ def build_env(env_id: str, render_mode: str | None):
         kwargs["render_mode"] = render_mode
     env = gym.make(env_id, **kwargs)
     return FullyObsWrapper(env)
+
+
+def run_motor_sequence(
+    env_id: str,
+    seed: int,
+    render_mode: str,
+    actions: list[str],
+) -> dict:
+    """Execute a sequence of motor-primitive actions directly, bypassing Cortex/Spine.
+
+    Each entry in `actions` must be a key in ACTION_PRIMITIVES with runtime_kind='env_action'.
+    Returns a result dict compatible with last_result (task_complete always True).
+    """
+    unknown = [a for a in actions if a not in ACTION_PRIMITIVES]
+    if unknown:
+        return {
+            "success": False,
+            "task_complete": False,
+            "error": f"Unknown motor action(s): {unknown}. Known: {sorted(ACTION_PRIMITIVES)}",
+            "actions_executed": [],
+            "steps_taken": 0,
+        }
+    env = build_env(env_id, render_mode)
+    adapter = MiniGridAdapter(env)
+    adapter.reset(seed=seed)
+    executed: list[str] = []
+    try:
+        for action_name in actions:
+            spec = ACTION_PRIMITIVES[action_name]
+            adapter.act(int(spec.runtime_value))
+            executed.append(action_name)
+    finally:
+        adapter.close()
+    return {
+        "success": True,
+        "task_complete": True,
+        "actions_executed": executed,
+        "steps_taken": len(executed),
+        "final_state": {"task_complete": True},
+        "task": {"instruction": " ".join(actions), "task_type": "motor_command"},
+    }
 
 
 def _is_llm_compiler(compiler: CompilerBackend) -> bool:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
+from .command_registry import DIRECT_ACTION_SKILLS, canonical_primitives_for_skill
 from .plan_cache import skill_key
 from .primitive_library import ACTION_PRIMITIVES
 from .schemas import ExecutionContext, ExecutionReport, PrimitiveCall, SkillPlanTemplate
@@ -14,15 +15,6 @@ DIR_TO_VEC = {
     3: (0, -1),
 }
 VEC_TO_DIR = {value: key for key, value in DIR_TO_VEC.items()}
-DIRECT_ACTION_SKILLS = {
-    "done",
-    "turn_left",
-    "turn_right",
-    "move_forward",
-    "pickup",
-    "drop",
-    "toggle",
-}
 
 
 class MiniGridSpine:
@@ -184,58 +176,30 @@ class MiniGridSpine:
             if primitive not in ACTION_PRIMITIVES:
                 raise RuntimeError(f"Unknown action primitive at runtime: {primitive}")
         skill = execution_contract.skill
-        if skill == "navigate_to_object" and template.primitives != [
-            "plan_grid_path",
-            "execute_next_path_action",
-        ]:
+        canonical = canonical_primitives_for_skill(skill)
+        if canonical is not None and template.primitives != canonical:
             raise RuntimeError(
-                "navigate_to_object skill templates must be exactly "
-                "['plan_grid_path', 'execute_next_path_action']"
+                f"{skill} skill templates must be exactly {canonical}"
             )
-        if skill == "done" and template.primitives != ["done"]:
-            raise RuntimeError("Done skill templates must be exactly ['done']")
-        if skill in DIRECT_ACTION_SKILLS and template.primitives != [skill]:
-            raise RuntimeError(f"Direct action skill templates must be exactly ['{skill}']")
 
     def _coerce_template_for_contract(self, execution_contract, template: SkillPlanTemplate) -> SkillPlanTemplate:
         skill = execution_contract.skill
-        if skill == "navigate_to_object" and template.primitives != [
-            "plan_grid_path",
-            "execute_next_path_action",
-        ]:
-            self.compiler.log("corrected invalid navigate_to_object skill template")
-            return SkillPlanTemplate(
-                primitives=["plan_grid_path", "execute_next_path_action"],
-                required_inputs=["agent_pose", "target_location", "occupancy_grid", "direction"],
-                produces=["execution_report", "execution_context"],
-                source=template.source,
-                compiler_backend=template.compiler_backend,
-                validated=True,
-                rationale="Corrected invalid navigate_to_object template to the canonical path plan.",
-            )
-        if skill == "done" and template.primitives != ["done"]:
-            self.compiler.log("corrected invalid done skill template")
-            return SkillPlanTemplate(
-                primitives=["done"],
-                required_inputs=["adjacency_to_target"],
-                produces=["execution_report", "execution_context"],
-                source=template.source,
-                compiler_backend=template.compiler_backend,
-                validated=True,
-                rationale="Corrected invalid done skill template to the canonical direct action.",
-            )
-        if skill in DIRECT_ACTION_SKILLS and template.primitives != [skill]:
-            self.compiler.log(f"corrected invalid direct action skill template: {skill}")
-            return SkillPlanTemplate(
-                primitives=[skill],
-                required_inputs=[],
-                produces=["execution_report", "execution_context"],
-                source=template.source,
-                compiler_backend=template.compiler_backend,
-                validated=True,
-                rationale="Corrected invalid direct action template to the canonical singleton action.",
-            )
-        return template
+        canonical = canonical_primitives_for_skill(skill)
+        if canonical is None or template.primitives == canonical:
+            return template
+        self.compiler.log(f"corrected invalid {skill} skill template")
+        from .command_registry import MOTOR_COMMANDS
+        cmd = MOTOR_COMMANDS.get(skill)
+        required_inputs = list(cmd.required_claims) if cmd else []
+        return SkillPlanTemplate(
+            primitives=canonical,
+            required_inputs=required_inputs,
+            produces=["execution_report", "execution_context"],
+            source=template.source,
+            compiler_backend=template.compiler_backend,
+            validated=True,
+            rationale=f"Corrected invalid {skill} template to canonical registry definition.",
+        )
 
     def _execute_env_action(self, action_name, execution_contract, runtime):
         action_spec = ACTION_PRIMITIVES.get(action_name)

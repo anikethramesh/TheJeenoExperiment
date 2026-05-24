@@ -132,6 +132,10 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
     color_ref = _run(lambda: s5.handle_utterance("go to the red one"))
     checks["ranked_display_returns_list"] = "DOORS RANKED BY MANHATTAN DISTANCE" in ranked
     checks["red_one_runs_from_claims"] = "RUN COMPLETE" in color_ref
+    checks["red_one_instruction"] = (
+        s5.last_result is not None
+        and s5.last_result["task"]["instruction"] == "go to the red door"
+    )
     checks.update(_task_guardrail_checks(s5, "red_one"))
 
     # 6. Second farthest tie does not degrade
@@ -140,6 +144,10 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
     checks["second_farthest_clarifies_tie"] = (
         "CLARIFY" in second_farthest
         and "ordinal falls inside a distance tie" in second_farthest
+    )
+    checks["second_farthest_options_are_rank_tie"] = (
+        "green door@(9,0)" in second_farthest
+        and "yellow door@(11,2)" in second_farthest
     )
     checks["second_farthest_did_not_execute"] = s6.last_result is None
 

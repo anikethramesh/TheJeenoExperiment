@@ -162,6 +162,40 @@ def canonical_task_params(
     }
 
 
+_MOTOR_ACTION_ALIASES: dict[str, re.Pattern[str]] = {
+    "move_forward": re.compile(
+        r"\b(?:go\s+(?:straight|forward)|move\s+forward|step\s+forward|walk\s+forward)\b"
+    ),
+    "turn_right": re.compile(r"\b(?:turn|rotate)\s+right\b"),
+    "turn_left":  re.compile(r"\b(?:turn|rotate)\s+left\b"),
+    "pickup":     re.compile(r"\b(?:pick\s+up|pickup|grab)\b"),
+    "toggle":     re.compile(r"\btoggle\b"),
+}
+
+_MOTOR_COUNT_WORDS: dict[str, int] = {
+    "once": 1, "one time": 1,
+    "twice": 2, "two times": 2,
+    "thrice": 3, "three times": 3,
+    "four times": 4, "five times": 5,
+    "six times": 6, "seven times": 7,
+    "eight times": 8, "nine times": 9, "ten times": 10,
+}
+
+
+def _parse_motor_command(normalized: str) -> tuple[str, int] | None:
+    """Return (action_name, count) if the utterance is a direct motor command, else None."""
+    for action_name, pattern in _MOTOR_ACTION_ALIASES.items():
+        if pattern.search(normalized):
+            m = re.search(r"\b(\d+)\b", normalized)
+            if m:
+                return action_name, int(m.group(1))
+            for phrase, val in _MOTOR_COUNT_WORDS.items():
+                if phrase in normalized:
+                    return action_name, val
+            return action_name, 1
+    return None
+
+
 class SmokeTestCompiler(CompilerBackend):
     name = "smoke_test_compiler"
 
@@ -456,6 +490,49 @@ class SmokeTestCompiler(CompilerBackend):
                     concept_utterance=cutterance,
                     confidence=0.8,
                     reason="Deterministic fallback matched bare 'X means Y' concept-teach pattern.",
+                )
+
+        # Sequential pattern detected BEFORE navigation/grounding checks.
+        # Structural shape (multi-step) must be determined before content-specific
+        # patterns run — door_match etc. would otherwise grab only the first step.
+        _seq_split_e = re.compile(r"\b(?:and\s+then|then|followed\s+by)\b")
+        _seq_pre_e = re.compile(
+            r"^\s*(?:(?:do|execute|run|perform|also)\s+)?(?:a\s+|the\s+|an\s+)?(?:first\s+)?"
+        )
+        _seq_suf_e = re.compile(r"\s+(?:first|next|also|too)\s*$")
+        _seq_parts_e = _seq_split_e.split(normalized)
+        if len(_seq_parts_e) >= 2:
+            _cleaned_e = [
+                _seq_suf_e.sub("", _seq_pre_e.sub("", p)).strip()
+                for p in _seq_parts_e
+            ]
+            _cleaned_e = [c for c in _cleaned_e if c]
+            if len(_cleaned_e) >= 2:
+                if all(re.match(r"^[a-z_][a-z0-9_]*$", c) for c in _cleaned_e):
+                    return OperatorIntent(
+                        intent_type="procedure_recall",
+                        concept_steps=_cleaned_e,
+                        confidence=0.8,
+                        reason="Deterministic operator-intent fallback detected sequential concept pattern.",
+                    )
+                else:
+                    return OperatorIntent(
+                        intent_type="sequence_instruction",
+                        utterance_steps=_cleaned_e,
+                        confidence=0.75,
+                        reason="Deterministic operator-intent fallback detected sequential utterance pattern.",
+                    )
+
+        # mission_contract: "mission: step1; step2[; step3...]" — explicit prefix, before door_match
+        _mission_m = re.match(r"^mission\s*:\s*(.+)$", normalized)
+        if _mission_m:
+            raw_steps = [s.strip() for s in _mission_m.group(1).split(";") if s.strip()]
+            if len(raw_steps) >= 2:
+                return OperatorIntent(
+                    intent_type="mission_contract",
+                    mission_steps=raw_steps,
+                    confidence=0.95,
+                    reason=f"Explicit mission contract with {len(raw_steps)} tasks.",
                 )
 
         color_pattern = r"red|green|blue|yellow|purple|grey|gray"
@@ -1156,6 +1233,19 @@ class SmokeTestCompiler(CompilerBackend):
                 reason="Deterministic operator-intent fallback parsed a last-run query.",
             )
 
+        # Motor-command pattern: "go straight for N steps", "turn right twice", etc.
+        # Matches before sequential detection to avoid mis-routing "go forward then turn right".
+        _motor = _parse_motor_command(normalized)
+        if _motor is not None:
+            action_name, count = _motor
+            return OperatorIntent(
+                intent_type="motor_command",
+                action_name=action_name,
+                repeat_count=count,
+                confidence=0.9,
+                reason=f"Deterministic motor command: {action_name} × {count}.",
+            )
+
         return OperatorIntent(
             intent_type="unsupported",
             target_selector=None,
@@ -1295,6 +1385,10 @@ class LLMCompiler(CompilerBackend):
                     "claim_reference",
                     "concept_teach",
                     "concept_recall",
+                    "procedure_recall",
+                    "sequence_instruction",
+                    "motor_command",
+                    "mission_contract",
                     "reset",
                     "quit",
                     "accept_proposal",
@@ -1460,10 +1554,33 @@ class LLMCompiler(CompilerBackend):
                 "like 'can you remember that', 'please remember this', 'remember that' from "
                 "concept_utterance. Strip leading modifiers like 'automatically', 'always', "
                 "'just', 'please' from concept_utterance. Set required_capabilities=[]. "
-                "When the operator invokes a known concept by name — e.g. 'bingo', "
+                "When the operator invokes a single known concept by name — e.g. 'bingo', "
                 "'run bingo', 'execute scout', 'do patrol' — emit intent_type='concept_recall' "
                 "with concept_name set to the label. The station will look up and execute "
                 "the stored concept. Set required_capabilities=[]. "
+                "When the operator requests multiple known concepts executed in sequence — "
+                "e.g. 'do bingo then scout', 'execute scout first and then bingo', "
+                "'run bingo followed by scout' — emit intent_type='procedure_recall' with "
+                "concept_steps set to the ordered list of short concept labels "
+                "(e.g. ['bingo', 'scout']). Use procedure_recall when each step is a "
+                "single-word shorthand label. Do NOT collapse this to a single "
+                "concept_recall. Do NOT try to execute the concepts yourself. "
+                "Set required_capabilities=[]. "
+                "When the operator requests a sequence of FULL TASK INSTRUCTIONS (not "
+                "named shorthand labels) — e.g. 'go to the red door then go to the green "
+                "door', 'navigate to the closest door and then go to the farthest one' — "
+                "emit intent_type='sequence_instruction' with utterance_steps set to the "
+                "ordered list of full task descriptions "
+                "(e.g. ['go to the red door', 'go to the green door']). "
+                "Use sequence_instruction when steps are multi-word task phrases, not "
+                "single-word labels. Set required_capabilities=[]. "
+                "When the operator issues a direct motor action — e.g. 'go straight for 3 steps', "
+                "'turn right twice', 'move forward once', 'turn left 4 times' — emit "
+                "intent_type='motor_command' with action_name set to the primitive key "
+                "('move_forward', 'turn_right', 'turn_left', 'pickup', 'toggle') and "
+                "repeat_count set to the integer count (default 1). Motor commands bypass "
+                "all task planning and execute the raw action directly. "
+                "Set required_capabilities=[]. "
                 "Do NOT classify concept-teach utterances as task_instruction. "
                 "Do NOT try to execute the concept's underlying instruction yourself. "
                 "Concepts listing query 'list concepts', 'what concepts do you know', "

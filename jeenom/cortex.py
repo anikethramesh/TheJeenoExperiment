@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Any
 
+from .command_registry import evidence_needs_for_step
 from .primitive_library import ACTION_PRIMITIVES, SENSING_PRIMITIVES, TASK_PRIMITIVES, produced_evidence
 from .schemas import (
     EvidenceFrame,
     ExecutionContract,
+    ObservationClaim,
     ReadinessReport,
     TraceEvent,
 )
@@ -64,7 +67,7 @@ class Cortex:
         self.compiler = compiler
         self.plan_cache = plan_cache
         self.readiness = Readiness(memory)
-        self.claims = {}
+        self._claims: dict[str, ObservationClaim] = {}
         self.trace: list[TraceEvent] = []
         self.task_request = None
         self.procedure = None
@@ -77,6 +80,29 @@ class Cortex:
             "last_report": None,
             "knowledge_override_active": False,
         }
+
+    # ── Claim accessors ────────────────────────────────────────────────────────
+
+    @property
+    def claims(self) -> dict[str, Any]:
+        """Raw-value view of the internal claim store (backward-compatible dict)."""
+        return {k: v.value for k, v in self._claims.items()}
+
+    def get_claim(self, key: str) -> Any:
+        """Return the raw value of claim `key`, or None if absent."""
+        claim = self._claims.get(key)
+        return claim.value if claim is not None else None
+
+    def set_claim(self, key: str, value: Any, source: str = "sense", level: str = "command") -> None:
+        """Store a raw value as a typed ObservationClaim."""
+        self._claims[key] = ObservationClaim(key=key, value=value, source=source, level=level)
+
+    def has_claim(self, key: str) -> bool:
+        """Return True if claim `key` is present and its value is truthy."""
+        claim = self._claims.get(key)
+        return claim is not None and bool(claim.value)
+
+    # ── Task lifecycle ─────────────────────────────────────────────────────────
 
     def onboard_task(self, task_request, procedure):
         readiness = self.readiness.check(procedure, substrate="minigrid")
@@ -119,14 +145,7 @@ class Cortex:
                 context=dict(self.resolved_task_params),
                 step_index=self.execution_state["step_index"],
             )
-        if active_step == "locate_object":
-            needs = ["object_location", "agent_pose", "occupancy_grid"]
-        elif active_step == "navigate_to_object":
-            needs = ["object_location", "agent_pose", "occupancy_grid", "adjacency_to_target"]
-        elif active_step == "verify_adjacent":
-            needs = ["agent_pose", "object_location", "adjacency_to_target"]
-        else:
-            needs = ["adjacency_to_target"]
+        needs = evidence_needs_for_step(active_step)
 
         frame = EvidenceFrame(
             needs=needs,
@@ -142,7 +161,8 @@ class Cortex:
         return frame
 
     def update_from_evidence(self, evidence, world_sample=None):
-        self.claims.update(evidence.claims)
+        for k, v in evidence.claims.items():
+            self.set_claim(k, v, source=evidence.source)
         if world_sample is not None:
             self.last_world_sample = world_sample
         self.record_trace(
@@ -172,12 +192,12 @@ class Cortex:
             return None
 
         params = dict(self.resolved_task_params)
-        params["target_location"] = self.claims.get("target_location")
+        params["target_location"] = self.get_claim("target_location")
 
         if active_step == "locate_object":
             skill = "turn_right"
         elif active_step in {"navigate_to_object", "verify_adjacent"}:
-            skill = "navigate_to_object" if self.claims.get("target_location") else "turn_right"
+            skill = "navigate_to_object" if self.get_claim("target_location") else "turn_right"
         elif active_step == "done":
             skill = "done"
         else:
@@ -259,9 +279,9 @@ class Cortex:
 
     def _step_complete(self, step_name):
         if step_name == "locate_object":
-            return bool(self.claims.get("target_location"))
+            return self.has_claim("target_location")
         if step_name in {"navigate_to_object", "verify_adjacent"}:
-            return bool(self.claims.get("adjacency_to_target"))
+            return self.has_claim("adjacency_to_target")
         if step_name == "done":
             return bool(self.execution_state.get("task_complete"))
         return False
