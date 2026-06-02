@@ -372,6 +372,7 @@ def run_episode(
     plan_cache: PlanCache | None = None,
     keep_render_open: bool = False,
     render_adapter: MiniGridAdapter | None = None,
+    skip_reset: bool = False,
     progress_callback=None,
     task_override: TaskRequest | None = None,
     procedure_override: ProcedureRecipe | None = None,
@@ -550,10 +551,14 @@ def run_episode(
         if adapter is None:
             env = build_env(env_id, render_mode)
             adapter = MiniGridAdapter(env)
-        observation = adapter.reset(seed=seed)
-        if aligned_target is not None:
-            adapter.retarget_to_object(aligned_target)
+        if skip_reset:
+            # Continue from current adapter state — window stays open, position preserved.
             observation = adapter.observe()
+        else:
+            observation = adapter.reset(seed=seed)
+            if aligned_target is not None:
+                adapter.retarget_to_object(aligned_target)
+                observation = adapter.observe()
         spine.adapter = adapter
         if progress_callback is not None:
             progress_callback("runtime_started", {"render_mode": render_mode})

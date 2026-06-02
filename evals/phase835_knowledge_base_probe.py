@@ -26,6 +26,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+from testing_utils import build_env as _build_env, make_session as _make_session
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -39,20 +40,8 @@ from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.operator_station import OperatorStationSession
 
 
-def _build_env(env_id: str, render_mode: str):
-    return FullyObsWrapper(gym.make(env_id))
 
 
-def _make_session(memory_root: Path, **kwargs) -> OperatorStationSession:
-    return OperatorStationSession(
-        compiler=SmokeTestCompiler(),
-        compiler_name="smoke",
-        env_id="MiniGrid-GoToDoor-8x8-v0",
-        seed=42,
-        render_mode="none",
-        memory_root=memory_root,
-        **kwargs,
-    )
 
 
 def main() -> int:

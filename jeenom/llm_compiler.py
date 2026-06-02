@@ -173,12 +173,21 @@ _MOTOR_ACTION_ALIASES: dict[str, re.Pattern[str]] = {
 }
 
 _MOTOR_COUNT_WORDS: dict[str, int] = {
-    "once": 1, "one time": 1,
-    "twice": 2, "two times": 2,
-    "thrice": 3, "three times": 3,
-    "four times": 4, "five times": 5,
-    "six times": 6, "seven times": 7,
-    "eight times": 8, "nine times": 9, "ten times": 10,
+    "once": 1, "one time": 1, "one step": 1,
+    "twice": 2, "two times": 2, "two steps": 2, "two step": 2,
+    "thrice": 3, "three times": 3, "three steps": 3, "three step": 3,
+    "four times": 4, "four steps": 4,
+    "five times": 5, "five steps": 5,
+    "six times": 6, "six steps": 6,
+    "seven times": 7, "seven steps": 7,
+    "eight times": 8, "eight steps": 8,
+    "nine times": 9, "nine steps": 9,
+    "ten times": 10, "ten steps": 10,
+}
+
+_WORD_TO_NUM: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
 }
 
 
@@ -192,8 +201,33 @@ def _parse_motor_command(normalized: str) -> tuple[str, int] | None:
             for phrase, val in _MOTOR_COUNT_WORDS.items():
                 if phrase in normalized:
                     return action_name, val
+            # Fallback: bare word number anywhere in the segment
+            for word, val in _WORD_TO_NUM.items():
+                if re.search(rf"\b{word}\b", normalized):
+                    return action_name, val
             return action_name, 1
     return None
+
+
+def _parse_motor_sequence(normalized: str) -> list[tuple[str, int]] | None:
+    """Return ordered (action, count) pairs when the utterance chains multiple motor actions.
+
+    Splits on 'and', 'then', 'and then'. Returns None if any segment is not a
+    recognised motor command, so non-motor utterances are never mis-routed.
+    """
+    parts = re.split(r"\band\s+then\b|\bthen\b|\band\b", normalized)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) < 2:
+        return None
+    results: list[tuple[str, int]] = []
+    for part in parts:
+        cmd = _parse_motor_command(part)
+        if cmd is None:
+            return None
+        results.append(cmd)
+    if len(results) < 2:
+        return None
+    return results
 
 
 class SmokeTestCompiler(CompilerBackend):
@@ -1233,9 +1267,29 @@ class SmokeTestCompiler(CompilerBackend):
                 reason="Deterministic operator-intent fallback parsed a last-run query.",
             )
 
+        # Expand implicit motor commands into explicit sequences
+        motor_text = normalized
+        motor_text = re.sub(r"\b(?:go|head|take a)\s+left\b", "turn left and go forward", motor_text)
+        motor_text = re.sub(r"\b(?:go|head|take a)\s+right\b", "turn right and go forward", motor_text)
+        motor_text = re.sub(r"\b(?:go|head)\s+back(?:wards?)?\b", "turn right twice and go forward", motor_text)
+        motor_text = re.sub(r"\bturn\s+around\b", "turn right twice", motor_text)
+        motor_text = re.sub(r"\b(?:turn|rotate)\b(?!\s+(?:left|right|around))", "turn right ", motor_text)
+
+        # Multi-motor sequence: "turn right once, and go straight two times"
+        # Must be checked BEFORE single motor so the compound isn't truncated to one action.
+        _motor_seq = _parse_motor_sequence(motor_text)
+        if _motor_seq is not None:
+            # Encode each step as "action_name:count" in utterance_steps for lossless transport.
+            seq_steps = [f"{a}:{c}" for a, c in _motor_seq]
+            return OperatorIntent(
+                intent_type="motor_sequence",
+                utterance_steps=seq_steps,
+                confidence=0.92,
+                reason=f"Multi-motor sequence: {len(_motor_seq)} actions.",
+            )
+
         # Motor-command pattern: "go straight for N steps", "turn right twice", etc.
-        # Matches before sequential detection to avoid mis-routing "go forward then turn right".
-        _motor = _parse_motor_command(normalized)
+        _motor = _parse_motor_command(motor_text)
         if _motor is not None:
             action_name, count = _motor
             return OperatorIntent(

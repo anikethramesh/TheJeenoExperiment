@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 from pprint import pprint
 from unittest.mock import patch
+from testing_utils import build_env as _build_env, make_session as _make_session
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -42,20 +43,8 @@ SEED = 8
 RANKED_HANDLE = "grounding.all_doors.ranked.manhattan.agent"
 
 
-def _build_env(env_id: str, render_mode: str):
-    return FullyObsWrapper(gym.make(env_id))
 
 
-def _make_session(*, seed: int = SEED) -> OperatorStationSession:
-    return OperatorStationSession(
-        compiler=SmokeTestCompiler(),
-        compiler_name="smoke",
-        env_id=ENV_ID,
-        seed=seed,
-        render_mode="none",
-        memory_root=Path(tempfile.mkdtemp()),
-        max_loops=512,
-    )
 
 
 def _run(fn):
@@ -76,7 +65,7 @@ def _task_guardrail_checks(session: OperatorStationSession, prefix: str) -> dict
 
 def _check_grounding_composition(checks: dict[str, bool]) -> None:
     # 1. Compose closest+farthest answer from ranked claims
-    s1 = _make_session()
+    s1 = _make_session(env_id=ENV_ID, seed=SEED)
     response = _run(lambda: s1.handle_utterance("which door is closest and which is farthest"))
     checks["closest_farthest_answer"] = "GROUNDING ANSWER" in response
     checks["closest_answer_has_purple"] = "closest=purple door@(4,0) distance=5" in response
@@ -92,7 +81,7 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
     checks["answer_did_not_execute"] = s1.last_result is None
 
     # 2. Farthest task must clarify on tie, then execute after choice
-    s2 = _make_session()
+    s2 = _make_session(env_id=ENV_ID, seed=SEED)
     clarify = _run(lambda: s2.handle_utterance("go to the farthest door"))
     checks["farthest_task_clarifies_on_tie"] = (
         "CLARIFY" in clarify and "multiple farthest" in clarify
@@ -107,7 +96,7 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
     checks.update(_task_guardrail_checks(s2, "farthest_red"))
 
     # 3. Second closest composes ranked[1] into go_to_object task
-    s3 = _make_session()
+    s3 = _make_session(env_id=ENV_ID, seed=SEED)
     second = _run(lambda: s3.handle_utterance("go to the second closest door"))
     checks["second_closest_runs"] = "RUN COMPLETE" in second
     checks["second_closest_is_yellow"] = (
@@ -117,7 +106,7 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
     checks.update(_task_guardrail_checks(s3, "second_closest"))
 
     # 4. Distance reference composes from ranked claims
-    s4 = _make_session()
+    s4 = _make_session(env_id=ENV_ID, seed=SEED)
     distance = _run(lambda: s4.handle_utterance("go to the door with a distance of 7"))
     checks["distance_7_runs"] = "RUN COMPLETE" in distance
     checks["distance_7_is_yellow"] = (
@@ -127,7 +116,7 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
     checks.update(_task_guardrail_checks(s4, "distance_7"))
 
     # 5. Ranked display then color reference
-    s5 = _make_session()
+    s5 = _make_session(env_id=ENV_ID, seed=SEED)
     ranked = _run(lambda: s5.handle_utterance("rank all the doors by manhattan distance"))
     color_ref = _run(lambda: s5.handle_utterance("go to the red one"))
     checks["ranked_display_returns_list"] = "DOORS RANKED BY MANHATTAN DISTANCE" in ranked
@@ -139,7 +128,7 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
     checks.update(_task_guardrail_checks(s5, "red_one"))
 
     # 6. Second farthest tie does not degrade
-    s6 = _make_session(seed=12)
+    s6 = _make_session(env_id=ENV_ID, seed=12)
     second_farthest = _run(lambda: s6.handle_utterance("can you navigate to the second farthest door"))
     checks["second_farthest_clarifies_tie"] = (
         "CLARIFY" in second_farthest

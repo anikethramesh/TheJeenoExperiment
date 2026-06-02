@@ -25,6 +25,7 @@ from .knowledge_base import KnowledgeBase, NamedConcept
 from .mismatch import MismatchDetector, OperationalMismatch, default_detector
 from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .primitive_library import ACTION_PRIMITIVES, TASK_PRIMITIVES
+from .repair_loop import RepairEvent, RepairLoop
 from .schemas import (
     ArbitrationTrace,
     EnvironmentIdentity,
@@ -415,6 +416,7 @@ class OperatorStationSession:
         )
         self.last_plan_reuse_verdict: ReuseVerdict | None = None
         self.last_operational_mismatches: list[OperationalMismatch] = []
+        self.last_repair_events: list[RepairEvent] = []
         # KB lives alongside knowledge.yaml in memory_dir (always persistent)
         self.knowledge_base = KnowledgeBase(
             storage_path=self.memory.memory_dir / "knowledge_base.json"
@@ -504,6 +506,8 @@ class OperatorStationSession:
             return self._run_motor_command(
                 command.payload["action"], command.payload["count"], command.utterance
             )
+        if command.kind == "motor_sequence_execute":
+            return self._run_motor_sequence_command(command.payload["sequence"], command.utterance)
         if command.kind == "mission_execute":
             return self._run_mission(command.payload["steps"], command.utterance)
         if command.kind == "unresolved":
@@ -548,6 +552,8 @@ class OperatorStationSession:
             return self._run_motor_command(
                 command.payload["action"], command.payload["count"], command.utterance
             )
+        if command.kind == "motor_sequence_execute":
+            return self._run_motor_sequence_command(command.payload["sequence"], command.utterance)
         if command.kind == "mission_execute":
             return self._run_mission(command.payload["steps"], command.utterance)
         if command.kind == "cache_query":
@@ -768,6 +774,31 @@ class OperatorStationSession:
                 kind="motor_execute",
                 utterance=utterance,
                 payload={"action": action, "count": count},
+            )
+
+        if intent.intent_type == "motor_sequence":
+            sequence: list[dict[str, Any]] = []
+            for step in (intent.utterance_steps or []):
+                parts = step.split(":", 1)
+                if len(parts) != 2:
+                    continue
+                action_name, count_str = parts
+                try:
+                    action_count = max(1, int(count_str))
+                except ValueError:
+                    continue
+                sequence.append({"action": action_name, "count": action_count})
+            if len(sequence) < 2:
+                return OperatorCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={"message": "Could not parse motor sequence steps."},
+                )
+            self.log(f"motor_sequence: {len(sequence)} actions")
+            return OperatorCommand(
+                kind="motor_sequence_execute",
+                utterance=utterance,
+                payload={"sequence": sequence},
             )
 
         if intent.intent_type == "mission_contract":
@@ -1047,6 +1078,26 @@ class OperatorStationSession:
             self.request_plan_reuse_cache.store(fresh_plan)
 
         self._run_mismatch_detection(fresh_plan)
+        
+        if self.last_operational_mismatches and readiness_graph.graph_status != "executable":
+            repair_loop = RepairLoop(self)
+            self.last_repair_events = repair_loop.attempt_repair(self.last_operational_mismatches)
+            
+            if any(event.success for event in self.last_repair_events):
+                self.log("repair successful, re-evaluating readiness graph")
+                claims_valid = self._claims_valid_for_current_environment()
+                readiness_graph = evaluate_request_plan(
+                    fresh_plan,
+                    registry=self.capability_registry,
+                    active_claims=self.active_claims,
+                    claims_valid=claims_valid,
+                    environment_identity=self.current_environment_identity,
+                )
+                self.last_readiness_graph = readiness_graph
+                self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+                if readiness_graph.graph_status == "executable":
+                    self.request_plan_reuse_cache.store(fresh_plan)
+
         self.log(
             "request plan: "
             f"steps={len(fresh_plan.steps)} "
@@ -4128,9 +4179,15 @@ class OperatorStationSession:
             )
             self.log(f"composed procedure steps={procedure_override.steps}")
         render_adapter = self.preview_adapter
+        skip_reset = False
         self.preview_adapter = None
         if render_adapter is None:
-            self.close_task_window()
+            if self.task_adapter is not None and self.render_mode == "human":
+                # Continue from the live session adapter without resetting.
+                render_adapter = self.task_adapter
+                skip_reset = True
+            else:
+                self.close_task_window()
         elif self.task_adapter is not None and self.task_adapter is not render_adapter:
             self.close_task_window()
         self.last_result = run_demo.run_episode(
@@ -4147,6 +4204,7 @@ class OperatorStationSession:
             prewarm=True,
             keep_render_open=self.render_mode == "human",
             render_adapter=render_adapter,
+            skip_reset=skip_reset,
             progress_callback=self._progress_callback,
             task_override=task_override,
             procedure_override=procedure_override,
@@ -4595,15 +4653,50 @@ class OperatorStationSession:
             )
         actions = [action_name] * count
         self.log(f"motor_execute: {action_name} × {count}")
-        result = run_demo.run_motor_sequence(
-            env_id=self.env_id,
-            seed=self.seed,
-            render_mode=self.render_mode,
-            actions=actions,
-        )
+        if self.render_mode == "human":
+            # Act on the persistent session adapter — no reset, window stays open.
+            adapter = self.task_adapter or self.preview_adapter
+            if adapter is None:
+                env = run_demo.build_env(self.env_id, self.render_mode)
+                adapter = MiniGridAdapter(env)
+                adapter.reset(seed=self.seed)
+                self.task_adapter = adapter
+            executed: list[str] = []
+            for a in actions:
+                spec = ACTION_PRIMITIVES[a]
+                adapter.act(int(spec.runtime_value))
+                executed.append(a)
+            result: dict[str, Any] = {
+                "success": True,
+                "task_complete": True,
+                "actions_executed": executed,
+                "steps_taken": len(executed),
+                "final_state": {"task_complete": True},
+                "task": {"instruction": " ".join(actions), "task_type": "motor_command"},
+            }
+        else:
+            result = run_demo.run_motor_sequence(
+                env_id=self.env_id,
+                seed=self.seed,
+                render_mode=self.render_mode,
+                actions=actions,
+            )
         self.last_result = result
         label = action_name.replace("_", " ")
         return f"MOTOR COMPLETE ({label} × {count}): {result.get('steps_taken', count)} steps executed."
+
+    def _run_motor_sequence_command(
+        self, sequence: list[dict[str, Any]], original_utterance: str
+    ) -> str:
+        """Execute an ordered list of motor actions on the persistent session adapter."""
+        parts: list[str] = []
+        for step in sequence:
+            action_name = step["action"]
+            count = step["count"]
+            self.log(f"motor_sequence step: {action_name} × {count}")
+            result_text = self._run_motor_command(action_name, count, original_utterance)
+            parts.append(result_text)
+        return "MOTOR SEQUENCE\n" + "\n".join(parts)
 
     def _run_mission(self, steps: list[str], original_utterance: str) -> str:
         """Execute a mission contract — ordered tasks with abort-on-failure semantics."""

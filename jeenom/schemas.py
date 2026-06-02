@@ -53,6 +53,7 @@ OPERATOR_INTENT_TYPES = (
     "procedure_recall",
     "sequence_instruction",
     "motor_command",
+    "motor_sequence",
     "mission_contract",
     "reset",
     "quit",

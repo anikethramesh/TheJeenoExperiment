@@ -25,6 +25,7 @@ import tempfile
 from pathlib import Path
 from pprint import pprint
 from unittest.mock import patch
+from testing_utils import build_env as _build_env, make_session as _make_session
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -49,15 +50,6 @@ from jeenom.operator_station import OperatorStationSession
 from jeenom.schemas import OperatorIntent
 
 
-def _make_session() -> OperatorStationSession:
-    return OperatorStationSession(
-        compiler=SmokeTestCompiler(),
-        compiler_name="smoke",
-        env_id="MiniGrid-GoToDoor-8x8-v0",
-        seed=42,
-        render_mode="none",
-        memory_root=Path(tempfile.mkdtemp()),
-    )
 
 
 def _run(fn):

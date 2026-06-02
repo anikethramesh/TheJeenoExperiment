@@ -23,6 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+from testing_utils import build_env as _build_env, make_session as _make_session
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -37,25 +38,8 @@ from jeenom.operator_station import OperatorStationSession
 from jeenom.plan_reuse import PlanReuseCache, plan_semantic_key
 
 
-def _build_env(env_id: str, render_mode: str):
-    return FullyObsWrapper(gym.make(env_id))
 
 
-def _make_session(
-    *,
-    env_id: str = "MiniGrid-GoToDoor-8x8-v0",
-    seed: int = 42,
-    reuse_cache: PlanReuseCache | None = None,
-) -> OperatorStationSession:
-    return OperatorStationSession(
-        compiler=SmokeTestCompiler(),
-        compiler_name="smoke",
-        env_id=env_id,
-        seed=seed,
-        render_mode="none",
-        memory_root=Path(tempfile.mkdtemp()),
-        request_plan_reuse_cache=reuse_cache,
-    )
 
 
 # Utterance that produces an immediately executable plan (full metric specified).
@@ -72,7 +56,7 @@ def main() -> int:
         # Prime identity first so the stored plan carries environment assumptions
         # that can later be evaluated against other environments.
         shared_cache = PlanReuseCache()
-        session1 = _make_session(seed=42, reuse_cache=shared_cache)
+        session1 = _make_session(seed=42, request_plan_reuse_cache=shared_cache)
         session1.handle_utterance("what doors do you see?")
         session1.handle_utterance(RANKED_UTTERANCE)
 
@@ -80,7 +64,7 @@ def main() -> int:
 
         # ── Stage 2: Determinism — same utterance → same key ─────────────────
         plan1 = session1.last_request_plan
-        session1b = _make_session(seed=42, reuse_cache=PlanReuseCache())
+        session1b = _make_session(seed=42, request_plan_reuse_cache=PlanReuseCache())
         session1b.handle_utterance(RANKED_UTTERANCE)
         plan1b = session1b.last_request_plan
 
@@ -94,7 +78,7 @@ def main() -> int:
         # Pass the shared_cache so session2 can find session1's stored plan.
         # Prime the scene model first so current_environment_identity is set
         # before the ranked query triggers the cache lookup.
-        session2 = _make_session(seed=43, reuse_cache=shared_cache)
+        session2 = _make_session(seed=43, request_plan_reuse_cache=shared_cache)
         session2.handle_utterance("what doors do you see?")
         session2.handle_utterance(RANKED_UTTERANCE)
 
@@ -117,7 +101,7 @@ def main() -> int:
         session3 = _make_session(
             env_id="MiniGrid-GoToDoor-16x16-v0",
             seed=42,
-            reuse_cache=shared_cache,
+            request_plan_reuse_cache=shared_cache,
         )
         session3.handle_utterance("what doors do you see?")
         session3.handle_utterance(RANKED_UTTERANCE)
