@@ -1,70 +1,119 @@
-# TLDR
+# JEENO
 
-While world models and robot policies are getting increasingly more powerful, the deployment of robots is something we still need to do case by case. This is called the **deployment friction problem** in robotics.
+Just-In-Time Embodied Execution Networked Operational Model
 
-The main reason this happens is that robots don't have **cognition**. That is, they can't build an understanding of the world that binds together their perception and action capabilities. JEENO is an experiment in building robot understanding as an **externalised, queryable, and auditable layer**.
+JEENO is an experiment in reducing deployment friction for embodied agents. The
+core idea is that a robot or simulator should expose its primitives, while a
+separate understanding layer handles operator intent, grounding, memory,
+readiness, and safe execution.
 
-JEENO will enable a robot to have:
+The broader JEENO vision is an externalized, queryable, and auditable cognition
+layer for robots. This repository is the JEENO prototype of that idea, currently
+tested in MiniGrid.
 
-- a **persistent task representation** that survives across turns and across deployments
-- the ability to **ask the right clarifying question** when a brief is ambiguous, rather than guessing or failing
-- an **inspectable understanding** that an operator can query, correct, and re-ground in real time
+## Current Status
 
-**The Vision:** Any new robot can register itself with JEENO by exposing its primitives — and the understanding layer runs on top, unchanged. 
+JEENO is an architecture prototype in MiniGrid and is entering **Phase 9:
+Cleanup**. The system is no longer just a door-navigation demo, but it is also
+not production-ready. The next priority is to clean up architectural leaks and
+make the eval suite a trustworthy gate before adding new capability.
 
+Implemented so far:
 
-# JEENO (Just-In-Time Embodied Execution Networked Operational Model)
+- Natural-language operator station for task, memory, status, concept, sequence,
+  motor, and mission requests.
+- Typed LLM compiler boundary: LLMs emit schema objects; runtime validates and
+  executes deterministic primitives.
+- Capability registry and command registry over task, grounding, sensing, action,
+  and claims primitives.
+- Intent verification, capability matching, and arbitration to avoid silent
+  capability degradation.
+- Scene model, grounding claims, durable operator claims, episodic memory, and
+  named concepts.
+- Typed `RequestPlan` and `ReadinessGraph` for decomposing requests before
+  clarification, synthesis, answer generation, memory updates, or execution.
+- Plan reuse, environment assumptions, stale-claim detection, mismatch detection,
+  and early repair-loop scaffolding.
+- JIT procedure/sense/skill template caching with the invariant that rendered
+  runtime execution should not make LLM calls.
+- Safe synthesis scaffolding for pure grounding/query primitives, with validation
+  before registration.
+- Explicit 5-level abstraction hierarchy: primitive, command, procedure, task,
+  and goal/mission.
 
+Known cleanup work:
 
-JEENO is an advanced, agentic capability architecture currently being built and tested within the [MiniGrid](https://minigrid.farama.org/) gridworld environment. It translates natural language instructions into validated, executable intents through an LLM compiler, grounding requests against a persistent scene model and a rigid capability registry. 
+- Unsupported task requests can currently leak through direct motor commands in
+  some paths, for example pickup-like utterances.
+- The repair loop records some repairs but does not yet reliably re-dispatch the
+  repaired request.
+- Repeat/reference behavior has drifted toward continuous-world adapter reuse,
+  while the documented current semantics still assume fresh task episodes.
+- `eval_master.py` does not catch all regressions that the project-local tests
+  catch.
+- Harder MiniGrid domains and robot ports remain future work.
 
-## Features
+Until Phase 9 is complete, current evals should be treated as useful probes, not
+full architectural proof.
 
-- **Natural Language Operator Station:** A CLI interface to interact with the agent ("go to the red door", "which door is closest by manhattan distance?", "go to the delivery target").
-- **LLM Intent Compiler:** Parses fuzzy user utterances into typed, validated intents without directly executing unsafe actions.
-- **Capability Arbitration & Verification:** Evaluates what the LLM *wants* to do against a registered manifest of *actual* capabilities, automatically asking the user for clarification (e.g., "Which distance metric?") or refusing unsupported requests.
-- **Persistent Scene Model & Memory:** Maintains episodic memory of prior grounded targets ("go to the next closest one") and durable knowledge ("the red door is the delivery target").
-- **Deterministic Execution:** Uses a prewarmed caching system to execute tasks quickly without making any runtime LLM calls during the rendering loop.
+## Architecture Invariants
 
-## Environment Compatibility
+- LLM compiler outputs are typed schema objects only.
+- The runtime validates and executes; unknown primitives are rejected or routed
+  through explicit repair/synthesis paths.
+- No LLM calls are allowed inside the rendered control loop.
+- `RequestPlan` and `ReadinessGraph` are the execution-control plane, not raw
+  operator text.
+- Grounding claims are session-scoped and scene-fingerprinted.
+- Operator claims are durable and invalidated only by explicit operator action.
+- Invalid or stale plan/claim reuse must never execute silently.
 
-JEENOM is currently configured to run with **MiniGrid**, which is itself a **Gymnasium** environment. 
-- **Using other Gymnasium environments:** Because JEENOM interacts through standard Gymnasium spaces and a modular `CapabilityRegistry`, it can be adapted to work with any Gymnasium environment. To do so, you simply need to implement the corresponding observation/action primitives in `primitive_library.py` and register them in your capability manifest.
+## Environment
 
-## Planned Scope of Work
+JEENO currently runs on MiniGrid through Gymnasium. A future robot or simulator
+port should start by registering the substrate's actual primitives and bindings,
+then reusing the same intent, readiness, claims, and execution-control layers.
 
-We're currently at:
-- **Phase 8 (General Object Handling):** Expanding beyond door navigation to general objects, enabling tasks like "pick up the red key" or "unlock the blue door".
+## Running
 
-Future phases:
-- **Phase 9 (Operator Correction):** Supporting mid-run execution interruptions and corrections.
-- **Phase 10 (Multi-Step Task Planning):** Allowing the compiler to compose multi-step action plans from sequential natural language requests.
-- **Phase 11 (Continuous World Execution):** Moving away from independent, isolated episodes to a continuous world model where the agent accumulates state without environment resets.
+Install the basic dependencies:
 
-
-## Installation and Usage
-
-### Requirements
-Ensure you have Python installed, along with the required dependencies:
 ```bash
 pip install gymnasium minigrid
 ```
 
-If you plan to use the live LLM compiler instead of the deterministic smoke-test fallback, you will need to set an OpenRouter API key:
-```bash
-export OPENROUTER_API_KEY="your-api-key-here"
-```
-*(Note: JEENOM currently uses OpenRouter to multiplex LLM models. If you want to use a direct Anthropic (`ClaudeCode`) or OpenAI (`CodexKey`) API key instead of OpenRouter, you must either route those requests through your OpenRouter account, or manually update the endpoint URL in `jeenom/llm_compiler.py` to point to the respective provider's API).*
+Run the operator station:
 
-### Running the Operator Station
-To interact with JEENOM, run the interactive operator station:
 ```bash
 python run_operator_station.py
 ```
 
-### Running Evaluations
-To verify that the system is functioning correctly, you can run the master evaluation suite:
+For live LLM compilation, set an OpenRouter API key:
+
+```bash
+export OPENROUTER_API_KEY="your-api-key-here"
+```
+
+Without an API key, many probes use the deterministic smoke-test compiler.
+
+## Verification
+
+Run the eval suite:
+
 ```bash
 python evals/eval_master.py
 ```
-*(Note: If `OPENROUTER_API_KEY` is not set, the eval suite will automatically fall back to the deterministic smoke-test compiler for tests that support it).*
+
+Run the project-local tests:
+
+```bash
+python -m pytest -q tests
+```
+
+Avoid treating whole-repo `pytest` as the primary project signal right now,
+because the local `Minigrid/` tree can introduce unrelated dependency noise.
+
+At the start of Phase 9 Cleanup, the known state is:
+
+- `eval_master.py`: 31/32 passing; `phase91_operational_repair_probe.py` failing.
+- `python -m pytest -q tests`: 153 passed, 7 failed.
