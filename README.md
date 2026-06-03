@@ -13,10 +13,12 @@ tested in MiniGrid.
 
 ## Current Status
 
-JEENO is an architecture prototype in MiniGrid and is entering **Phase 9:
-Cleanup**. The system is no longer just a door-navigation demo, but it is also
-not production-ready. The next priority is to clean up architectural leaks and
-make the eval suite a trustworthy gate before adding new capability.
+JEENO is an architecture prototype in MiniGrid. **Phase 9A Cleanup** restored
+the immediate safety/readiness gates; **Phase 9B: Substrate Contract
+Foundation** now adds the first generic primitive-contract gates. The goal is to
+make primitive contracts explicit before Phase 10 hardening, so JEENO can become
+retrofit cognition for arbitrary robots and stacks rather than a cleaner
+MiniGrid controller.
 
 Implemented so far:
 
@@ -43,18 +45,18 @@ Implemented so far:
 
 Known cleanup work:
 
-- Unsupported task requests can currently leak through direct motor commands in
-  some paths, for example pickup-like utterances.
-- The repair loop records some repairs but does not yet reliably re-dispatch the
-  repaired request.
-- Repeat/reference behavior has drifted toward continuous-world adapter reuse,
-  while the documented current semantics still assume fresh task episodes.
-- `eval_master.py` does not catch all regressions that the project-local tests
-  catch.
+- Phase 9A issues around motor leakage, request/readiness recording, repair
+  truthfulness, episode semantics, and eval coverage are fixed in the current
+  baseline.
+- Phase 9B now has initial substrate-contract gates for authority, safety class,
+  claim confidence/frame matching, validation hooks, and
+  substrate/config/tool/calibration reuse invalidation.
+- Phase 9B still needs broader conformance/fuzz coverage and real non-MiniGrid
+  adapter pressure before robot-port claims are credible.
 - Harder MiniGrid domains and robot ports remain future work.
 
-Until Phase 9 is complete, current evals should be treated as useful probes, not
-full architectural proof.
+Until Phase 9B is complete, current evals should be treated as useful probes,
+not full architectural proof for arbitrary robots.
 
 ## Architecture Invariants
 
@@ -67,12 +69,17 @@ full architectural proof.
 - Grounding claims are session-scoped and scene-fingerprinted.
 - Operator claims are durable and invalidated only by explicit operator action.
 - Invalid or stale plan/claim reuse must never execute silently.
+- Substrate primitives are contractual objects, not string handles. Readiness
+  must check preconditions, effects, required/produced claims, frames/units,
+  safety class, authority, failure modes, validation hooks, and substrate
+  fingerprint assumptions.
 
 ## Environment
 
 JEENO currently runs on MiniGrid through Gymnasium. A future robot or simulator
-port should start by registering the substrate's actual primitives and bindings,
-then reusing the same intent, readiness, claims, and execution-control layers.
+port should start by registering the substrate's actual primitive contracts and
+bindings, then reusing the same intent, readiness, claims, and execution-control
+layers.
 
 ## Running
 
@@ -125,10 +132,10 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-At the start of Phase 9 Cleanup, the known state is:
+Current baseline after the initial Phase 9B substrate-contract slice:
 
-- `eval_master.py`: 31/32 passing; `phase91_operational_repair_probe.py` failing.
-- `python -m pytest -q tests`: 153 passed, 7 failed.
+- `python evals/eval_master.py`: 37/37 passing.
+- `python -m pytest -q tests`: 165 passed.
 
-After adding the Phase 9 cleanup probes, `eval_master.py --suite cleanup` is
-expected to be red until the cleanup issues are fixed.
+Phase 9B substrate-contract probes are now part of the cleanup/architecture gate
+before Phase 10 operational hardening.

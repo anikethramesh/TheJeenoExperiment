@@ -90,6 +90,24 @@
     not an operator claim unless the operator promotes it. Episodic memory stores the
     last plan, target, task, and result and is distinct from both claim types.
 
+11. Substrate primitives are contractual objects, not string handles.
+    Any robot, simulator, or tool stack must expose primitive metadata before JEENOM can
+    compose it. The metadata must describe:
+
+    - required claims and produced claims
+    - preconditions and postconditions/effects
+    - units and reference frames
+    - safety class and authority level
+    - known failure modes
+    - validation hooks for shadow/simulation/preflight checks
+    - substrate/config/tool/calibration fingerprints that affect reuse
+
+    The ReadinessGraph gates execution on this contract metadata. A primitive that is
+    present and implemented can still be blocked if authority is missing, a required
+    validation hook is absent, a claim is stale or low-confidence, or a frame/unit
+    assumption does not match. This is the Phase 9B foundation for JEENOM as retrofit
+    cognition rather than a MiniGrid-specific controller.
+
 ## 5-Level Abstraction Hierarchy
 
 JEENOM's execution stack is organised into five named levels, each with a Motor and Sensory
@@ -115,3 +133,8 @@ outputs, `ExecutionClaim` for motor outputs). The Cortex internal store (`self.c
 `ObservationClaim` values keyed by evidence name. `StationActiveClaims` are task-level claims
 held by the operator station (scene-fingerprinted, session-scoped). `KnowledgeBase` holds
 operator-asserted durable claims.
+
+**Substrate contract**: Every L0 primitive and L1 command is backed by a
+`PrimitiveSpec`/manifest contract. MiniGrid fills this from its grid primitives today; a
+robot port must fill the same contract from its real controllers, sensors, frames, and
+safety preflight checks.

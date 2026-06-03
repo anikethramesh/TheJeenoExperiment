@@ -7,10 +7,17 @@ flowchart TD
   Start["Operator utterance"] --> CompileIntent["LLM / deterministic compile_operator_intent<br>utterance → OperatorIntent schema"]
   CompileIntent --> VerifyIntent["IntentVerifier<br>semantic preservation signals<br>superlative / ordinal / metric / negation / cardinality"]
   VerifyIntent --> RequestPlan["RequestPlan compiler<br>objective → typed dependency graph<br>grounding / claims / selector / task / answer"]
-  RequestPlan --> Readiness["ReadinessGraph<br>evaluate each plan node against<br>CapabilityRegistry + Memory + ActiveClaims + SceneModel"]
+  RequestPlan --> ContractLoad["Substrate contract manifest<br>primitive pre/postconditions<br>claims / frames / units<br>safety / authority / validators"]
+  ContractLoad --> Readiness["ReadinessGraph<br>evaluate each plan node against<br>CapabilityRegistry + contracts + Memory + ActiveClaims + SceneModel"]
 
   Readiness -->|needs clarification| Ask["Ask one narrow clarification<br>store pending RequestPlan"]
   Ask --> Start
+
+  Readiness -->|missing authority| AskAuthority["Ask / require operator authority<br>do not execute"]
+  AskAuthority --> Start
+
+  Readiness -->|contract mismatch| ContractBlock["Report failed primitive contract<br>frame / unit / claim / validation issue"]
+  ContractBlock --> Start
 
   Readiness -->|stale or missing claims| RefreshClaims["Refresh / compute ActiveClaims<br>using registered grounding primitives"]
   RefreshClaims --> Readiness
@@ -35,7 +42,8 @@ flowchart TD
 
   Prewarm --> Cache["PlanCache<br>ProcedureRecipe<br>SensePlanTemplate<br>SkillPlanTemplate"]
 
-  Cache --> Loop["Runtime control loop<br>NO LLM during render"]
+  Cache --> Preflight["Contract preflight<br>validation hooks / shadow checks<br>no unsafe schema-only execution"]
+  Preflight --> Loop["Runtime control loop<br>NO LLM during render"]
 
   Loop --> EF["Cortex creates EvidenceFrame"]
   EF --> SenseCache{"Sense template cached?"}

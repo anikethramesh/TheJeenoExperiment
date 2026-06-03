@@ -17,6 +17,18 @@ class PrimitiveSpec:
     required_action_primitives: tuple[str, ...] = ()
     runtime_kind: str | None = None
     runtime_value: int | str | None = None
+    preconditions: tuple[str, ...] = ()
+    postconditions: tuple[str, ...] = ()
+    required_claims: tuple[str, ...] = ()
+    produced_claims: tuple[str, ...] = ()
+    units: dict[str, Any] = field(default_factory=dict)
+    frame_id: str | None = None
+    required_frames: tuple[str, ...] = ()
+    safety_class: str = "query"
+    authority_level: str = "none"
+    failure_modes: tuple[str, ...] = ()
+    validation_hooks: tuple[str, ...] = ()
+    substrate_fingerprint: str | None = None
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -213,6 +225,16 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         side_effects=("moves_agent",),
         runtime_kind="python",
         runtime_value="execute_next_path_action",
+        preconditions=("planned_action_names is non-empty",),
+        postconditions=("agent pose may change",),
+        required_claims=("planned_action_names",),
+        produced_claims=("executed_action",),
+        frame_id="grid",
+        required_frames=("grid",),
+        safety_class="actuation",
+        authority_level="operator",
+        failure_modes=("blocked", "invalid_action"),
+        validation_hooks=("minigrid_path_action_preflight",),
     ),
     "turn_left": PrimitiveSpec(
         name="turn_left",
@@ -220,6 +242,11 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         side_effects=("moves_agent",),
         runtime_kind="env_action",
         runtime_value=0,
+        postconditions=("agent direction changes",),
+        frame_id="grid",
+        safety_class="actuation",
+        authority_level="operator",
+        validation_hooks=("minigrid_env_action_preflight",),
     ),
     "turn_right": PrimitiveSpec(
         name="turn_right",
@@ -227,6 +254,11 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         side_effects=("moves_agent",),
         runtime_kind="env_action",
         runtime_value=1,
+        postconditions=("agent direction changes",),
+        frame_id="grid",
+        safety_class="actuation",
+        authority_level="operator",
+        validation_hooks=("minigrid_env_action_preflight",),
     ),
     "move_forward": PrimitiveSpec(
         name="move_forward",
@@ -234,6 +266,13 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         side_effects=("moves_agent",),
         runtime_kind="env_action",
         runtime_value=2,
+        preconditions=("front cell is passable",),
+        postconditions=("agent position may change",),
+        frame_id="grid",
+        safety_class="actuation",
+        authority_level="operator",
+        failure_modes=("blocked",),
+        validation_hooks=("minigrid_env_action_preflight",),
     ),
     "pickup": PrimitiveSpec(
         name="pickup",
@@ -241,6 +280,13 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         side_effects=("changes_environment", "changes_inventory"),
         runtime_kind="env_action",
         runtime_value=3,
+        preconditions=("agent is adjacent to item",),
+        postconditions=("inventory may change",),
+        frame_id="grid",
+        safety_class="actuation",
+        authority_level="operator",
+        failure_modes=("no_item", "inventory_full"),
+        validation_hooks=("minigrid_env_action_preflight",),
     ),
     "drop": PrimitiveSpec(
         name="drop",
@@ -248,6 +294,13 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         side_effects=("changes_environment", "changes_inventory"),
         runtime_kind="env_action",
         runtime_value=4,
+        preconditions=("agent is carrying an item",),
+        postconditions=("inventory may change",),
+        frame_id="grid",
+        safety_class="actuation",
+        authority_level="operator",
+        failure_modes=("empty_inventory", "blocked"),
+        validation_hooks=("minigrid_env_action_preflight",),
     ),
     "toggle": PrimitiveSpec(
         name="toggle",
@@ -255,12 +308,26 @@ ACTION_PRIMITIVES: dict[str, PrimitiveSpec] = {
         side_effects=("changes_environment",),
         runtime_kind="env_action",
         runtime_value=5,
+        preconditions=("front cell is toggleable",),
+        postconditions=("environment state may change",),
+        frame_id="grid",
+        safety_class="actuation",
+        authority_level="operator",
+        failure_modes=("not_toggleable",),
+        validation_hooks=("minigrid_env_action_preflight",),
     ),
     "done": PrimitiveSpec(
         name="done",
         description="Emit the MiniGrid done action.",
         runtime_kind="env_action",
         runtime_value=6,
+        preconditions=("completion condition is verified",),
+        postconditions=("episode may terminate",),
+        frame_id="grid",
+        safety_class="actuation",
+        authority_level="operator",
+        failure_modes=("premature_done",),
+        validation_hooks=("minigrid_done_preflight",),
     ),
 }
 

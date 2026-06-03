@@ -52,6 +52,18 @@ def _manifest_spec(
         "implementation_status": spec.implementation_status,
         "safe_to_synthesize": spec.safe_to_synthesize,
         "runtime_binding": _runtime_binding(spec),
+        "preconditions": list(spec.preconditions),
+        "postconditions": list(spec.postconditions),
+        "required_claims": list(spec.required_claims),
+        "produced_claims": list(spec.produced_claims),
+        "units": dict(spec.units),
+        "frame_id": spec.frame_id,
+        "required_frames": list(spec.required_frames),
+        "safety_class": spec.safety_class,
+        "authority_level": spec.authority_level,
+        "failure_modes": list(spec.failure_modes),
+        "validation_hooks": list(spec.validation_hooks),
+        "substrate_fingerprint": spec.substrate_fingerprint,
     }
 
 
@@ -64,6 +76,10 @@ def _top_level_task_capability(
     side_effects: list[str],
     implementation_status: str,
     runtime_binding: dict[str, Any] | None,
+    safety_class: str = "query",
+    authority_level: str = "none",
+    validation_hooks: list[str] | None = None,
+    failure_modes: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -76,6 +92,18 @@ def _top_level_task_capability(
         "implementation_status": implementation_status,
         "safe_to_synthesize": False,
         "runtime_binding": runtime_binding,
+        "preconditions": list(inputs),
+        "postconditions": list(outputs),
+        "required_claims": list(inputs),
+        "produced_claims": list(outputs),
+        "units": {},
+        "frame_id": None,
+        "required_frames": [],
+        "safety_class": safety_class,
+        "authority_level": authority_level,
+        "failure_modes": failure_modes or [],
+        "validation_hooks": validation_hooks or [],
+        "substrate_fingerprint": None,
     }
 
 
@@ -98,6 +126,10 @@ def minigrid_manifest_dict() -> dict[str, Any]:
                     "done",
                 ],
             },
+            safety_class="actuation",
+            authority_level="operator",
+            validation_hooks=["minigrid_task_preflight"],
+            failure_modes=["no_path_found", "target_missing"],
         ),
         _top_level_task_capability(
             name="task.pickup.key",
@@ -165,6 +197,15 @@ class CapabilityRegistry:
                     "side_effects": list(spec.side_effects),
                     "runtime_binding": spec.runtime_binding,
                     "description": spec.description,
+                    "required_claims": list(spec.required_claims),
+                    "produced_claims": list(spec.produced_claims),
+                    "frame_id": spec.frame_id,
+                    "required_frames": list(spec.required_frames),
+                    "safety_class": spec.safety_class,
+                    "authority_level": spec.authority_level,
+                    "failure_modes": list(spec.failure_modes),
+                    "validation_hooks": list(spec.validation_hooks),
+                    "substrate_fingerprint": spec.substrate_fingerprint,
                 }
             )
         return {"name": self.manifest.name, "primitives": grouped}

@@ -16,6 +16,7 @@ from jeenom.minigrid_envs import ensure_custom_minigrid_envs_registered
 from jeenom.minigrid_adapter import MiniGridAdapter
 from jeenom.operator_station import OperatorStationSession, classify_utterance
 from jeenom.plan_cache import PlanCache
+from jeenom.plan_reuse import PlanReuseCache
 from jeenom.primitive_library import (
     ACTION_PRIMITIVES,
     CLAIMS_FILTER_PRIMITIVES,
@@ -36,6 +37,9 @@ from jeenom.schemas import (
     OperatorIntent,
     Percepts,
     PrimitiveCall,
+    PrimitiveManifest,
+    RequestPlan,
+    RequestPlanStep,
     SceneModel,
     SchemaValidationError,
     SensePlanTemplate,
@@ -3627,6 +3631,171 @@ class JeenomPhase795RequestPlanTests(unittest.TestCase):
 
         self.assertIn("env.env_id", graph.violated_assumption_ids)
         self.assertEqual(graph.graph_status, "environment_assumption_failed")
+
+
+class JeenomPhase9BSubstrateContractTests(unittest.TestCase):
+    def _spec(
+        self,
+        name="action.safe_move",
+        *,
+        safety_class="query",
+        authority_level="none",
+        validation_hooks=None,
+    ):
+        return {
+            "name": name,
+            "primitive_type": "action",
+            "layer": "action",
+            "description": f"Contract test primitive {name}.",
+            "inputs": ["robot.pose"],
+            "outputs": ["robot.pose"],
+            "side_effects": ["moves_robot"],
+            "implementation_status": "implemented",
+            "safe_to_synthesize": False,
+            "runtime_binding": {"kind": "test", "value": name},
+            "preconditions": ["robot.pose is fresh"],
+            "postconditions": ["robot.pose may change"],
+            "required_claims": ["robot.pose"],
+            "produced_claims": ["robot.pose"],
+            "units": {"distance": "m"},
+            "frame_id": "map",
+            "required_frames": ["map"],
+            "safety_class": safety_class,
+            "authority_level": authority_level,
+            "failure_modes": ["blocked"],
+            "validation_hooks": ["shadow_validate"] if validation_hooks is None else validation_hooks,
+            "substrate_fingerprint": "robot-stack-a",
+        }
+
+    def _registry(self, *specs):
+        return CapabilityRegistry(
+            PrimitiveManifest.from_dict(
+                {"name": "phase9b_test_manifest", "primitives": list(specs)}
+            )
+        )
+
+    def _plan(self, handle, **constraints):
+        return RequestPlan(
+            request_id=f"phase9b:{handle}",
+            original_utterance="phase9b unit test",
+            objective_type="task",
+            objective_summary="Substrate contract probe.",
+            steps=[
+                RequestPlanStep(
+                    step_id="execute",
+                    layer="action",
+                    operation="execute",
+                    required_handle=handle,
+                    constraints=dict(constraints),
+                    scene_fingerprint_required=bool(constraints.get("requires_claims")),
+                )
+            ],
+            expected_response="execute_task",
+        )
+
+    def _claims(self, *, confidence=1.0, frame_id="map"):
+        entry = GroundedDoorEntry(color="red", object_type="door", x=1, y=1, distance=1)
+        return StationActiveClaims(
+            scene_fingerprint=(0, 0, 0),
+            ranked_scene_doors=[entry],
+            last_grounded_target=entry,
+            last_grounded_rank=0,
+            last_grounding_query={"probe": "phase9b"},
+            confidence=confidence,
+            frame_id=frame_id,
+        )
+
+    def test_primitive_manifest_accepts_contract_metadata(self):
+        registry = self._registry(self._spec())
+        spec = registry.lookup("action.safe_move")
+
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.required_claims, ["robot.pose"])
+        self.assertEqual(spec.produced_claims, ["robot.pose"])
+        self.assertEqual(spec.frame_id, "map")
+        self.assertEqual(spec.validation_hooks, ["shadow_validate"])
+
+    def test_invalid_primitive_contract_metadata_is_rejected(self):
+        with self.assertRaises(SchemaValidationError):
+            self._registry(self._spec("action.bad", safety_class="cosmic"))
+
+    def test_readiness_blocks_missing_validator_and_authority(self):
+        validation_registry = self._registry(
+            self._spec(
+                "action.no_validator",
+                safety_class="actuation",
+                validation_hooks=[],
+            )
+        )
+        validation_graph = evaluate_request_plan(
+            self._plan("action.no_validator"),
+            registry=validation_registry,
+        )
+        self.assertEqual(validation_graph.graph_status, "validation_required")
+
+        authority_registry = self._registry(
+            self._spec(
+                "action.restricted",
+                safety_class="actuation",
+                authority_level="restricted",
+            )
+        )
+        authority_graph = evaluate_request_plan(
+            self._plan("action.restricted"),
+            registry=authority_registry,
+        )
+        self.assertEqual(authority_graph.graph_status, "needs_authorization")
+
+    def test_readiness_blocks_low_confidence_or_frame_mismatched_claims(self):
+        registry = self._registry(self._spec())
+        low_confidence = evaluate_request_plan(
+            self._plan(
+                "action.safe_move",
+                requires_claims=True,
+                min_claim_confidence=0.8,
+            ),
+            registry=registry,
+            active_claims=self._claims(confidence=0.2, frame_id="map"),
+            claims_valid=True,
+        )
+        self.assertEqual(low_confidence.graph_status, "claim_contract_failed")
+
+        frame_mismatch = evaluate_request_plan(
+            self._plan(
+                "action.safe_move",
+                requires_claims=True,
+                required_frame_id="map",
+            ),
+            registry=registry,
+            active_claims=self._claims(confidence=1.0, frame_id="camera"),
+            claims_valid=True,
+        )
+        self.assertEqual(frame_mismatch.graph_status, "claim_contract_failed")
+
+    def test_plan_reuse_rejects_substrate_fingerprint_change(self):
+        from jeenom.request_planner import build_environment_assumptions
+
+        registry = self._registry(self._spec())
+        plan = self._plan("action.safe_move")
+        identity_a = EnvironmentIdentity(
+            env_id="robot-sim",
+            substrate_fingerprint="robot-stack-a",
+        )
+        identity_b = EnvironmentIdentity(
+            env_id="robot-sim",
+            substrate_fingerprint="robot-stack-b",
+        )
+        plan.environment_assumptions = build_environment_assumptions(identity_a)
+        plan.steps[0].environment_assumption_ids = [
+            assumption.assumption_id for assumption in plan.environment_assumptions
+        ]
+
+        cache = PlanReuseCache()
+        entry = cache.store(plan)
+        verdict = cache.can_reuse(entry, registry, identity_b)
+
+        self.assertEqual(verdict.verdict, "recompile")
+        self.assertIn("env.substrate_fingerprint", verdict.blocking_assumption_ids)
 
 
 if __name__ == "__main__":

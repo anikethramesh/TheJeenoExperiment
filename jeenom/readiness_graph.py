@@ -26,6 +26,19 @@ def _status_for_primitive(
     if spec is None:
         return "missing_skills", f"Primitive '{handle}' is not present in the registry."
     if spec.implementation_status == "implemented":
+        if (
+            spec.authority_level in {"restricted", "admin"}
+            and not bool(step.constraints.get("authority_granted"))
+        ):
+            return (
+                "needs_authorization",
+                f"Primitive '{handle}' requires {spec.authority_level} authority.",
+            )
+        if spec.safety_class in {"actuation", "hazardous"} and not spec.validation_hooks:
+            return (
+                "validation_required",
+                f"Primitive '{handle}' requires a validation hook before execution.",
+            )
         return "executable", spec.description
     if spec.implementation_status == "synthesizable" or spec.safe_to_synthesize:
         return "synthesizable", spec.description
@@ -46,6 +59,29 @@ def _claims_status(
         return "stale_claims", "Step needs ActiveClaims, but none are available yet."
     if not claims_valid:
         return "stale_claims", "ActiveClaims exist but do not match the current scene."
+    min_confidence = step.constraints.get("min_claim_confidence")
+    if min_confidence is not None:
+        try:
+            required_confidence = float(min_confidence)
+        except (TypeError, ValueError):
+            required_confidence = 1.0
+        if active_claims.confidence < required_confidence:
+            return (
+                "claim_contract_failed",
+                (
+                    "ActiveClaims confidence is below the plan requirement: "
+                    f"{active_claims.confidence} < {required_confidence}."
+                ),
+            )
+    required_frame = step.constraints.get("required_frame_id")
+    if required_frame is not None and active_claims.frame_id != required_frame:
+        return (
+            "claim_contract_failed",
+            (
+                "ActiveClaims frame does not match the plan requirement: "
+                f"{active_claims.frame_id!r} != {required_frame!r}."
+            ),
+        )
     return None, None
 
 
@@ -66,6 +102,8 @@ def _actual_for_assumption(
         }
     if assumption.kind == "task_family":
         return {"task_family": environment_identity.task_family}
+    if assumption.kind == "substrate_fingerprint":
+        return {"substrate_fingerprint": environment_identity.substrate_fingerprint}
     if assumption.kind == "environment_fingerprint":
         return {"fingerprint": environment_identity.fingerprint()}
     if assumption.kind == "layout_summary":
@@ -203,8 +241,12 @@ def _next_action(
         return "answer_query"
     if graph_status == "needs_clarification":
         return "ask_clarification"
+    if graph_status == "needs_authorization":
+        return "ask_authorization"
+    if graph_status == "validation_required":
+        return "run_validation"
     if graph_status == "synthesizable":
         return "propose_synthesis"
-    if graph_status == "stale_claims":
+    if graph_status in {"stale_claims", "claim_contract_failed"}:
         return "refresh_claims"
     return "refuse"

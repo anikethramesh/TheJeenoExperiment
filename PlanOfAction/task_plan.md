@@ -5,9 +5,10 @@ compact record of what exists, what invariants must hold, and what comes next.
 
 ## Current Known State
 
-- Current phase: **Phase 9 - Cleanup**.
-- `python evals/eval_master.py`: 31/32 passing; `phase91_operational_repair_probe.py` is failing.
-- `python -m pytest -q tests`: 153 passed, 7 failed.
+- Current phase: **Phase 9B - Substrate Contract Foundation**.
+- Initial Phase 9B substrate-contract slice is implemented.
+- `python evals/eval_master.py`: 37/37 passing.
+- `python -m pytest -q tests`: 165 passed.
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -27,6 +28,12 @@ compact record of what exists, what invariants must hold, and what comes next.
   - Operator claims are asserted by the operator, durable, and invalidated only
     by explicit retraction.
 - Invalid or stale plan/claim reuse must never execute silently.
+- Substrate primitives are not just names. Every robot or simulator port must
+  expose typed primitive contracts: preconditions, postconditions/effects,
+  required claims, produced claims, safety class, authority level, frames/units,
+  failure modes, validation hooks, and substrate fingerprint assumptions.
+- A valid LLM schema or valid primitive name is not sufficient for execution.
+  The `ReadinessGraph` must also prove that the primitive contract is satisfied.
 
 ## Completed Phases
 
@@ -156,9 +163,9 @@ Phase 8 also exposed the main cleanup problem: some newer execution paths are
 not yet fully governed by the same readiness and safety boundaries as the older
 task path.
 
-## Phase 9 - Cleanup
+## Phase 9A - Cleanup
 
-Status: current.
+Status: done.
 
 Goal: restore the architectural gates before adding new capability. This phase
 is mandatory before harder MiniGrid domains, richer repair, or robot ports.
@@ -204,11 +211,54 @@ Exit criteria:
 - Repair-loop evals prove either successful re-dispatch or honest non-execution.
 - README and this task plan match the actual project state.
 
+## Phase 9B - Substrate Contract Foundation
+
+Status: current; initial foundation slice implemented.
+
+Goal: make the substrate boundary explicit before operational hardening. JEENOM
+must not merely solve MiniGrid through a better station; it must know what a
+robot or simulator primitive is allowed to do, what facts it requires, and when
+reuse or execution is unsafe.
+
+Tasks:
+
+- Extend primitive manifests with contract metadata:
+  - preconditions and postconditions/effects
+  - required claims and produced claims
+  - units and coordinate/reference frames
+  - safety class and authority level
+  - failure modes
+  - validation hooks for shadow/simulation/preflight checks
+  - substrate/config/tool/calibration fingerprint metadata
+- Extend `ReadinessGraph` so it gates on primitive contracts, not only primitive
+  names and implementation status.
+- Extend claim metadata with freshness, confidence, frame/source provenance, and
+  authority. Low-confidence, expired, or frame-mismatched claims must block.
+- Extend plan reuse invalidation so substrate/config/tool/calibration changes
+  reject reuse even when the semantic task shape is identical.
+- Add Phase 9B evals/tests before broad implementation:
+  - malformed primitive contracts are rejected
+  - authority-sensitive primitives block without explicit authority
+  - safety-classed actuation requires a validation hook
+  - stale/low-confidence/frame-mismatched claims block
+  - substrate fingerprint changes invalidate reuse
+  - MiniGrid-specific nouns do not appear in generic contract gates
+- Keep current MiniGrid behavior green while proving MiniGrid is only one
+  substrate adapter.
+
+Exit criteria:
+
+- Phase 9B substrate-contract evals pass.
+- `python evals/eval_master.py` passes.
+- `python -m pytest -q tests` passes.
+- Existing MiniGrid evals still pass without weakening the new generic gates.
+
 ## Phase 10 - Operational Hardening
 
 Status: planned.
 
-Goal: close the loop on cross-environment robustness after cleanup is complete.
+Goal: close the loop on cross-environment robustness after Phase 9A cleanup and
+Phase 9B substrate contracts are complete.
 
 Planned work:
 

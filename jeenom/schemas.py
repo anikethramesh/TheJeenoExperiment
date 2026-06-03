@@ -143,6 +143,9 @@ REQUEST_TIE_POLICIES = ("clarify", "display_ties", "fail")
 READINESS_NODE_STATUSES = (
     "executable",
     "needs_clarification",
+    "needs_authorization",
+    "validation_required",
+    "claim_contract_failed",
     "synthesizable",
     "missing_skills",
     "unsupported",
@@ -154,6 +157,8 @@ READINESS_NEXT_ACTIONS = (
     "execute_task",
     "answer_query",
     "ask_clarification",
+    "ask_authorization",
+    "run_validation",
     "propose_synthesis",
     "refresh_claims",
     "update_memory",
@@ -173,6 +178,8 @@ PRIMITIVE_IMPLEMENTATION_STATUSES = (
     "planned",
     "missing",
 )
+PRIMITIVE_SAFETY_CLASSES = ("query", "memory", "actuation", "hazardous")
+PRIMITIVE_AUTHORITY_LEVELS = ("none", "operator", "restricted", "admin")
 
 
 class SchemaValidationError(ValueError):
@@ -355,10 +362,25 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
         "safe_to_synthesize",
         "runtime_binding",
     )
+    optional_keys = (
+        "preconditions",
+        "postconditions",
+        "required_claims",
+        "produced_claims",
+        "units",
+        "frame_id",
+        "required_frames",
+        "safety_class",
+        "authority_level",
+        "failure_modes",
+        "validation_hooks",
+        "substrate_fingerprint",
+    )
     missing = [key for key in required_keys if key not in spec]
     if missing:
         raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    extra = sorted(set(spec) - set(required_keys))
+    allowed_keys = set(required_keys) | set(optional_keys)
+    extra = sorted(set(spec) - allowed_keys)
     if extra:
         raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
     primitive_type = _ensure_str(spec["primitive_type"], f"{label}.primitive_type")
@@ -375,6 +397,24 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
             f"{label}.implementation_status must be one of: "
             + ", ".join(PRIMITIVE_IMPLEMENTATION_STATUSES)
         )
+    safety_class = _ensure_str(
+        spec.get("safety_class", "query"),
+        f"{label}.safety_class",
+    )
+    if safety_class not in PRIMITIVE_SAFETY_CLASSES:
+        raise SchemaValidationError(
+            f"{label}.safety_class must be one of: "
+            + ", ".join(PRIMITIVE_SAFETY_CLASSES)
+        )
+    authority_level = _ensure_str(
+        spec.get("authority_level", "none"),
+        f"{label}.authority_level",
+    )
+    if authority_level not in PRIMITIVE_AUTHORITY_LEVELS:
+        raise SchemaValidationError(
+            f"{label}.authority_level must be one of: "
+            + ", ".join(PRIMITIVE_AUTHORITY_LEVELS)
+        )
     return {
         "name": _ensure_str(spec["name"], f"{label}.name"),
         "primitive_type": primitive_type,
@@ -389,6 +429,42 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
             f"{label}.safe_to_synthesize",
         ),
         "runtime_binding": spec["runtime_binding"],
+        "preconditions": _ensure_str_list(
+            spec.get("preconditions", []),
+            f"{label}.preconditions",
+        ),
+        "postconditions": _ensure_str_list(
+            spec.get("postconditions", []),
+            f"{label}.postconditions",
+        ),
+        "required_claims": _ensure_str_list(
+            spec.get("required_claims", []),
+            f"{label}.required_claims",
+        ),
+        "produced_claims": _ensure_str_list(
+            spec.get("produced_claims", []),
+            f"{label}.produced_claims",
+        ),
+        "units": _ensure_dict(spec.get("units", {}), f"{label}.units"),
+        "frame_id": _ensure_optional_str(spec.get("frame_id"), f"{label}.frame_id"),
+        "required_frames": _ensure_str_list(
+            spec.get("required_frames", []),
+            f"{label}.required_frames",
+        ),
+        "safety_class": safety_class,
+        "authority_level": authority_level,
+        "failure_modes": _ensure_str_list(
+            spec.get("failure_modes", []),
+            f"{label}.failure_modes",
+        ),
+        "validation_hooks": _ensure_str_list(
+            spec.get("validation_hooks", []),
+            f"{label}.validation_hooks",
+        ),
+        "substrate_fingerprint": _ensure_optional_str(
+            spec.get("substrate_fingerprint"),
+            f"{label}.substrate_fingerprint",
+        ),
     }
 
 
@@ -1037,6 +1113,18 @@ class PrimitiveSpec:
     implementation_status: str = "implemented"
     safe_to_synthesize: bool = False
     runtime_binding: dict[str, Any] | None = None
+    preconditions: list[str] = field(default_factory=list)
+    postconditions: list[str] = field(default_factory=list)
+    required_claims: list[str] = field(default_factory=list)
+    produced_claims: list[str] = field(default_factory=list)
+    units: dict[str, Any] = field(default_factory=dict)
+    frame_id: str | None = None
+    required_frames: list[str] = field(default_factory=list)
+    safety_class: str = "query"
+    authority_level: str = "none"
+    failure_modes: list[str] = field(default_factory=list)
+    validation_hooks: list[str] = field(default_factory=list)
+    substrate_fingerprint: str | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> PrimitiveSpec:
@@ -1522,6 +1610,7 @@ class EnvironmentIdentity:
     mission: str | None = None
     task_family: str | None = None
     scene_fingerprint: str | None = None
+    substrate_fingerprint: str | None = None
     summary: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -1533,6 +1622,7 @@ class EnvironmentIdentity:
             "mission": self.mission,
             "task_family": self.task_family,
             "scene_fingerprint": self.scene_fingerprint,
+            "substrate_fingerprint": self.substrate_fingerprint,
             "summary": dict(self.summary),
             "fingerprint": self.fingerprint(),
         }
@@ -1554,6 +1644,10 @@ class EnvironmentIdentity:
                 mapping.get("scene_fingerprint"),
                 "EnvironmentIdentity.scene_fingerprint",
             ),
+            substrate_fingerprint=_ensure_optional_str(
+                mapping.get("substrate_fingerprint"),
+                "EnvironmentIdentity.substrate_fingerprint",
+            ),
             summary=_ensure_dict(mapping.get("summary", {}), "EnvironmentIdentity.summary"),
         )
 
@@ -1565,6 +1659,7 @@ class EnvironmentIdentity:
             "grid_height": self.grid_height,
             "mission": self.mission,
             "task_family": self.task_family,
+            "substrate_fingerprint": self.substrate_fingerprint,
             "summary": self.summary,
         }
         payload = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str)
@@ -1586,6 +1681,10 @@ class StationActiveClaims:
     last_grounding_query: dict[str, Any]
     environment_fingerprint: str | None = None
     environment_identity: EnvironmentIdentity | None = None
+    confidence: float = 1.0
+    frame_id: str | None = None
+    source: str = "grounding"
+    authority: str = "runtime"
 
     def is_valid_for(
         self,
@@ -1624,6 +1723,10 @@ class StationActiveClaims:
             ],
             "last_rank": self.last_grounded_rank,
             "environment_fingerprint": self.environment_fingerprint,
+            "confidence": self.confidence,
+            "frame_id": self.frame_id,
+            "source": self.source,
+            "authority": self.authority,
         }
 
 

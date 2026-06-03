@@ -176,6 +176,20 @@ def build_environment_assumptions(
                 description="Plan assumes this task family.",
             )
         )
+    if environment_identity.substrate_fingerprint is not None:
+        assumptions.append(
+            EnvironmentAssumption(
+                assumption_id="env.substrate_fingerprint",
+                kind="substrate_fingerprint",
+                expected={
+                    "substrate_fingerprint": environment_identity.substrate_fingerprint,
+                },
+                required=True,
+                description=(
+                    "Plan assumes this substrate/controller/tool/calibration fingerprint."
+                ),
+            )
+        )
     assumptions.append(
         EnvironmentAssumption(
             assumption_id="env.seed",
