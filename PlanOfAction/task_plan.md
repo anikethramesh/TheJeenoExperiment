@@ -168,6 +168,10 @@ Tasks:
 - Restore the project-local test suite to green.
 - Fix eval coverage so `eval_master.py` catches unit-level architectural
   regressions.
+- Keep eval execution manifest-driven:
+  - `python evals/eval_master.py --list` shows the selected probes
+  - `python evals/eval_master.py --suite cleanup` runs the Phase 9 red-bar suite
+  - utility modules such as harnesses are not treated as evals
 - Repair the motor-command safety boundary:
   - direct primitives are useful for explicit motor commands
   - task requests like "pick up the red key" must not bypass task/readiness gates

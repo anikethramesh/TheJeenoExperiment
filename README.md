@@ -104,6 +104,18 @@ Run the eval suite:
 python evals/eval_master.py
 ```
 
+Run the Phase 9 cleanup suite:
+
+```bash
+python evals/eval_master.py --suite cleanup
+```
+
+List the manifest-selected probes without running them:
+
+```bash
+python evals/eval_master.py --list
+```
+
 Run the project-local tests:
 
 ```bash
@@ -117,3 +129,6 @@ At the start of Phase 9 Cleanup, the known state is:
 
 - `eval_master.py`: 31/32 passing; `phase91_operational_repair_probe.py` failing.
 - `python -m pytest -q tests`: 153 passed, 7 failed.
+
+After adding the Phase 9 cleanup probes, `eval_master.py --suite cleanup` is
+expected to be red until the cleanup issues are fixed.

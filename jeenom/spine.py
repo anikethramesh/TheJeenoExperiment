@@ -187,7 +187,10 @@ class MiniGridSpine:
         canonical = canonical_primitives_for_skill(skill)
         if canonical is None or template.primitives == canonical:
             return template
-        self.compiler.log(f"corrected invalid {skill} skill template")
+        if skill in DIRECT_ACTION_SKILLS and skill != "done":
+            self.compiler.log(f"corrected invalid direct action skill template: {skill}")
+        else:
+            self.compiler.log(f"corrected invalid {skill} skill template")
         from .command_registry import MOTOR_COMMANDS
         cmd = MOTOR_COMMANDS.get(skill)
         required_inputs = list(cmd.required_claims) if cmd else []

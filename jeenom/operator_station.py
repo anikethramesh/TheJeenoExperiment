@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import re
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -582,6 +583,7 @@ class OperatorStationSession:
                 return self.missing_reference_summary(command.utterance)
             if instruction != command.utterance:
                 self.log(f"resolved task instruction to: {instruction}")
+            self._record_task_instruction_request_plan(command.utterance, instruction)
             result = self.run_task(instruction)
             return self.result_summary(result)
         if command.kind == "unsupported":
@@ -624,9 +626,10 @@ class OperatorStationSession:
         intent: OperatorIntent,
         utterance: str,
     ) -> OperatorCommand:
-        self._record_request_plan(utterance, intent)
-
+        request_plan_recorded = False
         if intent.grounding_query_plan is not None:
+            self._record_request_plan(utterance, intent)
+            request_plan_recorded = True
             plan_command = self._command_from_grounding_query_plan(utterance, intent)
             if plan_command is not None:
                 return plan_command
@@ -638,6 +641,9 @@ class OperatorStationSession:
         intent, verif_result = default_verifier.enrich(utterance, intent)
         if verif_result.injected_handles:
             self.log(f"intent verifier injected: {verif_result.summary()}")
+
+        if not request_plan_recorded:
+            self._record_request_plan(utterance, intent)
 
         # ── Intent Readiness Requirement Matching (Phase 7.59) ────────────────
         # Runs every turn, deterministically. Matcher verdict overrides LLM's
@@ -836,6 +842,18 @@ class OperatorStationSession:
             # the registry says it is missing or synthesizable.
             if not intent.required_capabilities and not cap_match.missing:
                 reason = intent.reason or "I could not understand that request."
+                if intent.intent_type == "unsupported" and "unsupported" in reason.lower():
+                    return OperatorCommand(
+                        kind="unsupported",
+                        utterance=utterance,
+                        payload={
+                            "message": (
+                                "I cannot safely execute that capability yet. "
+                                f"{reason}"
+                            )
+                        },
+                    )
+                reason = intent.reason or "I could not understand that request."
                 return OperatorCommand(
                     kind="clarification",
                     utterance=utterance,
@@ -1002,6 +1020,7 @@ class OperatorStationSession:
         return OperatorCommand(kind="unsupported", utterance=utterance)
 
     def _record_request_plan(self, utterance: str, intent: OperatorIntent) -> None:
+        self.last_repair_events = []
         claims_valid = self._claims_valid_for_current_environment()
         active_summary = (
             self.active_claims.compact_summary()
@@ -1104,6 +1123,29 @@ class OperatorStationSession:
             f"graph_status={readiness_graph.graph_status} "
             f"next_action={readiness_graph.next_action}"
         )
+
+    def _record_task_instruction_request_plan(
+        self,
+        utterance: str,
+        instruction: str,
+    ) -> None:
+        parsed = _parse_exact_go_to_object_utterance(instruction)
+        if parsed is None:
+            return
+        intent = OperatorIntent(
+            intent_type="task_instruction",
+            canonical_instruction=instruction,
+            task_type="go_to_object",
+            target={
+                "color": parsed["color"],
+                "object_type": parsed["object_type"],
+            },
+            capability_status="executable",
+            required_capabilities=["task.go_to_object.door"],
+            confidence=1.0,
+            reason="Deterministic go-to-object task instruction.",
+        )
+        self._record_request_plan(utterance, intent)
 
     def _run_mismatch_detection(self, plan: RequestPlan) -> None:
         """Run mismatch detection and store results in last_operational_mismatches."""
@@ -1548,16 +1590,27 @@ class OperatorStationSession:
             and (spec.implementation_status == "synthesizable" or spec.safe_to_synthesize)
         ]
         scene_summary = self._build_scene_summary_for_arbitrator()
-        decision = self.arbitrator.arbitrate(
-            utterance=utterance,
-            intent_type=intent.intent_type,
-            required_capabilities=intent.required_capabilities,
-            missing_handles=cap_match.missing,
-            synthesizable_handles=cap_match.synthesizable_handles,
-            available_handles=available,
-            scene_summary=scene_summary,
-            registry_synthesizable_handles=registry_synthesizable,
+        arbitration_kwargs = {
+            "utterance": utterance,
+            "intent_type": intent.intent_type,
+            "required_capabilities": intent.required_capabilities,
+            "missing_handles": cap_match.missing,
+            "synthesizable_handles": cap_match.synthesizable_handles,
+            "available_handles": available,
+            "scene_summary": scene_summary,
+            "registry_synthesizable_handles": registry_synthesizable,
+        }
+        arbitrate_signature = inspect.signature(self.arbitrator.arbitrate)
+        accepts_registry_synthesizable = (
+            "registry_synthesizable_handles" in arbitrate_signature.parameters
+            or any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in arbitrate_signature.parameters.values()
+            )
         )
+        if not accepts_registry_synthesizable:
+            arbitration_kwargs.pop("registry_synthesizable_handles")
+        decision = self.arbitrator.arbitrate(**arbitration_kwargs)
         self.last_arbitration_trace = ArbitrationTrace(
             utterance=utterance,
             intent_type=intent.intent_type,
@@ -3428,22 +3481,34 @@ class OperatorStationSession:
         *,
         candidates: list[dict[str, Any]] | None = None,
     ) -> str:
+        repair_note = self._repair_non_execution_note()
         if missing_field == "distance_metric":
-            return (
+            message = (
                 "CLARIFY\n"
                 'To ground "closest", which distance metric should I use?\n'
                 f"Supported: {', '.join(supported_values)}"
             )
+            return f"{message}\n{repair_note}" if repair_note else message
         if missing_field == "candidate":
-            return (
+            message = (
                 "CLARIFY\n"
                 "That matched multiple doors. Which one should I use?\n"
                 f"Options: {_format_targets(candidates or [])}"
             )
-        return (
+            return f"{message}\n{repair_note}" if repair_note else message
+        message = (
             "CLARIFY\n"
             f"I need {missing_field} before I can ground this selector.\n"
             f"Supported: {', '.join(supported_values)}"
+        )
+        return f"{message}\n{repair_note}" if repair_note else message
+
+    def _repair_non_execution_note(self) -> str | None:
+        if not any(event.success for event in self.last_repair_events):
+            return None
+        return (
+            "Repair note: stale or invalid execution state was cleared, "
+            "but I did not execute the request yet."
         )
 
     def handle_pending_clarification(
@@ -3546,6 +3611,7 @@ class OperatorStationSession:
                 return self.missing_reference_summary(command.utterance)
             if instruction != command.utterance:
                 self.log(f"resolved task instruction to: {instruction}")
+            self._record_task_instruction_request_plan(command.utterance, instruction)
             result = self.run_task(instruction)
             return self.result_summary(result)
         if command.kind == "ground_target_query":
@@ -4182,12 +4248,7 @@ class OperatorStationSession:
         skip_reset = False
         self.preview_adapter = None
         if render_adapter is None:
-            if self.task_adapter is not None and self.render_mode == "human":
-                # Continue from the live session adapter without resetting.
-                render_adapter = self.task_adapter
-                skip_reset = True
-            else:
-                self.close_task_window()
+            self.close_task_window()
         elif self.task_adapter is not None and self.task_adapter is not render_adapter:
             self.close_task_window()
         self.last_result = run_demo.run_episode(

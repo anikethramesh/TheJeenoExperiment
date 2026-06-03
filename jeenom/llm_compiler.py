@@ -190,11 +190,26 @@ _WORD_TO_NUM: dict[str, int] = {
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
 }
 
+_MOTOR_TASK_OBJECT_TERMS = (
+    "ball",
+    "box",
+    "door",
+    "goal",
+    "key",
+    "target",
+)
+
+
+def _looks_like_object_task(normalized: str) -> bool:
+    return any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in _MOTOR_TASK_OBJECT_TERMS)
+
 
 def _parse_motor_command(normalized: str) -> tuple[str, int] | None:
     """Return (action_name, count) if the utterance is a direct motor command, else None."""
     for action_name, pattern in _MOTOR_ACTION_ALIASES.items():
         if pattern.search(normalized):
+            if action_name in {"pickup", "toggle"} and _looks_like_object_task(normalized):
+                return None
             m = re.search(r"\b(\d+)\b", normalized)
             if m:
                 return action_name, int(m.group(1))
@@ -1265,6 +1280,28 @@ class SmokeTestCompiler(CompilerBackend):
                 target_selector=None,
                 confidence=0.7,
                 reason="Deterministic operator-intent fallback parsed a last-run query.",
+            )
+
+        if re.search(r"\b(?:pick\s+up|pickup|grab)\b", normalized) and re.search(
+            r"\bkey\b", normalized
+        ):
+            return OperatorIntent(
+                intent_type="unsupported",
+                required_capabilities=["task.pickup.key"],
+                capability_status="unsupported",
+                confidence=0.9,
+                reason="Pickup key task is unsupported.",
+            )
+
+        if re.search(r"\b(?:toggle|open|unlock)\b", normalized) and re.search(
+            r"\bdoor\b", normalized
+        ):
+            return OperatorIntent(
+                intent_type="unsupported",
+                required_capabilities=["task.open_or_unlock.door"],
+                capability_status="unsupported",
+                confidence=0.9,
+                reason="Door toggle/open task is unsupported.",
             )
 
         # Expand implicit motor commands into explicit sequences

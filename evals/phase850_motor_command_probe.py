@@ -28,6 +28,8 @@ Checks:
                                       returns 'MOTOR COMPLETE'
   handle_utterance_result_set       — last_result is populated after motor execution
   handle_utterance_turn_right       — handle_utterance('turn right twice') works
+  task_like_pickup_not_motor        — 'pick up the red key' does not bypass task readiness
+  task_like_toggle_not_motor        — 'toggle the blue door' does not bypass task readiness
   task_instruction_no_regression    — 'go to the red door' still returns RUN COMPLETE
 """
 from __future__ import annotations
@@ -159,6 +161,17 @@ def main() -> int:
         sess3 = _make_session()
         resp3 = sess3.handle_utterance("turn right twice")
         metrics["handle_utterance_turn_right"] = "MOTOR COMPLETE" in resp3
+
+    # ── Safety regression: task-like object requests must not become raw motor commands.
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        sess_pickup = _make_session()
+        resp_pickup = sess_pickup.handle_utterance("pick up the red key")
+        metrics["task_like_pickup_not_motor"] = "MOTOR COMPLETE" not in resp_pickup
+
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        sess_toggle = _make_session()
+        resp_toggle = sess_toggle.handle_utterance("toggle the blue door")
+        metrics["task_like_toggle_not_motor"] = "MOTOR COMPLETE" not in resp_toggle
 
     # ── Regression: task_instruction still works ──────────────────────────────
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
