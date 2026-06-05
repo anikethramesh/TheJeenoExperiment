@@ -17,10 +17,10 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .semantic_normalizer import normalize_distance_ordinal
+from .semantic_normalizer import infer_direction_from_utterance, normalize_distance_ordinal
 
 if TYPE_CHECKING:
-    from .schemas import OperatorIntent
+    from .schemas import OperatorIntent, SelectionObjective
 
 SIGNAL_SUPERLATIVE = "superlative"   # farthest, furthest, most distant
 SIGNAL_CARDINALITY = "cardinality"   # all doors, sort/rank/list by distance
@@ -74,6 +74,8 @@ class IntentSignal:
 class IntentVerificationResult:
     signals: list[IntentSignal] = field(default_factory=list)
     injected_handles: list[str] = field(default_factory=list)
+    inversion_detected: bool = False
+    inversion_reason: str = ""
 
     @property
     def has_signals(self) -> bool:
@@ -245,7 +247,85 @@ class IntentVerifier:
                     required_handle=f"grounding.all_doors.ranked.{metric}.agent",
                 ))
 
-        if not signals:
+        # ── Plan order inversion check (Blueprint Rule 9 hard stop) ──────────
+        # Two paths:
+        #   1. Objective-based (primary): intent.selection_objective carries a
+        #      structured direction enum ("maximum"/"minimum") set by the LLM.
+        #      Check is pure enum-to-enum logic. No vocabulary scanning.
+        #   2. Vocabulary-based (fallback): when selection_objective is absent
+        #      (SmokeTestCompiler, legacy LLM output), fall back to
+        #      infer_direction_from_utterance. Adding new domain words only
+        #      requires updating semantic_normalizer — not this file.
+        inversion_detected = False
+        inversion_reason = ""
+        grounding_plan = getattr(intent, "grounding_query_plan", None)
+        if grounding_plan is not None:
+            plan_order = (
+                grounding_plan.get("order") if isinstance(grounding_plan, dict) else None
+            )
+            if plan_order is not None:
+                selection_obj = getattr(intent, "selection_objective", None)
+                if selection_obj is not None:
+                    # ── Objective-based path ───────────────────────────────
+                    # direction=="maximum" → plan must sort descending (largest first)
+                    # direction=="minimum" → plan must sort ascending  (smallest first)
+                    expected_order = (
+                        "descending" if selection_obj.direction == "maximum" else "ascending"
+                    )
+                    if plan_order != expected_order:
+                        answer_fields = {
+                            str(f).lower()
+                            for f in (grounding_plan.get("answer_fields") or [])
+                        }
+                        covers = (
+                            (selection_obj.direction == "maximum" and "farthest" in answer_fields)
+                            or (selection_obj.direction == "minimum" and "closest" in answer_fields)
+                        )
+                        if not covers:
+                            inversion_detected = True
+                            inversion_reason = (
+                                f"Objective says direction={selection_obj.direction!r} "
+                                f"(requires order={expected_order!r}) "
+                                f"but plan declares order={plan_order!r}."
+                            )
+                else:
+                    # ── Vocabulary-based fallback ──────────────────────────
+                    expected_order = infer_direction_from_utterance(normalized)
+                    if expected_order is not None and plan_order != expected_order:
+                        answer_fields = {
+                            str(f).lower()
+                            for f in (grounding_plan.get("answer_fields") or [])
+                        }
+                        covers = (
+                            (expected_order == "descending" and "farthest" in answer_fields)
+                            or (expected_order == "ascending" and "closest" in answer_fields)
+                        )
+                        if not covers:
+                            inversion_detected = True
+                            inversion_reason = (
+                                f"Utterance implies order={expected_order!r} "
+                                f"but plan declares order={plan_order!r}."
+                            )
+
+        # ── Objective-based handle injection (primary) ───────────────────────
+        # When selection_objective is set, required handles are derivable from
+        # the objective fields — no keyword scanning needed. This replaces the
+        # vocabulary-based SIGNAL_SUPERLATIVE / SIGNAL_CARDINALITY scan above
+        # (which already ran but found nothing for LLM-compiled intents with
+        # a correct selection_objective).
+        selection_obj = getattr(intent, "selection_objective", None)
+        if selection_obj is not None and not signals:
+            metric = selection_obj.metric or "manhattan"
+            handle = f"grounding.all_doors.ranked.{metric}.agent"
+            existing_caps = set(intent.required_capabilities or [])
+            if handle not in existing_caps:
+                signals.append(IntentSignal(
+                    signal_type=SIGNAL_SUPERLATIVE,
+                    detected_term=f"objective:{selection_obj.direction}",
+                    required_handle=handle,
+                ))
+
+        if not signals and not inversion_detected:
             return intent, IntentVerificationResult()
 
         existing = set(intent.required_capabilities or [])
@@ -254,7 +334,12 @@ class IntentVerifier:
             intent,
             required_capabilities=list(existing) + to_inject,
         )
-        return enriched, IntentVerificationResult(signals=signals, injected_handles=to_inject)
+        return enriched, IntentVerificationResult(
+            signals=signals,
+            injected_handles=to_inject,
+            inversion_detected=inversion_detected,
+            inversion_reason=inversion_reason,
+        )
 
 
 default_verifier = IntentVerifier()

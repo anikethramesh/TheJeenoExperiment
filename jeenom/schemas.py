@@ -180,6 +180,7 @@ PRIMITIVE_IMPLEMENTATION_STATUSES = (
 )
 PRIMITIVE_SAFETY_CLASSES = ("query", "memory", "actuation", "hazardous")
 PRIMITIVE_AUTHORITY_LEVELS = ("none", "operator", "restricted", "admin")
+SELECTION_DIRECTIONS = ("minimum", "maximum")
 
 
 class SchemaValidationError(ValueError):
@@ -1149,6 +1150,57 @@ class PrimitiveManifest:
 
 
 @dataclass
+class SelectionObjective:
+    """Structured distillation of what the operator wants to select/rank.
+
+    The LLM fills this alongside grounding_query_plan. Validation then checks
+    objective fields against plan fields using pure enum logic — no vocabulary
+    scanning. Adding 'hottest'/'coldest' to a new primitive means changing only
+    the LLM prompt (attribute vocabulary). No code changes to validation.
+    """
+
+    attribute: str       # what property to rank by: "distance", "temperature", ...
+    direction: str       # "minimum" (closest/coldest) or "maximum" (farthest/hottest)
+    ordinal: int         # 1 for "the farthest", 2 for "second farthest"
+    metric: str | None   # "manhattan" | "euclidean" | None (use default)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "SelectionObjective | None":
+        if data is None:
+            return None
+        d = _ensure_mapping(data, "SelectionObjective")
+        direction = _ensure_str(d.get("direction"), "SelectionObjective.direction")
+        if direction not in SELECTION_DIRECTIONS:
+            raise SchemaValidationError(
+                "SelectionObjective.direction must be one of: "
+                + ", ".join(SELECTION_DIRECTIONS)
+            )
+        raw_ordinal = d.get("ordinal", 1)
+        if isinstance(raw_ordinal, bool) or not isinstance(raw_ordinal, int) or raw_ordinal < 1:
+            raise SchemaValidationError(
+                "SelectionObjective.ordinal must be a positive integer"
+            )
+        return cls(
+            attribute=_ensure_str(d.get("attribute"), "SelectionObjective.attribute"),
+            direction=direction,
+            ordinal=raw_ordinal,
+            metric=_ensure_optional_str_enum(
+                d.get("metric"),
+                OPERATOR_DISTANCE_METRICS,
+                "SelectionObjective.metric",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "attribute": self.attribute,
+            "direction": self.direction,
+            "ordinal": self.ordinal,
+            "metric": self.metric,
+        }
+
+
+@dataclass
 class OperatorIntent:
     intent_type: str
     canonical_instruction: str | None = None
@@ -1178,6 +1230,8 @@ class OperatorIntent:
     repeat_count: int | None = None   # number of times to execute (>= 1)
     # mission_contract: L4 goal — ordered task sequence with abort-on-failure
     mission_steps: list[str] | None = None  # raw utterance for each task in the mission
+    # structured distillation of the selection objective; drives objective-based validation
+    selection_objective: SelectionObjective | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> OperatorIntent:
@@ -1290,6 +1344,10 @@ class OperatorIntent:
         else:
             mission_steps = None
 
+        selection_objective = SelectionObjective.from_dict(
+            mapping.get("selection_objective")
+        )
+
         intent = cls(
             intent_type=intent_type,
             canonical_instruction=canonical_instruction,
@@ -1317,6 +1375,7 @@ class OperatorIntent:
             action_name=action_name,
             repeat_count=repeat_count,
             mission_steps=mission_steps,
+            selection_objective=selection_objective,
         )
         intent._validate_supported_shape()
         return intent
@@ -2220,6 +2279,43 @@ def operator_intent_json_schema() -> dict[str, Any]:
                     "needed, including any not yet in the registry — the station will "
                     "classify missing ones as missing_skills. No weakening: do not "
                     "substitute a broader capability for a specific one."
+                ),
+            },
+            "selection_objective": {
+                "type": ["object", "null"],
+                "properties": {
+                    "attribute": {
+                        "type": "string",
+                        "description": (
+                            "The property being ranked/selected (e.g. 'distance', 'temperature'). "
+                            "Use 'distance' for door-distance queries."
+                        ),
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": list(SELECTION_DIRECTIONS),
+                        "description": (
+                            "'maximum' for superlatives like farthest/hottest/largest. "
+                            "'minimum' for superlatives like closest/coldest/smallest. "
+                            "Never use 'ascending' or 'descending' here."
+                        ),
+                    },
+                    "ordinal": {
+                        "type": "integer",
+                        "description": "1 for 'the farthest', 2 for 'second farthest', etc.",
+                    },
+                    "metric": {
+                        "type": ["string", "null"],
+                        "enum": [*OPERATOR_DISTANCE_METRICS, None],
+                    },
+                },
+                "required": ["attribute", "direction", "ordinal", "metric"],
+                "additionalProperties": False,
+                "description": (
+                    "Structured distillation of the operator's selection intent. "
+                    "Set this whenever the request involves picking by a ranked attribute "
+                    "(farthest door, second closest, hottest room, etc.). "
+                    "Null for non-ranking intents."
                 ),
             },
             "clear_memory": {"type": "boolean"},

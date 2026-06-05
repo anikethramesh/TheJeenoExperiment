@@ -253,6 +253,62 @@ Exit criteria:
 - `python -m pytest -q tests` passes.
 - Existing MiniGrid evals still pass without weakening the new generic gates.
 
+## Phase 9C - Objective Distillation
+
+Status: done.
+
+Goal: eliminate scattered vocabulary-based semantic normalization by having the
+LLM explicitly distill the operator's selection intent into a structured field.
+
+Problem this solved: `OperatorIntent` carried a plan (how to execute) but no
+explicit structured statement of what the operator wanted. Every validation layer
+had to re-derive intent from utterance text using hardcoded vocabulary lists.
+Adding a new primitive domain (temperature, size) required updating keyword lists
+in `semantic_normalizer.py`, `intent_verifier.py`, and `operator_station.py`.
+
+What was built:
+
+- `SelectionObjective` dataclass in `schemas.py` with two fields that matter:
+  - `direction: "minimum" | "maximum"` — closed enum, validated strictly
+  - `attribute: str` — open string; the LLM uses controlled vocabulary but the
+    code does not hardcode it
+- `selection_objective: SelectionObjective | None` field added to `OperatorIntent`
+- `OperatorIntent.from_dict()` parses `selection_objective` (optional,
+  backwards-compatible — existing LLM output without it continues to work)
+- `selection_objective` added to the JSON schema so structured LLM output can
+  include it, and to the LLM prompt with explicit vocabulary instruction:
+  `direction="maximum"` for farthest/hottest/largest/greatest, `direction="minimum"`
+  for closest/coldest/smallest
+- `IntentVerifier.enrich()` now has two paths:
+  - **Objective-based (primary)**: when `selection_objective` is set, inversion
+    check is `direction=="maximum" → expect order=="descending"`. Pure enum logic.
+    No vocabulary scanning. Attribute-agnostic.
+  - **Vocabulary-based (fallback)**: when `selection_objective` is absent
+    (SmokeTestCompiler, legacy LLM output), existing `infer_direction_from_utterance`
+    path runs unchanged.
+- `_validate_grounding_query_plan_preserves_utterance` in `operator_station.py`
+  updated with same two-path structure, gated on `intent.selection_objective`
+- `SmokeTestCompiler` updated to set `selection_objective` on intents it builds
+  for farthest, ordinal-farthest, and ordinal-closest cases
+- `test_objective_distillation.py` — 20 tests: parsing, inversion detection,
+  handle injection, vocabulary fallback, dual-direction plans, and the core
+  scalability proof (`test_objective_path_does_not_need_utterance_text`: a
+  completely opaque utterance still triggers inversion detection because the
+  check reads the objective, not the text)
+- `test_expose_compiler_boundary.py` transport A updated to include
+  `selection_objective: {direction: "maximum"}` with an inverted plan so the
+  expose test exercises the objective-based path end-to-end
+
+Scalability proof: adding a temperature ranking primitive requires one change —
+add `"temperature"` as an attribute example in the LLM prompt. No changes to
+`semantic_normalizer.py`, `intent_verifier.py`, or `operator_station.py`.
+
+Exit state:
+
+- `python evals/eval_master.py`: 37/37 passing (no regressions).
+- `python -m pytest -q tests`: 193 passed, 3 intentional failures (repair loop
+  expose tests from Phase 9A, unchanged, document Phase 10 work).
+
 ## Phase 10 - Operational Hardening
 
 Status: planned.

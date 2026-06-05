@@ -134,6 +134,24 @@ def _detect_metric(normalized: str) -> str | None:
     return None
 
 
+def infer_direction_from_utterance(text: str) -> str | None:
+    """Return 'descending', 'ascending', or None based on direction terms in text.
+
+    Uses the same vocabulary as normalize_distance_ordinal so direction semantics
+    live in one place. Callers (IntentVerifier) use this instead of maintaining
+    their own keyword lists — adding 'tiniest', 'hottest', 'largest' etc. only
+    requires updating _DESCENDING_DISTANCE_TERMS or _ASCENDING_DISTANCE_TERMS here.
+    """
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    for term in _DESCENDING_DISTANCE_TERMS:
+        if re.search(rf"\b{re.escape(term)}\b", normalized):
+            return "descending"
+    for term in _ASCENDING_DISTANCE_TERMS:
+        if re.search(rf"\b{re.escape(term)}\b", normalized):
+            return "ascending"
+    return None
+
+
 def get_semantic_constraints() -> dict[str, list[str]]:
     """Export the exact deterministic vocabulary constraints so the LLM compiler can advertise them."""
     return {

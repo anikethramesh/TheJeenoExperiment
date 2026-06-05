@@ -30,7 +30,7 @@ def main() -> int:
     metrics: dict[str, bool] = {}
 
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
-        session = _make_session(seed=42)
+        session = _make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
         
         # 1. Warm up claims
         session.handle_utterance("rank all the doors by manhattan distance")

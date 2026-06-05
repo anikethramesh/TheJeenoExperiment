@@ -19,6 +19,7 @@ from .schemas import (
     OperatorIntent,
     ProcedureRecipe,
     SchemaValidationError,
+    SelectionObjective,
     SensePlanTemplate,
     SkillPlanTemplate,
     TaskRequest,
@@ -735,6 +736,12 @@ class SmokeTestCompiler(CompilerBackend):
                     if is_navigation
                     else [semantic_ranked_handle]
                 ),
+                selection_objective=SelectionObjective(
+                    attribute="distance",
+                    direction="maximum" if ordinal_semantics.order == "descending" else "minimum",
+                    ordinal=ordinal_semantics.ordinal,
+                    metric=ordinal_semantics.metric,
+                ),
                 confidence=0.9,
                 reason="Deterministic semantic normalizer emitted a ranked ordinal distance plan.",
             )
@@ -814,6 +821,12 @@ class SmokeTestCompiler(CompilerBackend):
                     [ranked_handle, "task.go_to_object.door"]
                     if is_navigation
                     else [ranked_handle]
+                ),
+                selection_objective=SelectionObjective(
+                    attribute="distance",
+                    direction="maximum" if order == "descending" else "minimum",
+                    ordinal=ordinal,
+                    metric=metric if metric != "manhattan" else None,
                 ),
                 confidence=0.9,
                 reason="Deterministic operator-intent fallback emitted a ranked ordinal query plan.",
@@ -988,6 +1001,12 @@ class SmokeTestCompiler(CompilerBackend):
                     [ranked_handle, "task.go_to_object.door"]
                     if is_navigation
                     else [ranked_handle]
+                ),
+                selection_objective=SelectionObjective(
+                    attribute="distance",
+                    direction="maximum",
+                    ordinal=1,
+                    metric=metric if metric != "manhattan" else None,
                 ),
                 confidence=0.9,
                 reason="Deterministic operator-intent fallback emitted a farthest-door query plan.",
@@ -1592,6 +1611,24 @@ class LLMCompiler(CompilerBackend):
                 "order', 'list doors by distance', 'doors closest to me ranked') requires "
                 "'grounding.all_doors.ranked.manhattan.agent' — this is NOT the same as "
                 "grounding.closest_door.manhattan.agent and must be listed separately. "
+                "SELECTION_OBJECTIVE: Whenever the request involves selecting or navigating "
+                "to an object chosen by a ranked attribute (farthest door, second closest, "
+                "highest-distance room, etc.), set selection_objective with: "
+                "attribute='distance' for door-distance queries; "
+                "direction='maximum' for superlatives meaning 'the most' (farthest, furthest, "
+                "most distant, highest, largest, greatest, maximum — any domain); "
+                "direction='minimum' for superlatives meaning 'the least' (closest, nearest, "
+                "shortest, lowest, smallest, minimum — any domain); "
+                "ordinal=1 for 'the farthest', ordinal=2 for 'second farthest', etc.; "
+                "metric='manhattan' or 'euclidean' if specified, else null. "
+                "Never use 'ascending' or 'descending' in selection_objective.direction — "
+                "those are grounding_query_plan fields. "
+                "Set selection_objective=null for non-ranking intents (status queries, "
+                "scene questions, knowledge updates, ranked listings without a specific pick). "
+                "Example: 'go to the farthest door' -> selection_objective={attribute:'distance', "
+                "direction:'maximum', ordinal:1, metric:null}. "
+                "Example: 'navigate to the second closest door' -> selection_objective={"
+                "attribute:'distance', direction:'minimum', ordinal:2, metric:null}. "
                 "GROUNDING_QUERY_PLAN: For any operator request that asks about visible "
                 "doors, distances, ordering, closest/farthest, ordinal ranks, color-specific "
                 "existence, or a target selected from scene grounding, emit a "

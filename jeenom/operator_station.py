@@ -626,6 +626,28 @@ class OperatorStationSession:
         intent: OperatorIntent,
         utterance: str,
     ) -> OperatorCommand:
+        # Reset per-turn so stale values from previous turns are never observed.
+        self.last_readiness_graph = None
+
+        # ── Proactive Intent Signal Verification (Phase 7.595) ───────────────
+        # Runs unconditionally on ALL LLM outputs before any routing.
+        # Blueprint Rule 9: deterministic gate between compiler output and
+        # CapabilityMatcher — regardless of what the LLM declared.
+        intent, verif_result = default_verifier.enrich(utterance, intent)
+        if verif_result.injected_handles:
+            self.log(f"intent verifier injected: {verif_result.summary()}")
+        if verif_result.inversion_detected:
+            self.log(f"intent verifier blocked inversion: {verif_result.inversion_reason}")
+            return OperatorCommand(
+                kind="ambiguous",
+                utterance=utterance,
+                payload={"message": (
+                    "Semantic inversion detected in compiled plan: "
+                    f"{verif_result.inversion_reason} "
+                    "Please rephrase."
+                )},
+            )
+
         request_plan_recorded = False
         if intent.grounding_query_plan is not None:
             self._record_request_plan(utterance, intent)
@@ -633,14 +655,6 @@ class OperatorStationSession:
             plan_command = self._command_from_grounding_query_plan(utterance, intent)
             if plan_command is not None:
                 return plan_command
-
-        # ── Proactive Intent Signal Verification (Phase 7.595) ───────────────
-        # Extracts semantic signals from the utterance regardless of LLM output.
-        # Injects required_capabilities the LLM failed to declare.
-        # Catches intent inversion (farthest→closest) and silent degradation.
-        intent, verif_result = default_verifier.enrich(utterance, intent)
-        if verif_result.injected_handles:
-            self.log(f"intent verifier injected: {verif_result.summary()}")
 
         if not request_plan_recorded:
             self._record_request_plan(utterance, intent)
@@ -1173,6 +1187,7 @@ class OperatorStationSession:
         invalid_reason = self._validate_grounding_query_plan_preserves_utterance(
             utterance,
             plan,
+            intent=intent,
         )
         if invalid_reason is not None:
             if plan.get("metric") is None:
@@ -1320,9 +1335,9 @@ class OperatorStationSession:
         self,
         utterance: str,
         plan: dict[str, Any],
+        intent: "OperatorIntent | None" = None,
     ) -> str | None:
         normalized = _normalize_utterance(utterance)
-        constraints = {str(c).lower() for c in plan.get("preserved_constraints", [])}
         ordinal_words = {
             "first": 1,
             "1st": 1,
@@ -1347,24 +1362,46 @@ class OperatorStationSession:
                 }:
                     return f"The utterance says {word}, but the plan ordinal is {plan.get('ordinal')}."
 
-        has_farthest = any(
-            term in normalized
-            for term in ("farthest", "furthest", "most distant", "least close")
-        )
-        has_closest = any(
-            term in normalized
-            for term in ("closest", "nearest", "shortest")
-        )
         answer_fields = {str(f).lower() for f in plan.get("answer_fields", [])}
         operation = plan.get("operation")
         order = plan.get("order")
 
-        if has_farthest and "farthest" not in constraints:
-            if not (order == "descending" or "farthest" in answer_fields):
-                return "The utterance asks for farthest, but the plan does not preserve descending/farthest semantics."
-        if has_closest and "closest" not in constraints:
-            if not (order == "ascending" or "closest" in answer_fields or operation == "rank"):
-                return "The utterance asks for closest, but the plan does not preserve ascending/closest semantics."
+        # ── Direction check: objective-based (primary) vs vocabulary (fallback) ──
+        # When selection_objective is set by the LLM, check direction purely from
+        # the structured enum — no vocabulary lists needed. This makes the check
+        # domain-agnostic: "hottest"→maximum works the same as "farthest"→maximum.
+        selection_obj = getattr(intent, "selection_objective", None) if intent is not None else None
+        if selection_obj is not None:
+            expected_order = (
+                "descending" if selection_obj.direction == "maximum" else "ascending"
+            )
+            if order is not None and order != expected_order:
+                covers = (
+                    (selection_obj.direction == "maximum" and "farthest" in answer_fields)
+                    or (selection_obj.direction == "minimum" and "closest" in answer_fields)
+                )
+                if not covers:
+                    return (
+                        f"Objective says direction={selection_obj.direction!r} "
+                        f"(requires order={expected_order!r}) but plan declares order={order!r}."
+                    )
+        else:
+            # Vocabulary-based fallback (SmokeTestCompiler, legacy LLM output).
+            has_farthest = any(
+                term in normalized
+                for term in ("farthest", "furthest", "most distant", "least close")
+            )
+            has_closest = any(
+                term in normalized
+                for term in ("closest", "nearest", "shortest")
+            )
+            if has_farthest:
+                if not (order == "descending" or "farthest" in answer_fields):
+                    return "The utterance asks for farthest, but the plan does not preserve descending/farthest semantics."
+            if has_closest:
+                if not (order == "ascending" or "closest" in answer_fields or operation == "rank"):
+                    return "The utterance asks for closest, but the plan does not preserve ascending/closest semantics."
+
         if "euclidean" in normalized and plan.get("metric") != "euclidean":
             return "The utterance specifies Euclidean distance, but the plan does not."
         if "manhattan" in normalized and plan.get("metric") != "manhattan":
