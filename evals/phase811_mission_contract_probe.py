@@ -43,7 +43,7 @@ from minigrid.wrappers import FullyObsWrapper
 
 from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.memory import OperationalMemory
-from jeenom.operator_station import OperatorCommand, OperatorStationSession
+from jeenom.operator_station import ApprovedCommand, OperatorStationSession
 from jeenom.schemas import (
     MissionContract,
     OPERATOR_INTENT_TYPES,
@@ -141,7 +141,7 @@ def main() -> int:
             "mission: go to the red door; go to the blue door",
         )
         metrics["routes_to_mission_execute"] = (
-            isinstance(cmd, OperatorCommand)
+            isinstance(cmd, ApprovedCommand)
             and cmd.kind == "mission_execute"
             and cmd.payload.get("steps") == ["go to the red door", "go to the blue door"]
         )

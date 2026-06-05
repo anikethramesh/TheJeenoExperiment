@@ -143,13 +143,13 @@ def main() -> int:
         sess.handle_utterance("remember bingo means go to the red door")
         sess.handle_utterance("remember scout means go to the green door")
 
-        from jeenom.operator_station import OperatorCommand
+        from jeenom.operator_station import ApprovedCommand
         cmd = sess.command_from_operator_intent(
             OperatorIntent.from_dict(dict(raw, reason="test dispatch")),
             "do bingo then scout",
         )
         metrics["procedure_recall_routes_to_execute"] = (
-            isinstance(cmd, OperatorCommand) and cmd.kind == "procedure_execute"
+            isinstance(cmd, ApprovedCommand) and cmd.kind == "procedure_execute"
             and cmd.payload.get("steps") == ["bingo", "scout"]
         )
 

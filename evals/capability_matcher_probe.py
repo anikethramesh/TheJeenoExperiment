@@ -201,7 +201,7 @@ def main() -> int:
         capability_status="executable",  # LLM incorrectly says executable
         confidence=0.9,
     )
-    from jeenom.operator_station import OperatorCommand
+    from jeenom.operator_station import ApprovedCommand
     cmd = _run(lambda: session.command_from_operator_intent(intent_override, "test"))
     checks["matcher_overrides_llm_executable"] = cmd.kind == "missing_skills"
     checks["matcher_result_on_command"] = cmd.capability_match is not None
@@ -228,8 +228,8 @@ def main() -> int:
         "which door is closest by manhattan distance", memory=mem
     )
     checks["smoke_closest_emits_required_caps"] = len(intent_closest.required_capabilities) > 0
-    checks["smoke_closest_requires_closest_manhattan"] = (
-        "grounding.closest_door.manhattan.agent" in intent_closest.required_capabilities
+    checks["smoke_closest_requires_ranked_manhattan"] = (
+        "grounding.all_doors.ranked.manhattan.agent" in intent_closest.required_capabilities
     )
 
     intent_ranked_smoke = compiler.compile_operator_intent(

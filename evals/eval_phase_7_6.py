@@ -144,7 +144,8 @@ def _check_grounding_composition(checks: dict[str, bool]) -> None:
 # ── Phase 7.6: Clarification Loop ───────────────────────────────────────────
 
 def _check_clarification(checks: dict[str, bool]) -> None:
-    # SmokeTestCompiler handles "go to the closest door" → needs_clarification
+    # SmokeTestCompiler handles "go to the closest door" through the same
+    # ranked Manhattan grounding path used by farthest-door requests.
     s = OperatorStationSession(
         compiler=SmokeTestCompiler(),
         compiler_name="smoke",
@@ -157,25 +158,29 @@ def _check_clarification(checks: dict[str, bool]) -> None:
     s.last_result = None
 
     first_response = _run(lambda: s.handle_utterance("go to the closest door"))
-    checks["clarify_station_returned_clarify"] = first_response.startswith("CLARIFY")
-    checks["clarify_mentions_distance_metric"] = "distance metric" in first_response.lower()
-    checks["clarify_lists_manhattan"] = "manhattan" in first_response.lower()
-    checks["clarify_pending_created"] = s.pending_clarification is not None
-    checks["clarify_pending_type"] = (
-        s.pending_clarification is not None
-        and s.pending_clarification.clarification_type == "target_selector_missing_field"
+    intent = SmokeTestCompiler().compile_operator_intent(
+        "go to the closest door",
+        memory=s.memory,
     )
-    checks["clarify_pending_missing_field"] = (
-        s.pending_clarification is not None
-        and s.pending_clarification.missing_field == "distance_metric"
+    plan = intent.grounding_query_plan or {}
+    checks["closest_default_runs"] = (
+        isinstance(first_response, str) and "RUN COMPLETE" in first_response
     )
-    checks["clarify_no_result_before_answer"] = s.last_result is None
-
-    # Answer with "manhattan" → task executes
-    answer_response = _run(lambda: s.handle_utterance("manhattan"))
-    checks["clarify_answer_cleared_pending"] = s.pending_clarification is None
-    checks["clarify_answer_runs"] = (
-        isinstance(answer_response, str) and "RUN COMPLETE" in answer_response
+    checks["closest_default_uses_ranked_plan"] = (
+        plan.get("primitive_handle") == "grounding.all_doors.ranked.manhattan.agent"
+    )
+    checks["closest_default_no_pending_clarification"] = s.pending_clarification is None
+    checks["closest_default_task_complete"] = (
+        s.last_result is not None
+        and s.last_result.get("final_state", {}).get("task_complete") is True
+    )
+    checks["closest_default_runtime_llm_zero"] = (
+        s.last_result is not None
+        and s.last_result.get("runtime_llm_calls_during_render") == 0
+    )
+    checks["closest_default_cache_miss_zero"] = (
+        s.last_result is not None
+        and s.last_result.get("cache_miss_during_render") == 0
     )
 
 

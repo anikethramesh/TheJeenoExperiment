@@ -256,7 +256,7 @@ def _check_collaborative(checks: dict[str, bool]) -> None:
         lambda: session.handle_utterance("go to the closest door using euclidean distance")
     )
     checks["proposal_returned"] = "SYNTHESIS PROPOSAL" in response
-    checks["proposal_mentions_handle"] = "grounding.closest_door.euclidean.agent" in response
+    checks["proposal_mentions_handle"] = "grounding.all_doors.ranked.euclidean.agent" in response
     checks["pending_proposal_set"] = session.pending_synthesis_proposal is not None
 
     # 2. "no" → pending cleared

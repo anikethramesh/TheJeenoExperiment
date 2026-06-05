@@ -27,7 +27,7 @@ Checks:
   handle_utterance_raw_seq_runs          — handle_utterance('go to red door then green door')
                                            returns PROCEDURE COMPLETE
   handle_utterance_last_result_set       — last_result is populated after sequence execution
-  try_natural_sequence_raw_returns_cmd   — _try_natural_sequence returns OperatorCommand for
+  try_natural_sequence_raw_returns_cmd   — _try_natural_sequence returns ApprovedCommand for
                                            multi-word sequential utterance
 """
 from __future__ import annotations
@@ -136,13 +136,13 @@ def main() -> int:
     # ── Station dispatch: sequence_instruction → sequence_execute ─────────────
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         sess = _make_session()
-        from jeenom.operator_station import OperatorCommand
+        from jeenom.operator_station import ApprovedCommand
         cmd = sess.command_from_operator_intent(
             OperatorIntent.from_dict(raw),
             "go to the red door then go to the green door",
         )
         metrics["sequence_instruction_routes_to_execute"] = (
-            isinstance(cmd, OperatorCommand)
+            isinstance(cmd, ApprovedCommand)
             and cmd.kind == "sequence_execute"
             and cmd.payload.get("steps") == ["go to the red door", "go to the green door"]
         )
@@ -154,7 +154,7 @@ def main() -> int:
         metrics["handle_utterance_raw_seq_runs"] = "PROCEDURE COMPLETE" in resp
         metrics["handle_utterance_last_result_set"] = sess2.last_result is not None
 
-    # ── _try_natural_sequence returns OperatorCommand for multi-word parts ────
+    # ── _try_natural_sequence returns ApprovedCommand for multi-word parts ────
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         sess3 = _make_session()
         cmd3 = sess3._try_natural_sequence("go to the red door then go to the green door")

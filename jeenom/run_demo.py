@@ -43,7 +43,7 @@ def run_motor_sequence(
     render_mode: str,
     actions: list[str],
 ) -> dict:
-    """Execute a sequence of motor-primitive actions directly, bypassing Cortex/Spine.
+    """Execute a sequence of motor-primitive actions for an authorized station caller.
 
     Each entry in `actions` must be a key in ACTION_PRIMITIVES with runtime_kind='env_action'.
     Returns a result dict compatible with last_result (task_complete always True).

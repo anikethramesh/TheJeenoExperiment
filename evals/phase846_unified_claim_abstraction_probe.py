@@ -191,14 +191,14 @@ def main() -> int:
     arb_params = set(arb_init_sig.parameters.keys()) - {"self"}
     metrics["arbitrator_has_no_kb_write_path"] = "knowledge_base" not in arb_params
 
-    # ── Cortex routes, does not execute: _command_from_concept returns OperatorCommand ──
+    # ── Cortex routes, does not execute: _command_from_concept returns ApprovedCommand ──
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         sess3 = _make_session()
         sess3.handle_utterance("remember bingo means go to the red door")
-        from jeenom.operator_station import OperatorCommand
+        from jeenom.operator_station import ApprovedCommand
         cmd = sess3._command_from_concept("bingo")
         metrics["cortex_routes_task_not_executes"] = (
-            isinstance(cmd, OperatorCommand)
+            isinstance(cmd, ApprovedCommand)
             and cmd.kind == "task_instruction"
         )
 

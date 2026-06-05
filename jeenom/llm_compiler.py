@@ -1089,8 +1089,48 @@ class SmokeTestCompiler(CompilerBackend):
                 if "euclidean" in normalized
                 else "manhattan"
                 if "manhattan" in normalized
-                else None
+                else "manhattan"
             )
+            is_closest_knowledge_update = (
+                "delivery target" in normalized or "make" in normalized
+            )
+            if not is_closest_knowledge_update:
+                closest_ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
+                closest_required = [closest_ranked_handle]
+                if is_navigation:
+                    closest_required.append("task.go_to_object.door")
+                return OperatorIntent(
+                    intent_type="task_instruction" if is_navigation else "status_query",
+                    status_query=None if is_navigation else "ground_target",
+                    task_type="go_to_object" if is_navigation else None,
+                    target_selector=None,
+                    grounding_query_plan={
+                        "object_type": "door",
+                        "operation": "select" if is_navigation else "answer",
+                        "primitive_handle": closest_ranked_handle,
+                        "metric": metric,
+                        "reference": "agent",
+                        "order": "ascending",
+                        "ordinal": 1,
+                        "color": None,
+                        "exclude_colors": [],
+                        "distance_value": None,
+                        "tie_policy": "clarify" if is_navigation else "display",
+                        "answer_fields": ["closest", "distance"],
+                        "required_capabilities": closest_required,
+                        "preserved_constraints": ["closest", "door", metric],
+                    },
+                    capability_status="executable" if metric == "manhattan" else "synthesizable",
+                    required_capabilities=closest_required,
+                    selection_objective=SelectionObjective(
+                        attribute="distance",
+                        direction="minimum",
+                        ordinal=1,
+                        metric=metric if metric != "manhattan" else None,
+                    ),
+                    confidence=0.9,
+                    reason="Deterministic operator-intent fallback emitted a closest-door query plan.",
+                )
             if is_ranked_query:
                 metric_suffix = metric or "manhattan"
                 return OperatorIntent(
@@ -1567,15 +1607,16 @@ class LLMCompiler(CompilerBackend):
                 "says a missing primitive is safe_to_synthesize; missing_skills when a "
                 "required primitive is missing and not synthesizable; unsupported when the "
                 "request is outside the manifest. Closest-door Manhattan grounding is "
-                "implemented. Closest-door Euclidean grounding is missing but marked safe to "
-                "synthesize later; emit capability_status=synthesizable with "
-                "distance_metric=euclidean rather than unsupported. If closest is requested "
-                "without a metric, emit capability_status=needs_clarification and a closest "
-                "selector with null distance fields so the station can ask a clarification. "
-                "Example: utterance='I see. What is the closest door to you' -> "
-                "intent_type=status_query, capability_status=needs_clarification, "
-                "status_query=ground_target, target_selector={object_type: door, "
-                "relation: closest, distance_metric: null, distance_reference: null}. "
+                "implemented through grounding.all_doors.ranked.manhattan.agent. Closest-door "
+                "Euclidean grounding is missing but marked safe to synthesize later through "
+                "grounding.all_doors.ranked.euclidean.agent; emit capability_status=synthesizable "
+                "with metric=euclidean rather than unsupported. If closest is requested without "
+                "a metric, default to metric=manhattan so closest and farthest use the same "
+                "ranked-distance grounding path. Example: utterance='I see. What is the closest "
+                "door to you' -> intent_type=status_query, capability_status=executable, "
+                "status_query=ground_target, grounding_query_plan={object_type: door, "
+                "operation: answer, primitive_handle: grounding.all_doors.ranked.manhattan.agent, "
+                "metric: manhattan, order: ascending, ordinal: 1}. "
                 "If active_claims_summary is provided in the payload, the operator may be "
                 "referring to a prior grounding result. Phrases like 'the next closest', "
                 "'next one', 'the next door', 'the other door', 'the remaining door', or "
@@ -1706,8 +1747,9 @@ class LLMCompiler(CompilerBackend):
                 "'turn right twice', 'move forward once', 'turn left 4 times' — emit "
                 "intent_type='motor_command' with action_name set to the primitive key "
                 "('move_forward', 'turn_right', 'turn_left', 'pickup', 'toggle') and "
-                "repeat_count set to the integer count (default 1). Motor commands bypass "
-                "all task planning and execute the raw action directly. "
+                "repeat_count set to the integer count (default 1). Motor commands are "
+                "low-level control requests that require station authorization with a "
+                "RawMotorTicket before execution. "
                 "Set required_capabilities=[]. "
                 "Do NOT classify concept-teach utterances as task_instruction. "
                 "Do NOT try to execute the concept's underlying instruction yourself. "

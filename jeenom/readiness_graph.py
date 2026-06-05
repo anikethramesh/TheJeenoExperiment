@@ -20,6 +20,12 @@ def _status_for_primitive(
     if handle is None:
         if step.operation in {"answer", "read", "update", "reset", "refuse", "select"}:
             return "executable", "No primitive handle required for this plan step."
+        if (
+            step.layer == "action"
+            and step.operation == "execute"
+            and bool(step.constraints.get("raw_motor"))
+        ):
+            return "executable", "Raw motor primitive is explicitly authorized by plan."
         return "needs_clarification", "Plan step is missing a required primitive handle."
 
     spec = registry.lookup(handle)
@@ -232,6 +238,8 @@ def _next_action(
     if blocking is None:
         if plan.expected_response == "execute_task":
             return "execute_task"
+        if plan.expected_response == "execute_motor":
+            return "execute_motor"
         if plan.expected_response == "update_memory":
             return "update_memory"
         if plan.expected_response == "answer_query":

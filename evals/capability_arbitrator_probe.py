@@ -186,9 +186,9 @@ def main() -> int:
             session.last_arbitration_trace.decision.decision_type == "synthesize"
         )
         checks["farthest_trace_has_missing"] = (
-            "grounding.closest_door.euclidean.agent"
+            "grounding.all_doors.ranked.euclidean.agent"
             in session.last_arbitration_trace.missing_handles
-            or "grounding.closest_door.euclidean.agent"
+            or "grounding.all_doors.ranked.euclidean.agent"
             in session.last_arbitration_trace.synthesizable_handles
         )
     else:

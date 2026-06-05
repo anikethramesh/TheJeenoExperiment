@@ -45,6 +45,13 @@ EVAL_SPECS: list[dict[str, object]] = [
     {"file": "phase9_repair_truthfulness_probe.py", "suites": ["cleanup"]},
     {"file": "phase9_request_plan_gate_probe.py", "suites": ["cleanup"]},
     {"file": "phase9b_substrate_contract_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase9d_clarification_resume_gate_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase9d_execution_ticket_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase9d_memory_write_gate_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase9d_mission_child_ticket_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase9d_motor_ticket_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase9d_schema_enforcement_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase9d_static_architecture_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "request_plan_probe.py", "suites": ["architecture"]},
 ]
 

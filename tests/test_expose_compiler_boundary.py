@@ -130,22 +130,22 @@ def _transport_hallucinated_handle(payload: dict[str, Any]) -> dict[str, Any]:
     the station builds its own RequestPlan from structural fields and ignores the
     LLM's self-reported required_capabilities for routing decisions.
 
-    IMPORTANT: tests use "go to the closest door" (no color) because:
+    IMPORTANT: tests use "go to the mystery door" because:
     - "go to the [color] door" matches the deterministic fast path (classify_utterance
       line 283) and bypasses the LLM compiler entirely.
-    - "go to the closest [color] door" bypasses the explicit fast path but still gets
-      intercepted by _command_from_active_claim_text, which uses color from claims.
-    - "go to the closest door" (no color): _color_reference_in_utterance returns None,
-      so _command_from_active_claim_text returns None → LLM compiler is invoked.
+    - "go to the closest door" is now a deterministic ranked-distance plan, so it
+      correctly bypasses the LLM compiler too.
+    - "go to the mystery door" is unresolved locally, so the LLM compiler is invoked.
     """
     utterance = _utterance_from(payload)
-    if "closest door" in utterance.lower() or "farthest" in utterance.lower():
+    if "mystery door" in utterance.lower() or "farthest" in utterance.lower():
         return {
             "intent_type": "task_instruction",
             "task_type": "go_to_object",
             "canonical_instruction": utterance,
             "target": None,
             "target_selector": None,
+            "clear_memory": False,
             "grounding_query_plan": {
                 "object_type": "door",
                 "operation": "select",
@@ -163,7 +163,7 @@ def _transport_hallucinated_handle(payload: dict[str, Any]) -> dict[str, Any]:
                     "grounding.hallucinated_primitive.does_not_exist",
                     "task.go_to_object.door",
                 ],
-                "preserved_constraints": ["closest", "door"],
+                "preserved_constraints": ["mystery", "door"],
             },
             "required_capabilities": [
                 "grounding.hallucinated_primitive.does_not_exist",
@@ -335,12 +335,12 @@ class TestHallucinatedHandleIsBlocked(unittest.TestCase):
         A hallucinated handle only in required_capabilities is silently ignored
         because the station constructs RequestPlan from structural intent fields.
 
-        "go to the closest red door" is used instead of "go to the red door" because
+        "go to the mystery door" is used instead of "go to the red door" because
         the latter matches the deterministic fast path and never calls the LLM compiler.
         """
         session = _make_session(_llm_compiler(_transport_hallucinated_handle))
         session.handle_utterance("what do you see")
-        response = session.handle_utterance("go to the closest door")
+        response = session.handle_utterance("go to the mystery door")
 
         self.assertNotIn(
             "RUN COMPLETE",
@@ -353,7 +353,7 @@ class TestHallucinatedHandleIsBlocked(unittest.TestCase):
         """ReadinessGraph must report missing_skills (or similar) for unknown handle."""
         session = _make_session(_llm_compiler(_transport_hallucinated_handle))
         session.handle_utterance("what do you see")
-        session.handle_utterance("go to the closest door")
+        session.handle_utterance("go to the mystery door")
 
         graph_status = getattr(session.last_readiness_graph, "graph_status", None)
         self.assertIn(

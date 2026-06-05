@@ -4,6 +4,7 @@ import argparse
 import inspect
 import re
 import tempfile
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -28,11 +29,18 @@ from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .primitive_library import ACTION_PRIMITIVES, TASK_PRIMITIVES
 from .repair_loop import RepairEvent, RepairLoop
 from .schemas import (
+    ApprovedCommand,
     ArbitrationTrace,
+    CommandResult,
+    CorticalEnvelope,
     EnvironmentIdentity,
+    ExecutionTicket,
     GroundedDoorEntry,
+    MemoryUpdate,
+    MemoryWriteTicket,
     OperatorIntent,
     ProcedureRecipe,
+    RawMotorTicket,
     ReadinessGraph,
     RequestPlan,
     SceneModel,
@@ -51,14 +59,6 @@ SUPPORTED_COLORS = ("red", "green", "blue", "yellow", "purple", "grey", "gray")
 
 
 @dataclass
-class OperatorCommand:
-    kind: str
-    utterance: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    capability_match: Any = None  # CapabilityMatchResult | None
-
-
-@dataclass
 class PendingClarification:
     clarification_type: str
     original_utterance: str
@@ -67,6 +67,9 @@ class PendingClarification:
     missing_field: str
     supported_values: list[str]
     candidates: list[dict[str, Any]] = field(default_factory=list)
+    request_plan: RequestPlan | None = None
+    readiness_graph: ReadinessGraph | None = None
+    pending_envelope: CorticalEnvelope | None = None
 
 
 @dataclass
@@ -145,23 +148,23 @@ def _looks_like_question(normalized_utterance: str) -> bool:
     )
 
 
-def classify_utterance(utterance: str) -> OperatorCommand:
+def classify_utterance(utterance: str) -> ApprovedCommand:
     text = utterance.strip()
     normalized = _normalize_utterance(text)
 
     if normalized in {"quit", "exit", "bye"}:
-        return OperatorCommand(kind="quit", utterance=text)
+        return ApprovedCommand(command_type="quit", utterance=text)
 
     if normalized in {"cancel", "never mind", "nevermind"}:
-        return OperatorCommand(kind="cancel", utterance=text)
+        return ApprovedCommand(command_type="cancel", utterance=text)
 
     if normalized in {"reset", "reset episode"}:
-        return OperatorCommand(kind="reset", utterance=text, payload={"clear_memory": False})
+        return ApprovedCommand(command_type="reset", utterance=text, payload={"clear_memory": False})
     if normalized in {"clear memory", "forget memory", "forget everything", "reset memory"}:
-        return OperatorCommand(kind="reset", utterance=text, payload={"clear_memory": True})
+        return ApprovedCommand(command_type="reset", utterance=text, payload={"clear_memory": True})
 
     if normalized in {"show cache", "cache", "cache status", "what is cached?"}:
-        return OperatorCommand(kind="cache_query", utterance=text)
+        return ApprovedCommand(command_type="cache_query", utterance=text)
 
     if normalized in {
         "what do you see?",
@@ -180,7 +183,7 @@ def classify_utterance(utterance: str) -> OperatorCommand:
         "describe what you see",
         "show scene",
     }:
-        return OperatorCommand(kind="status_query", utterance=text, payload={"query": "scene"})
+        return ApprovedCommand(command_type="status_query", utterance=text, payload={"query": "scene"})
 
     if normalized in {
         "what was the last target?",
@@ -190,7 +193,7 @@ def classify_utterance(utterance: str) -> OperatorCommand:
         "previous target",
         "last target",
     }:
-        return OperatorCommand(kind="status_query", utterance=text, payload={"query": "last_target"})
+        return ApprovedCommand(command_type="status_query", utterance=text, payload={"query": "last_target"})
 
     if normalized in {
         "help",
@@ -209,7 +212,7 @@ def classify_utterance(utterance: str) -> OperatorCommand:
             query = "last_run"
         else:
             query = "status"
-        return OperatorCommand(kind="status_query", utterance=text, payload={"query": query})
+        return ApprovedCommand(command_type="status_query", utterance=text, payload={"query": query})
 
     if normalized in {
         "go there again",
@@ -218,13 +221,13 @@ def classify_utterance(utterance: str) -> OperatorCommand:
         "repeat the last task",
         "repeat the previous task",
     }:
-        return OperatorCommand(kind="task_instruction", utterance=text)
+        return ApprovedCommand(command_type="task_instruction", utterance=text)
 
     if "delivery target" in normalized and re.search(
         r"^(go to|reach|find|get to|head to|navigate to) (the )?delivery target$",
         normalized,
     ):
-        return OperatorCommand(kind="task_instruction", utterance=text)
+        return ApprovedCommand(command_type="task_instruction", utterance=text)
 
     # Concept teach — explicit syntax: "remember X means Y" / "define X as Y"
     _concept_teach_m = re.match(
@@ -245,7 +248,7 @@ def classify_utterance(utterance: str) -> OperatorCommand:
             if _raw_m is not None
             else _concept_teach_m.group(2).strip().strip("'\"")
         )
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="concept_teach",
             utterance=text,
             payload={"name": cname, "utterance": cutterance},
@@ -259,7 +262,7 @@ def classify_utterance(utterance: str) -> OperatorCommand:
     _concept_forget_m = re.match(r"^forget(?:\s+concept)?\s+(.+)$", normalized)
     if _concept_forget_m:
         cname = _concept_forget_m.group(1).strip().strip("'\"")
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="concept_forget",
             utterance=text,
             payload={"name": cname},
@@ -274,16 +277,16 @@ def classify_utterance(utterance: str) -> OperatorCommand:
         "what have you learned",
         "what do you remember",
     }:
-        return OperatorCommand(kind="status_query", utterance=text, payload={"query": "concepts"})
+        return ApprovedCommand(command_type="status_query", utterance=text, payload={"query": "concepts"})
 
     target_fact = _parse_target_fact(normalized)
     if target_fact is not None:
-        return OperatorCommand(kind="knowledge_update", utterance=text, payload=target_fact)
+        return ApprovedCommand(command_type="knowledge_update", utterance=text, payload=target_fact)
 
     if _parse_exact_go_to_object_utterance(normalized) is not None:
-        return OperatorCommand(kind="task_instruction", utterance=text)
+        return ApprovedCommand(command_type="task_instruction", utterance=text)
 
-    return OperatorCommand(kind="unresolved", utterance=text)
+    return ApprovedCommand(command_type="unresolved", utterance=text)
 
 
 def _parse_target_fact(normalized: str) -> dict[str, str] | None:
@@ -408,6 +411,13 @@ class OperatorStationSession:
         self.pending_clarification: PendingClarification | None = None
         self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
         self.active_claims: StationActiveClaims | None = None
+        self.last_execution_ticket: ExecutionTicket | None = None
+        self.last_memory_write_ticket: MemoryWriteTicket | None = None
+        self.last_raw_motor_ticket: RawMotorTicket | None = None
+        self.last_operator_intent: OperatorIntent | None = None
+        self.last_cortical_envelope: CorticalEnvelope | None = None
+        self.last_approved_command: ApprovedCommand | None = None
+        self.last_command_result: CommandResult | None = None
         self.current_environment_identity: EnvironmentIdentity | None = None
         self.last_environment_invalidation_reason: str | None = None
         self.last_request_plan: RequestPlan | None = None
@@ -487,7 +497,136 @@ class OperatorStationSession:
 
         return "go to the red door"
 
-    def handle_utterance(self, utterance: str) -> str:
+    def _ticket_for_trace(
+        self,
+        request_id: str | None,
+    ) -> ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None:
+        if request_id is None:
+            return None
+        for ticket in (
+            self.last_execution_ticket,
+            self.last_memory_write_ticket,
+            self.last_raw_motor_ticket,
+        ):
+            if ticket is not None and ticket.request_id == request_id:
+                return ticket
+        return None
+
+    def _trace_command_type(
+        self,
+        message: str,
+        graph: ReadinessGraph | None,
+        plan: RequestPlan | None,
+    ) -> str:
+        if graph is not None:
+            return graph.next_action
+        if plan is not None:
+            return plan.expected_response
+        first_line = message.splitlines()[0] if message else ""
+        return first_line.split(" ", 1)[0].lower() if first_line else "response"
+
+    def _record_command_result(
+        self,
+        utterance: str,
+        message: str,
+        *,
+        plan: RequestPlan | None,
+        graph: ReadinessGraph | None,
+    ) -> CommandResult:
+        envelope = CorticalEnvelope(
+            envelope_id=f"envelope:{uuid.uuid4().hex}",
+            utterance=utterance,
+            intent=self.last_operator_intent,
+            request_plan=plan,
+            readiness_graph=graph,
+            provenance={
+                "station": "OperatorStationSession",
+                "compiler": self.compiler_name,
+            },
+            pending_context={
+                "clarification": self.pending_clarification.clarification_type
+                if self.pending_clarification is not None
+                else None,
+                "synthesis": self.pending_synthesis_proposal.handle
+                if self.pending_synthesis_proposal is not None
+                else None,
+            },
+        )
+        request_id = (
+            graph.request_id
+            if graph is not None
+            else plan.request_id
+            if plan is not None
+            else envelope.envelope_id
+        )
+        command = ApprovedCommand(
+            command_type=self._trace_command_type(message, graph, plan),
+            request_id=request_id,
+            source="station",
+            payload={"first_line": message.splitlines()[0] if message else ""},
+        )
+        ticket = self._ticket_for_trace(request_id)
+        result_payload: dict[str, Any] = {"message": message}
+        if ticket is not None and self.last_result is not None:
+            result_payload["last_result"] = dict(self.last_result)
+        command_result = CommandResult(
+            message,
+            envelope=envelope,
+            command=command,
+            ticket=ticket,
+            result=result_payload,
+        )
+        self.last_cortical_envelope = envelope
+        self.last_approved_command = command
+        self.last_command_result = command_result
+        return command_result
+
+    def _pending_clarification_trace(
+        self,
+        utterance: str,
+        clarification_type: str,
+    ) -> dict[str, Any]:
+        envelope = CorticalEnvelope(
+            envelope_id=f"pending:{uuid.uuid4().hex}",
+            utterance=utterance,
+            intent=self.last_operator_intent,
+            request_plan=self.last_request_plan,
+            readiness_graph=self.last_readiness_graph,
+            provenance={
+                "station": "OperatorStationSession",
+                "compiler": self.compiler_name,
+            },
+            pending_context={"clarification": clarification_type},
+        )
+        return {
+            "request_plan": self.last_request_plan,
+            "readiness_graph": self.last_readiness_graph,
+            "pending_envelope": envelope,
+        }
+
+    def handle_utterance(self, utterance: str) -> CommandResult:
+        self.last_cortical_envelope = None
+        self.last_approved_command = None
+        self.last_command_result = None
+        previous_plan = self.last_request_plan
+        previous_graph = self.last_readiness_graph
+        message = self._handle_utterance_text(utterance)
+        plan = self.last_request_plan if self.last_request_plan is not previous_plan else None
+        graph = (
+            self.last_readiness_graph
+            if self.last_readiness_graph is not previous_graph
+            else None
+        )
+        return self._record_command_result(
+            utterance,
+            str(message),
+            plan=plan,
+            graph=graph,
+        )
+
+    def _handle_utterance_text(self, utterance: str) -> str:
+        self.last_repair_events = []
+        self.last_operational_mismatches = []
         command = classify_utterance(utterance)
         if self.pending_synthesis_proposal is not None:
             return self.handle_pending_synthesis_proposal(utterance, command)
@@ -566,7 +705,11 @@ class OperatorStationSession:
         if command.kind == "task_selector":
             return self.task_selector_summary(command)
         if command.kind == "knowledge_update":
-            return self.apply_knowledge_update(command.payload)
+            return self._apply_knowledge_update_from_payload(
+                command.utterance,
+                command.payload,
+                source="operator",
+            )
         if command.kind == "claim_reference":
             return self.claim_reference_summary(command.payload.get("ref_type", ""))
         if command.kind == "synthesis_proposal":
@@ -583,8 +726,12 @@ class OperatorStationSession:
                 return self.missing_reference_summary(command.utterance)
             if instruction != command.utterance:
                 self.log(f"resolved task instruction to: {instruction}")
-            self._record_task_instruction_request_plan(command.utterance, instruction)
-            result = self.run_task(instruction)
+            result = self._run_task_from_instruction(
+                command.utterance,
+                instruction,
+                source="operator",
+                record_plan=True,
+            )
             return self.result_summary(result)
         if command.kind == "unsupported":
             return command.payload.get(
@@ -603,7 +750,7 @@ class OperatorStationSession:
         utterance: str,
         *,
         pending_proposal: dict[str, Any] | None = None,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         intent = self.compiler.compile_operator_intent(
             utterance,
             memory=self.memory,
@@ -625,20 +772,23 @@ class OperatorStationSession:
         self,
         intent: OperatorIntent,
         utterance: str,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         # Reset per-turn so stale values from previous turns are never observed.
         self.last_readiness_graph = None
+        self.last_repair_events = []
+        self.last_operational_mismatches = []
 
         # ── Proactive Intent Signal Verification (Phase 7.595) ───────────────
         # Runs unconditionally on ALL LLM outputs before any routing.
         # Blueprint Rule 9: deterministic gate between compiler output and
         # CapabilityMatcher — regardless of what the LLM declared.
         intent, verif_result = default_verifier.enrich(utterance, intent)
+        self.last_operator_intent = intent
         if verif_result.injected_handles:
             self.log(f"intent verifier injected: {verif_result.summary()}")
         if verif_result.inversion_detected:
             self.log(f"intent verifier blocked inversion: {verif_result.inversion_reason}")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": (
@@ -702,18 +852,18 @@ class OperatorStationSession:
                 return readiness_command
 
         if intent.intent_type in {"accept_proposal", "reject_proposal"}:
-            return OperatorCommand(kind=intent.intent_type, utterance=utterance)
+            return ApprovedCommand(command_type=intent.intent_type, utterance=utterance)
 
         if intent.intent_type == "concept_teach":
             name = (intent.concept_name or "").strip()
             expansion = (intent.concept_utterance or "").strip()
             if not name or not expansion:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": "Please specify both a name and an instruction for the concept."},
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="concept_teach",
                 utterance=utterance,
                 payload={"name": name, "utterance": expansion},
@@ -722,14 +872,14 @@ class OperatorStationSession:
         if intent.intent_type == "concept_recall":
             name = (intent.concept_name or "").strip()
             if not name:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": "Please specify the concept name to recall."},
                 )
             concept = self.knowledge_base.recall(name)
             if concept is None:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={
@@ -741,25 +891,25 @@ class OperatorStationSession:
                 )
             # Procedure-type concepts route to _run_procedure, not task_instruction
             if concept.concept_type == "procedure":
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="procedure_execute",
                     utterance=utterance,
                     payload={"steps": list(concept.steps)},
                 )
             expanded = concept.utterance
             self.log(f"concept_recall: '{name}' → '{expanded}'")
-            return OperatorCommand(kind="task_instruction", utterance=expanded)
+            return ApprovedCommand(command_type="task_instruction", utterance=expanded)
 
         if intent.intent_type == "procedure_recall":
             steps = list(intent.concept_steps or [])
             if not steps:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": "Please specify the concept names to execute in sequence."},
                 )
             self.log(f"procedure_recall: steps={steps}")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="procedure_execute",
                 utterance=utterance,
                 payload={"steps": steps},
@@ -768,13 +918,13 @@ class OperatorStationSession:
         if intent.intent_type == "sequence_instruction":
             usteps = list(intent.utterance_steps or [])
             if not usteps:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": "Please specify the task steps to execute in sequence."},
                 )
             self.log(f"sequence_instruction: steps={usteps}")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="sequence_execute",
                 utterance=utterance,
                 payload={"steps": usteps},
@@ -784,13 +934,13 @@ class OperatorStationSession:
             action = (intent.action_name or "").strip()
             count = max(1, intent.repeat_count or 1)
             if not action:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": "Please specify which motor action to perform."},
                 )
             self.log(f"motor_command: action={action} count={count}")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="motor_execute",
                 utterance=utterance,
                 payload={"action": action, "count": count},
@@ -809,13 +959,13 @@ class OperatorStationSession:
                     continue
                 sequence.append({"action": action_name, "count": action_count})
             if len(sequence) < 2:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": "Could not parse motor sequence steps."},
                 )
             self.log(f"motor_sequence: {len(sequence)} actions")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="motor_sequence_execute",
                 utterance=utterance,
                 payload={"sequence": sequence},
@@ -824,13 +974,13 @@ class OperatorStationSession:
         if intent.intent_type == "mission_contract":
             steps = list(intent.mission_steps or [])
             if len(steps) < 2:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": "A mission requires at least 2 task steps."},
                 )
             self.log(f"mission_contract: {len(steps)} steps")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="mission_execute",
                 utterance=utterance,
                 payload={"steps": steps},
@@ -844,7 +994,7 @@ class OperatorStationSession:
                     return self._arbitrate_gap(utterance, intent, cap_match)
                 # Already registered — execute directly.
                 return self._dispatch_claims_filter(utterance, intent, cap_match)
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="claim_reference",
                 utterance=utterance,
                 payload={"ref_type": intent.claim_reference or ""},
@@ -857,7 +1007,7 @@ class OperatorStationSession:
             if not intent.required_capabilities and not cap_match.missing:
                 reason = intent.reason or "I could not understand that request."
                 if intent.intent_type == "unsupported" and "unsupported" in reason.lower():
-                    return OperatorCommand(
+                    return ApprovedCommand(
                         kind="unsupported",
                         utterance=utterance,
                         payload={
@@ -868,7 +1018,7 @@ class OperatorStationSession:
                         },
                     )
                 reason = intent.reason or "I could not understand that request."
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="clarification",
                     utterance=utterance,
                     payload={"message": f"I didn't understand that: {reason}"},
@@ -879,26 +1029,26 @@ class OperatorStationSession:
             return self._arbitrate_gap(utterance, intent, cap_match)
 
         if intent.intent_type == "quit":
-            return OperatorCommand(kind="quit", utterance=utterance)
+            return ApprovedCommand(command_type="quit", utterance=utterance)
 
         if intent.intent_type == "reset":
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="reset",
                 utterance=utterance,
                 payload={"clear_memory": bool(intent.clear_memory)},
             )
 
         if intent.intent_type == "cache_query":
-            return OperatorCommand(kind="cache_query", utterance=utterance)
+            return ApprovedCommand(command_type="cache_query", utterance=utterance)
 
         if intent.intent_type == "status_query":
             if intent.status_query == "ground_target" and intent.target_selector is not None:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="ground_target_query",
                     utterance=utterance,
                     payload={"target_selector": intent.target_selector},
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="status_query",
                 utterance=utterance,
                 payload={"query": intent.status_query or "status"},
@@ -927,13 +1077,13 @@ class OperatorStationSession:
                     )
                     if clarification is not None:
                         return clarification
-                    return OperatorCommand(
+                    return ApprovedCommand(
                         kind="ambiguous",
                         utterance=utterance,
                         payload={"message": grounded["message"]},
                     )
                 target = grounded["target"]
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="knowledge_update",
                     utterance=utterance,
                     payload={
@@ -946,7 +1096,7 @@ class OperatorStationSession:
                     },
                 )
             if delivery_target is None and intent.knowledge_update is not None:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="knowledge_update",
                     utterance=utterance,
                     payload={
@@ -956,8 +1106,8 @@ class OperatorStationSession:
                     },
                 )
             if not isinstance(delivery_target, dict):
-                return OperatorCommand(kind="unsupported", utterance=utterance)
-            return OperatorCommand(
+                return ApprovedCommand(command_type="unsupported", utterance=utterance)
+            return ApprovedCommand(
                 kind="knowledge_update",
                 utterance=utterance,
                 payload={
@@ -1003,7 +1153,7 @@ class OperatorStationSession:
                     )
                     if clarification is not None:
                         return clarification
-                    return OperatorCommand(
+                    return ApprovedCommand(
                         kind="ambiguous",
                         utterance=utterance,
                         payload={"message": grounded["message"]},
@@ -1012,7 +1162,7 @@ class OperatorStationSession:
                 instruction = f"go to the {target['color']} {target['type']}"
             elif isinstance(intent.target, dict):
                 if "closest" in _normalize_utterance(utterance):
-                    return OperatorCommand(
+                    return ApprovedCommand(
                         kind="ambiguous",
                         utterance=utterance,
                         payload={
@@ -1025,16 +1175,15 @@ class OperatorStationSession:
                 color = intent.target.get("color")
                 object_type = intent.target.get("object_type")
                 if not color or object_type != "door" or intent.task_type != "go_to_object":
-                    return OperatorCommand(kind="unsupported", utterance=utterance)
+                    return ApprovedCommand(command_type="unsupported", utterance=utterance)
                 instruction = intent.canonical_instruction or f"go to the {color} {object_type}"
             else:
-                return OperatorCommand(kind="unsupported", utterance=utterance)
-            return OperatorCommand(kind="task_instruction", utterance=instruction)
+                return ApprovedCommand(command_type="unsupported", utterance=utterance)
+            return ApprovedCommand(command_type="task_instruction", utterance=instruction)
 
-        return OperatorCommand(kind="unsupported", utterance=utterance)
+        return ApprovedCommand(command_type="unsupported", utterance=utterance)
 
     def _record_request_plan(self, utterance: str, intent: OperatorIntent) -> None:
-        self.last_repair_events = []
         claims_valid = self._claims_valid_for_current_environment()
         active_summary = (
             self.active_claims.compact_summary()
@@ -1114,9 +1263,10 @@ class OperatorStationSession:
         
         if self.last_operational_mismatches and readiness_graph.graph_status != "executable":
             repair_loop = RepairLoop(self)
-            self.last_repair_events = repair_loop.attempt_repair(self.last_operational_mismatches)
+            repair_events = repair_loop.attempt_repair(self.last_operational_mismatches)
+            self.last_repair_events.extend(repair_events)
             
-            if any(event.success for event in self.last_repair_events):
+            if any(event.success for event in repair_events):
                 self.log("repair successful, re-evaluating readiness graph")
                 claims_valid = self._claims_valid_for_current_environment()
                 readiness_graph = evaluate_request_plan(
@@ -1161,6 +1311,270 @@ class OperatorStationSession:
         )
         self._record_request_plan(utterance, intent)
 
+    def _task_intent_for_instruction(self, instruction: str) -> OperatorIntent:
+        parsed = _parse_exact_go_to_object_utterance(instruction)
+        if parsed is None:
+            raise ValueError(f"Cannot build task execution ticket for {instruction!r}")
+        return OperatorIntent(
+            intent_type="task_instruction",
+            canonical_instruction=instruction,
+            task_type="go_to_object",
+            target={
+                "color": parsed["color"],
+                "object_type": parsed["object_type"],
+            },
+            capability_status="executable",
+            required_capabilities=["task.go_to_object.door"],
+            confidence=1.0,
+            reason="Deterministic go-to-object task instruction.",
+        )
+
+    def _local_task_plan_and_graph(
+        self,
+        utterance: str,
+        instruction: str,
+    ) -> tuple[RequestPlan, ReadinessGraph]:
+        intent = self._task_intent_for_instruction(instruction)
+        claims_valid = self._claims_valid_for_current_environment()
+        active_summary = (
+            self.active_claims.compact_summary()
+            if self.active_claims is not None and claims_valid
+            else None
+        )
+        plan = build_request_plan(
+            utterance,
+            intent,
+            active_claims_summary=active_summary,
+            environment_identity=self.current_environment_identity,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=claims_valid,
+            environment_identity=self.current_environment_identity,
+        )
+        return plan, graph
+
+    def _execution_ticket_from_plan(
+        self,
+        instruction: str,
+        plan: RequestPlan,
+        graph: ReadinessGraph,
+        *,
+        source: str,
+    ) -> ExecutionTicket:
+        task = self.compose_known_task(instruction)
+        return ExecutionTicket(
+            request_id=plan.request_id,
+            instruction=instruction,
+            task_type=task.task_type,
+            params=dict(task.params),
+            request_plan=plan,
+            readiness_graph=graph,
+            source=source,
+        )
+
+    def _execution_ticket_for_instruction(
+        self,
+        utterance: str,
+        instruction: str,
+        *,
+        source: str,
+        record_plan: bool,
+    ) -> ExecutionTicket:
+        if record_plan:
+            self._record_task_instruction_request_plan(utterance, instruction)
+            plan = self.last_request_plan
+            graph = self.last_readiness_graph
+            if plan is None or graph is None:
+                raise RuntimeError("Task execution requires a recorded RequestPlan and ReadinessGraph")
+        else:
+            plan, graph = self._local_task_plan_and_graph(utterance, instruction)
+        return self._execution_ticket_from_plan(
+            instruction,
+            plan,
+            graph,
+            source=source,
+        )
+
+    def _run_task_from_instruction(
+        self,
+        utterance: str,
+        instruction: str,
+        *,
+        source: str,
+        record_plan: bool,
+    ) -> dict[str, Any]:
+        ticket = self._execution_ticket_for_instruction(
+            utterance,
+            instruction,
+            source=source,
+            record_plan=record_plan,
+        )
+        return self._run_task_with_ticket(ticket)
+
+    def _motor_intent_for_action(self, action_name: str, count: int) -> OperatorIntent:
+        return OperatorIntent(
+            intent_type="motor_command",
+            action_name=action_name,
+            repeat_count=count,
+            capability_status="executable",
+            required_capabilities=[],
+            confidence=1.0,
+            reason=f"Explicit low-level motor command: {action_name} × {count}.",
+        )
+
+    def _local_motor_plan_and_graph(
+        self,
+        utterance: str,
+        action_name: str,
+        count: int,
+    ) -> tuple[RequestPlan, ReadinessGraph]:
+        intent = self._motor_intent_for_action(action_name, count)
+        plan = build_request_plan(
+            utterance,
+            intent,
+            active_claims_summary=None,
+            environment_identity=self.current_environment_identity,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=self._claims_valid_for_current_environment(),
+            environment_identity=self.current_environment_identity,
+        )
+        return plan, graph
+
+    def _raw_motor_ticket_from_plan(
+        self,
+        action_name: str,
+        count: int,
+        plan: RequestPlan,
+        graph: ReadinessGraph,
+        *,
+        source: str,
+    ) -> RawMotorTicket:
+        return RawMotorTicket(
+            request_id=plan.request_id,
+            action_name=action_name,
+            repeat_count=count,
+            request_plan=plan,
+            readiness_graph=graph,
+            source=source,
+        )
+
+    def _raw_motor_ticket_for_command(
+        self,
+        utterance: str,
+        action_name: str,
+        count: int,
+        *,
+        source: str,
+    ) -> RawMotorTicket:
+        plan, graph = self._local_motor_plan_and_graph(utterance, action_name, count)
+        self.last_request_plan = plan
+        self.last_readiness_graph = graph
+        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
+        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
+        return self._raw_motor_ticket_from_plan(
+            action_name,
+            count,
+            plan,
+            graph,
+            source=source,
+        )
+
+    def _knowledge_update_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if "delivery_target" in payload:
+            delivery_target = payload["delivery_target"]
+        elif payload.get("target_color") is not None and payload.get("target_type") is not None:
+            delivery_target = {
+                "color": payload["target_color"],
+                "object_type": payload["target_type"],
+            }
+        else:
+            delivery_target = None
+        return {"delivery_target": delivery_target}
+
+    def _memory_writes_from_payload(self, payload: dict[str, Any]) -> list[MemoryUpdate]:
+        writes: list[MemoryUpdate] = []
+        for key in ("target_color", "target_type", "delivery_target"):
+            if key in payload:
+                writes.append(
+                    MemoryUpdate(
+                        scope="knowledge",
+                        key=key,
+                        value=payload[key],
+                        reason="operator knowledge update",
+                    )
+                )
+        if not writes and "delivery_target" in payload:
+            writes.append(
+                MemoryUpdate(
+                    scope="knowledge",
+                    key="delivery_target",
+                    value=payload["delivery_target"],
+                    reason="operator knowledge update",
+                )
+            )
+        return writes
+
+    def _memory_write_ticket_for_payload(
+        self,
+        utterance: str,
+        payload: dict[str, Any],
+        *,
+        source: str,
+    ) -> MemoryWriteTicket:
+        intent = OperatorIntent(
+            intent_type="knowledge_update",
+            knowledge_update=self._knowledge_update_from_payload(payload),
+            capability_status="executable",
+            required_capabilities=[],
+            confidence=1.0,
+            reason="Deterministic durable knowledge update.",
+        )
+        plan = build_request_plan(
+            utterance,
+            intent,
+            active_claims_summary=None,
+            environment_identity=self.current_environment_identity,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=self._claims_valid_for_current_environment(),
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = plan
+        self.last_readiness_graph = graph
+        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
+        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
+        return MemoryWriteTicket(
+            request_id=plan.request_id,
+            writes=self._memory_writes_from_payload(payload),
+            request_plan=plan,
+            readiness_graph=graph,
+            source=source,
+        )
+
+    def _apply_knowledge_update_from_payload(
+        self,
+        utterance: str,
+        payload: dict[str, Any],
+        *,
+        source: str,
+    ) -> str:
+        ticket = self._memory_write_ticket_for_payload(
+            utterance,
+            payload,
+            source=source,
+        )
+        return self.apply_knowledge_update(ticket)
+
     def _run_mismatch_detection(self, plan: RequestPlan) -> None:
         """Run mismatch detection and store results in last_operational_mismatches."""
         mismatches = default_detector.detect(
@@ -1179,7 +1593,7 @@ class OperatorStationSession:
         self,
         utterance: str,
         intent: OperatorIntent,
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         plan = intent.grounding_query_plan
         if plan is None:
             return None
@@ -1197,7 +1611,7 @@ class OperatorStationSession:
                 )
                 if clarification is not None:
                     return clarification
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={
@@ -1229,7 +1643,7 @@ class OperatorStationSession:
         if handle:
             spec = self.capability_registry.lookup(handle)
             if spec is None:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="missing_skills",
                     utterance=utterance,
                     payload={"message": f"Missing primitive: {handle}"},
@@ -1293,7 +1707,7 @@ class OperatorStationSession:
         *,
         utterance: str,
         reason: str,
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         normalized = _normalize_utterance(utterance)
         mentions_ranked_distance = any(
             term in normalized
@@ -1318,8 +1732,12 @@ class OperatorStationSession:
             partial_selector={"validation_reason": reason},
             missing_field="distance_metric",
             supported_values=["manhattan"],
+            **self._pending_clarification_trace(
+                utterance,
+                "semantic_query_missing_field",
+            ),
         )
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={
@@ -1421,23 +1839,23 @@ class OperatorStationSession:
         self,
         utterance: str,
         intent: OperatorIntent,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         scene = self.memory.scene_model
         if scene is None:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "No scene data available for that reference."},
             )
         if self.active_claims is None:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "No active grounded target for that reference."},
             )
         if not self._claims_valid_for_current_environment(scene):
             self.active_claims = None
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "Scene has changed since that grounding. Please re-ground."},
@@ -1448,7 +1866,7 @@ class OperatorStationSession:
         )
         if wants_task:
             return self._task_command_for_entry(entry, utterance)
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={
@@ -1466,13 +1884,13 @@ class OperatorStationSession:
         intent: OperatorIntent,
         plan: dict[str, Any],
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         wants_task = intent.intent_type == "task_instruction" or self._utterance_requests_navigation(
             _normalize_utterance(utterance)
         )
         claims = self._ensure_ranked_door_claims(plan.get("primitive_handle"))
         if isinstance(claims, str):
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="missing_skills",
                 utterance=utterance,
                 payload={"message": claims, "match": cap_match.compact()},
@@ -1487,7 +1905,7 @@ class OperatorStationSession:
         order = plan.get("order")
 
         if operation in {"rank", "list"}:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
@@ -1508,7 +1926,7 @@ class OperatorStationSession:
             )
 
         if operation == "answer" and order in {"ascending", "descending"} and not answer_fields:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
@@ -1529,7 +1947,7 @@ class OperatorStationSession:
                     extreme="farthest" if order == "descending" else "closest",
                     cap_match=cap_match,
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
@@ -1552,7 +1970,7 @@ class OperatorStationSession:
             )
 
         if answer_fields.intersection({"closest", "farthest"}):
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
@@ -1567,7 +1985,7 @@ class OperatorStationSession:
             if re.match(r"^(first|second|third|fourth|fifth)_(closest|farthest)$", field)
         }
         if ordinal_answer_fields:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
@@ -1581,12 +1999,12 @@ class OperatorStationSession:
             if wants_task:
                 if len(matches) == 1:
                     return self._task_command_for_entry(matches[0], utterance)
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="ambiguous",
                     utterance=utterance,
                     payload={"message": f"No unique {color} door is visible. I did not execute."},
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
@@ -1599,7 +2017,7 @@ class OperatorStationSession:
                 capability_match=cap_match,
             )
 
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="ambiguous",
             utterance=utterance,
             payload={"message": "I could not compose a result from the semantic query plan."},
@@ -1610,7 +2028,7 @@ class OperatorStationSession:
         utterance: str,
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         # Only pass implemented handles — synthesizable ones are not alternatives
         available = [
             h for h in self.capability_registry.primitive_names()
@@ -1681,7 +2099,7 @@ class OperatorStationSession:
                     proposed_description=decision.proposed_description,
                     proposed_condition=decision.proposed_condition,
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="synthesizable",
                 utterance=utterance,
                 payload={
@@ -1723,8 +2141,12 @@ class OperatorStationSession:
                 partial_selector={},
                 missing_field="acceptance",
                 supported_values=["yes", "ok", "sure", "please"],
+                **self._pending_clarification_trace(
+                    utterance,
+                    "arbitrator_offer",
+                ),
             )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": decision.clarification_prompt},
@@ -1737,7 +2159,7 @@ class OperatorStationSession:
                     f"Suggested substitute: {decision.suggested_handle}, "
                     "but marked not safe to execute."
                 )
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="missing_skills",
                     utterance=utterance,
                     payload={"message": msg, "match": cap_match.compact()},
@@ -1755,7 +2177,7 @@ class OperatorStationSession:
             kind = "ambiguous"
         else:
             kind = "missing_skills"
-        return OperatorCommand(
+        return ApprovedCommand(
             kind=kind,
             utterance=utterance,
             payload={
@@ -1771,10 +2193,10 @@ class OperatorStationSession:
         utterance: str,
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         """Attempt to synthesize, validate, and register a missing grounding primitive.
 
-        Returns an OperatorCommand on success (re-routes to grounding) or None on failure
+        Returns an ApprovedCommand on success (re-routes to grounding) or None on failure
         so the caller falls through to the standard synthesize refusal message.
         """
         spec = self.capability_registry.lookup(handle)
@@ -1836,7 +2258,7 @@ class OperatorStationSession:
         if validation is None or result is None:
             return None
         if not validation.passed:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="synthesizable",
                 utterance=utterance,
                 payload={
@@ -1861,7 +2283,7 @@ class OperatorStationSession:
             )
         if not registered:
             self.log(f"synthesis: {handle} could not be registered (already implemented or conflict)")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="synthesizable",
                 utterance=utterance,
                 payload={
@@ -1883,11 +2305,11 @@ class OperatorStationSession:
         utterance: str,
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         """Run a freshly synthesized grounding primitive and continue with original intent."""
         fn = self.capability_registry.get_synthesized_callable(handle)
         if fn is None:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="synthesizable",
                 utterance=utterance,
                 payload={
@@ -1899,7 +2321,7 @@ class OperatorStationSession:
 
         scene = self._ensure_scene_model()
         if scene is None:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "No scene data available yet. I did not execute."},
@@ -1914,7 +2336,7 @@ class OperatorStationSession:
         try:
             ranked = fn(scene, selector)
         except Exception as exc:  # noqa: BLE001
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="synthesizable",
                 utterance=utterance,
                 payload={
@@ -1928,7 +2350,7 @@ class OperatorStationSession:
             )
 
         if not ranked:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "No matching doors found. I did not execute."},
@@ -1944,7 +2366,7 @@ class OperatorStationSession:
                 f"synthesis grounding: resolved to {instruction} "
                 f"(distance={distance:.2f} via {handle})"
             )
-            return OperatorCommand(kind="task_instruction", utterance=instruction)
+            return ApprovedCommand(command_type="task_instruction", utterance=instruction)
 
         # For status queries, show the full ranking across all found objects.
         short_handle = handle.split(".")[-2] if "." in handle else handle
@@ -1956,7 +2378,7 @@ class OperatorStationSession:
                 f" @({obj.x},{obj.y}) dist={dist:.2f}"
             )
         lines.append("\n(I can navigate to any specific door — tell me which color.)")
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={"message": "\n".join(lines)},
@@ -1970,7 +2392,7 @@ class OperatorStationSession:
         utterance: str,
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         """Execute a registered claims-filter primitive against active_claims."""
         plan = intent.grounding_query_plan or {}
         handle = plan.get("primitive_handle") or ""
@@ -1981,7 +2403,7 @@ class OperatorStationSession:
 
         fn = self.capability_registry.get_synthesized_callable(handle)
         if fn is None:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="missing_skills",
                 utterance=utterance,
                 payload={"message": f"Claims-filter primitive '{handle}' is not registered."},
@@ -1995,7 +2417,7 @@ class OperatorStationSession:
         utterance: str,
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         """Synthesize, validate, and register a claims-filter primitive.
 
         Same proposal→validate→register pipeline as _try_synthesize_primitive but
@@ -2035,7 +2457,7 @@ class OperatorStationSession:
             vr = self.validator.validate(handle, repair.function_name, repair.code)
             if not vr.passed:
                 self.log(f"claims-filter repair also failed: {vr.failures}")
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="synthesizable",
                     utterance=utterance,
                     payload={
@@ -2062,7 +2484,7 @@ class OperatorStationSession:
         utterance: str,
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         """Call a registered claims-filter fn(entries, condition) and route the result."""
         plan = intent.grounding_query_plan or {}
         metric = plan.get("metric") or "manhattan"
@@ -2074,7 +2496,7 @@ class OperatorStationSession:
         ):
             claims = self._ensure_ranked_door_claims(expected_ranked_handle)
             if isinstance(claims, str):
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="missing_skills",
                     utterance=utterance,
                     payload={
@@ -2088,7 +2510,7 @@ class OperatorStationSession:
                 )
 
         if self.active_claims is None or not self.active_claims.ranked_scene_doors:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={
@@ -2111,7 +2533,7 @@ class OperatorStationSession:
         try:
             filtered = fn(entries, condition)
         except Exception as exc:  # noqa: BLE001
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="synthesizable",
                 utterance=utterance,
                 payload={
@@ -2122,7 +2544,7 @@ class OperatorStationSession:
             )
 
         if not isinstance(filtered, list):
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="synthesizable",
                 utterance=utterance,
                 payload={"message": f"Claims-filter '{handle}' returned {type(filtered).__name__}, expected list."},
@@ -2137,7 +2559,7 @@ class OperatorStationSession:
             known = ", ".join(
                 f"{e.color}@{e.distance:.1f}" for e in entries
             )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={
@@ -2158,7 +2580,7 @@ class OperatorStationSession:
             )
             target_index = max(0, int(ordinal or 1) - 1)
             if target_index >= len(ordered):
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="ambiguous",
                     utterance=utterance,
                     payload={
@@ -2192,7 +2614,7 @@ class OperatorStationSession:
                 0,
             )
             if intent.intent_type == "task_instruction":
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="task_instruction",
                     utterance=f"go to the {selected.color} {selected.object_type}",
                 )
@@ -2203,7 +2625,7 @@ class OperatorStationSession:
                 f"filter={comparison} {threshold}",
                 "source=active_claims",
             ]
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": "\n".join(lines)},
@@ -2218,7 +2640,7 @@ class OperatorStationSession:
             )
             if intent.intent_type == "task_instruction":
                 instruction = f"go to the {entry.color} {entry.object_type}"
-                return OperatorCommand(kind="task_instruction", utterance=instruction)
+                return ApprovedCommand(command_type="task_instruction", utterance=instruction)
             lines = [
                 f"GROUNDED TARGET (claims filter: {handle})",
                 f"target={entry.color} {entry.object_type}@({entry.x},{entry.y})",
@@ -2226,7 +2648,7 @@ class OperatorStationSession:
                 f"filter={comparison} {threshold}",
                 "source=active_claims",
             ]
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": "\n".join(lines)},
@@ -2265,7 +2687,7 @@ class OperatorStationSession:
         *,
         proposed_description: str | None = None,
         proposed_condition: dict[str, Any] | None = None,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         """Build a natural-language proposal and enter pending_synthesis_proposal state.
 
         proposed_description is set when the arbitrator dynamically invented the handle
@@ -2300,7 +2722,7 @@ class OperatorStationSession:
             ),
         )
         self.log(f"synthesis proposal pending for {handle} (dynamic={spec is None})")
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="synthesis_proposal",
             utterance=utterance,
             payload={
@@ -2444,7 +2866,7 @@ class OperatorStationSession:
     def handle_pending_synthesis_proposal(
         self,
         utterance: str,
-        command: OperatorCommand,
+        command: ApprovedCommand,
     ) -> str:
         """Resolve an operator response to a synthesis proposal via LLM classification."""
         proposal = self.pending_synthesis_proposal
@@ -2537,7 +2959,7 @@ class OperatorStationSession:
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
         verif_result: IntentVerificationResult,
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         if not verif_result.signals:
             return None
         signal_types = {signal.signal_type for signal in verif_result.signals}
@@ -2558,14 +2980,14 @@ class OperatorStationSession:
                 return None
         claims = self._ensure_ranked_door_claims(ranked_handle)
         if isinstance(claims, str):
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="missing_skills",
                 utterance=utterance,
                 payload={"message": claims, "match": cap_match.compact()},
                 capability_match=cap_match,
             )
         if not claims.ranked_scene_doors:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "No visible doors are available to compose from."},
@@ -2595,7 +3017,7 @@ class OperatorStationSession:
                 return ordinal_result
 
         if "cardinality" in signal_types and "superlative" not in signal_types:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
@@ -2615,7 +3037,7 @@ class OperatorStationSession:
                     extreme="farthest",
                     cap_match=cap_match,
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": self._format_extreme_answer(claims, normalized)},
@@ -2630,7 +3052,7 @@ class OperatorStationSession:
                     extreme="closest",
                     cap_match=cap_match,
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": self._format_extreme_answer(claims, normalized)},
@@ -2705,7 +3127,7 @@ class OperatorStationSession:
             return "Unable to write active grounding claims."
         return self.active_claims
 
-    def _command_from_active_claim_text(self, utterance: str) -> OperatorCommand | None:
+    def _command_from_active_claim_text(self, utterance: str) -> ApprovedCommand | None:
         normalized = _normalize_utterance(utterance)
         # Concept-teach prefixes embed a navigation verb ("go to") inside the phrase
         # but are not themselves navigation requests — skip them so the utterance
@@ -2731,7 +3153,7 @@ class OperatorStationSession:
         matches = [entry for entry in claims.ranked_scene_doors if entry.color == color]
         if len(matches) != 1:
             return None
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="task_instruction",
             utterance=f"go to the {matches[0].color} door",
         )
@@ -2763,8 +3185,8 @@ class OperatorStationSession:
     def _entry_label(self, entry: GroundedDoorEntry) -> str:
         return f"{entry.color} door@({entry.x},{entry.y}) distance={entry.distance}"
 
-    def _task_command_for_entry(self, entry: GroundedDoorEntry, utterance: str) -> OperatorCommand:
-        return OperatorCommand(
+    def _task_command_for_entry(self, entry: GroundedDoorEntry, utterance: str) -> ApprovedCommand:
+        return ApprovedCommand(
             kind="task_instruction",
             utterance=f"go to the {entry.color} door",
         )
@@ -2776,7 +3198,7 @@ class OperatorStationSession:
         entries: list[GroundedDoorEntry],
         resume_kind: str,
         message: str,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         self.pending_clarification = PendingClarification(
             clarification_type="target_selector_candidate_choice",
             original_utterance=utterance,
@@ -2787,8 +3209,12 @@ class OperatorStationSession:
                 str(entry.color) for entry in entries if entry.color is not None
             ),
             candidates=[self._entry_target_dict(entry) for entry in entries],
+            **self._pending_clarification_trace(
+                utterance,
+                "target_selector_candidate_choice",
+            ),
         )
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={"message": message},
@@ -2801,10 +3227,10 @@ class OperatorStationSession:
         distance: int,
         *,
         wants_task: bool,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         matches = [entry for entry in claims.ranked_scene_doors if entry.distance == distance]
         if not matches:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={
@@ -2826,11 +3252,11 @@ class OperatorStationSession:
                     resume_kind="task_instruction",
                     message=message,
                 )
-            return OperatorCommand(kind="clarification", utterance=utterance, payload={"message": message})
+            return ApprovedCommand(command_type="clarification", utterance=utterance, payload={"message": message})
         entry = matches[0]
         if wants_task:
             return self._task_command_for_entry(entry, utterance)
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={
@@ -2849,7 +3275,7 @@ class OperatorStationSession:
         normalized: str,
         *,
         wants_task: bool,
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         match = re.search(
             r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+(closest|nearest|farthest|furthest)\b",
             normalized,
@@ -2873,7 +3299,7 @@ class OperatorStationSession:
         if direction in {"farthest", "furthest"}:
             ranked = list(reversed(ranked))
         if rank >= len(ranked):
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "There are not enough visible doors for that ordinal request."},
@@ -2894,11 +3320,11 @@ class OperatorStationSession:
                     resume_kind="task_instruction",
                     message=message,
                 )
-            return OperatorCommand(kind="clarification", utterance=utterance, payload={"message": message})
+            return ApprovedCommand(command_type="clarification", utterance=utterance, payload={"message": message})
         self._set_last_grounded_claim(entry, claims)
         if wants_task:
             return self._task_command_for_entry(entry, utterance)
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={
@@ -2917,13 +3343,13 @@ class OperatorStationSession:
         ordinal: int,
         order: str,
         wants_task: bool,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         ranked = list(claims.ranked_scene_doors)
         if order == "descending":
             ranked = list(reversed(ranked))
         rank = ordinal - 1
         if rank >= len(ranked):
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": "There are not enough visible doors for that ordinal request."},
@@ -2944,7 +3370,7 @@ class OperatorStationSession:
                     resume_kind="task_instruction",
                     message=message,
                 )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": message},
@@ -2953,7 +3379,7 @@ class OperatorStationSession:
         if wants_task:
             return self._task_command_for_entry(entry, utterance)
         label = "farthest" if order == "descending" else "closest"
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={
@@ -2973,7 +3399,7 @@ class OperatorStationSession:
         *,
         extreme: str,
         cap_match: CapabilityMatchResult,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         entries = claims.ranked_scene_doors
         distance = entries[0].distance if extreme == "closest" else entries[-1].distance
         tied = [entry for entry in entries if entry.distance == distance]
@@ -3174,12 +3600,12 @@ class OperatorStationSession:
             lines.append("\n(I can navigate to any specific door — tell me which color.)")
         return "\n".join(lines)
 
-    def _question_override_command(self, utterance: str) -> OperatorCommand | None:
+    def _question_override_command(self, utterance: str) -> ApprovedCommand | None:
         normalized = _normalize_utterance(utterance)
         if not _looks_like_question(normalized):
             return None
         if "delivery target" in normalized or "target" in normalized:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="status_query",
                 utterance=utterance,
                 payload={"query": "delivery_target"},
@@ -3396,7 +3822,7 @@ class OperatorStationSession:
         self,
         selector: dict[str, Any] | None,
         utterance: str,
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         if (
             isinstance(selector, dict)
             and selector.get("object_type") == "door"
@@ -3407,7 +3833,7 @@ class OperatorStationSession:
         try:
             readiness = self.capability_registry.readiness_for_selector(selector)
         except SchemaValidationError as exc:
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={"message": f"Invalid target selector: {exc}. I did not execute."},
@@ -3416,7 +3842,7 @@ class OperatorStationSession:
         if status == "executable":
             return None
         if status == "synthesizable_missing_primitive":
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="unsupported",
                 utterance=utterance,
                 payload={
@@ -3429,7 +3855,7 @@ class OperatorStationSession:
                 },
             )
         if status == "missing_primitive":
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="unsupported",
                 utterance=utterance,
                 payload={
@@ -3440,7 +3866,7 @@ class OperatorStationSession:
                 },
             )
         if status == "unsupported":
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="unsupported",
                 utterance=utterance,
                 payload={
@@ -3458,7 +3884,7 @@ class OperatorStationSession:
         utterance: str,
         resume_kind: str,
         grounded: dict[str, Any],
-    ) -> OperatorCommand | None:
+    ) -> ApprovedCommand | None:
         if grounded.get("status") == "missing_required_clarifiable":
             if grounded.get("missing_field") != "distance_metric":
                 return None
@@ -3469,8 +3895,12 @@ class OperatorStationSession:
                 partial_selector=dict(grounded["selector"]),
                 missing_field="distance_metric",
                 supported_values=list(grounded.get("supported_values", ["manhattan"])),
+                **self._pending_clarification_trace(
+                    utterance,
+                    "target_selector_missing_field",
+                ),
             )
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": grounded["message"]},
@@ -3498,8 +3928,12 @@ class OperatorStationSession:
             missing_field="candidate",
             supported_values=colors,
             candidates=[dict(candidate) for candidate in candidates],
+            **self._pending_clarification_trace(
+                utterance,
+                "target_selector_candidate_choice",
+            ),
         )
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
             payload={
@@ -3551,7 +3985,7 @@ class OperatorStationSession:
     def handle_pending_clarification(
         self,
         utterance: str,
-        command: OperatorCommand,
+        command: ApprovedCommand,
     ) -> str | None:
         normalized = _normalize_utterance(utterance)
         if command.kind == "quit":
@@ -3630,7 +4064,7 @@ class OperatorStationSession:
             candidates=pending.candidates,
         )
 
-    def execute_command(self, command: OperatorCommand) -> str:
+    def execute_command(self, command: ApprovedCommand) -> str:
         self.log(f"classified utterance as {command.kind}")
         if command.kind == "clarification":
             return command.payload.get("message", "")
@@ -3641,15 +4075,23 @@ class OperatorStationSession:
         if command.kind == "synthesizable":
             return command.payload.get("message", "That capability is not yet implemented.")
         if command.kind == "knowledge_update":
-            return self.apply_knowledge_update(command.payload)
+            return self._apply_knowledge_update_from_payload(
+                command.utterance,
+                command.payload,
+                source="operator",
+            )
         if command.kind == "task_instruction":
             instruction = self.resolve_task_instruction(command.utterance)
             if instruction is None:
                 return self.missing_reference_summary(command.utterance)
             if instruction != command.utterance:
                 self.log(f"resolved task instruction to: {instruction}")
-            self._record_task_instruction_request_plan(command.utterance, instruction)
-            result = self.run_task(instruction)
+            result = self._run_task_from_instruction(
+                command.utterance,
+                instruction,
+                source="operator",
+                record_plan=True,
+            )
             return self.result_summary(result)
         if command.kind == "ground_target_query":
             return self.grounded_target_summary(command.payload)
@@ -3669,6 +4111,50 @@ class OperatorStationSession:
             )
         return self.status_summary(query="help")
 
+    def _intent_for_clarification_resume(
+        self,
+        pending: PendingClarification,
+        selector: dict[str, Any],
+    ) -> OperatorIntent:
+        if pending.resume_kind == "ground_target_query":
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="ground_target",
+                target_selector=selector,
+                capability_status="executable",
+                required_capabilities=[],
+                confidence=1.0,
+                reason="Clarification answer resumed a grounding query.",
+            )
+        if pending.resume_kind == "knowledge_update":
+            return OperatorIntent(
+                intent_type="knowledge_update",
+                knowledge_update={"delivery_target": None},
+                target_selector=selector,
+                capability_status="executable",
+                required_capabilities=[],
+                confidence=1.0,
+                reason="Clarification answer resumed a durable knowledge update.",
+            )
+        return OperatorIntent(
+            intent_type="task_instruction",
+            task_type="go_to_object",
+            target_selector=selector,
+            capability_status="executable",
+            required_capabilities=["task.go_to_object.door"],
+            confidence=1.0,
+            reason="Clarification answer resumed a task instruction.",
+        )
+
+    def _clarification_blocked_message(self, graph: ReadinessGraph) -> str:
+        blocking = graph.blocking_step_id or "unknown"
+        return (
+            "CLARIFICATION BLOCKED\n"
+            f"graph_status={graph.graph_status}\n"
+            f"blocking_step={blocking}\n"
+            f"{graph.explanation}"
+        )
+
     def resume_pending_clarification(self, distance_metric: str) -> str:
         pending = self.pending_clarification
         if pending is None:
@@ -3682,7 +4168,34 @@ class OperatorStationSession:
         selector = dict(pending.partial_selector)
         selector["distance_metric"] = distance_metric
         selector["distance_reference"] = "agent"
+        intent = self._intent_for_clarification_resume(pending, selector)
+        self.last_operator_intent = intent
+        claims_valid = self._claims_valid_for_current_environment()
+        active_summary = (
+            self.active_claims.compact_summary()
+            if self.active_claims is not None and claims_valid
+            else None
+        )
+        plan = build_request_plan(
+            pending.original_utterance,
+            intent,
+            active_claims_summary=active_summary,
+            environment_identity=self.current_environment_identity,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=claims_valid,
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = plan
+        self.last_readiness_graph = graph
+        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
+        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
         self.pending_clarification = None
+        if graph.graph_status != "executable":
+            return self._clarification_blocked_message(graph)
 
         grounded = self.ground_target_selector(selector)
         if not grounded["ok"]:
@@ -3697,7 +4210,8 @@ class OperatorStationSession:
                 lines.append(f"distance={grounded['distance']}")
             return "\n".join(lines)
         if pending.resume_kind == "knowledge_update":
-            return self.apply_knowledge_update(
+            return self._apply_knowledge_update_from_payload(
+                pending.original_utterance,
                 {
                     "target_color": target["color"],
                     "target_type": target["type"],
@@ -3705,10 +4219,16 @@ class OperatorStationSession:
                         "color": target["color"],
                         "object_type": target["type"],
                     },
-                }
+                },
+                source="clarification",
             )
         instruction = f"go to the {target['color']} {target['type']}"
-        result = self.run_task(instruction)
+        result = self._run_task_from_instruction(
+            pending.original_utterance,
+            instruction,
+            source="clarification",
+            record_plan=True,
+        )
         return self.result_summary(result)
 
     def resume_candidate_clarification(self, color: str) -> str | None:
@@ -3727,14 +4247,46 @@ class OperatorStationSession:
                 candidates=pending.candidates,
             )
         target = matches[0]
+        selector = {
+            "object_type": target.get("type") or "door",
+            "color": target.get("color"),
+        }
+        intent = self._intent_for_clarification_resume(pending, selector)
+        self.last_operator_intent = intent
+        claims_valid = self._claims_valid_for_current_environment()
+        active_summary = (
+            self.active_claims.compact_summary()
+            if self.active_claims is not None and claims_valid
+            else None
+        )
+        plan = build_request_plan(
+            pending.original_utterance,
+            intent,
+            active_claims_summary=active_summary,
+            environment_identity=self.current_environment_identity,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=claims_valid,
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = plan
+        self.last_readiness_graph = graph
+        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
+        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
         self.pending_clarification = None
+        if graph.graph_status != "executable":
+            return self._clarification_blocked_message(graph)
         if pending.resume_kind == "ground_target_query":
             return (
                 "GROUNDED TARGET\n"
                 f"target={target.get('color')} {target.get('type')}@({target.get('x')},{target.get('y')})"
             )
         if pending.resume_kind == "knowledge_update":
-            return self.apply_knowledge_update(
+            return self._apply_knowledge_update_from_payload(
+                pending.original_utterance,
                 {
                     "target_color": target["color"],
                     "target_type": target["type"],
@@ -3742,12 +4294,18 @@ class OperatorStationSession:
                         "color": target["color"],
                         "object_type": target["type"],
                     },
-                }
+                },
+                source="clarification",
             )
-        result = self.run_task(f"go to the {target['color']} {target['type']}")
+        result = self._run_task_from_instruction(
+            pending.original_utterance,
+            f"go to the {target['color']} {target['type']}",
+            source="clarification",
+            record_plan=True,
+        )
         return self.result_summary(result)
 
-    def task_selector_summary(self, command: OperatorCommand) -> str:
+    def task_selector_summary(self, command: ApprovedCommand) -> str:
         grounded = self.ground_target_selector(command.payload.get("target_selector"))
         if not grounded["ok"]:
             clarification = self.maybe_start_selector_clarification(
@@ -3759,7 +4317,12 @@ class OperatorStationSession:
                 return clarification.payload["message"]
             return grounded["message"]
         target = grounded["target"]
-        result = self.run_task(f"go to the {target['color']} {target['type']}")
+        result = self._run_task_from_instruction(
+            command.utterance,
+            f"go to the {target['color']} {target['type']}",
+            source="selector",
+            record_plan=True,
+        )
         return self.result_summary(result)
 
     def _is_manhattan_answer(self, normalized: str) -> bool:
@@ -3864,7 +4427,7 @@ class OperatorStationSession:
         intent: OperatorIntent,
         cap_match: CapabilityMatchResult,
         decision: Any,
-    ) -> OperatorCommand:
+    ) -> ApprovedCommand:
         """Execute a registry-validated substitute primitive in place of the missing one.
 
         Only called when decision.safe_to_execute=True. The handle must be registered
@@ -3872,7 +4435,7 @@ class OperatorStationSession:
         """
         spec = self.capability_registry.lookup(handle)
         if spec is None or spec.implementation_status != "implemented":
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="missing_skills",
                 utterance=utterance,
                 payload={
@@ -3900,14 +4463,14 @@ class OperatorStationSession:
             })
             grounded = self.ground_target_selector(base_selector)
             if not grounded["ok"]:
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="ambiguous",
                     utterance=utterance,
                     payload={"message": grounded["message"]},
                 )
             target = grounded["target"]
             if intent.intent_type == "task_instruction":
-                return OperatorCommand(
+                return ApprovedCommand(
                     kind="task_instruction",
                     utterance=f"go to the {target['color']} {target['type']}",
                 )
@@ -3919,7 +4482,7 @@ class OperatorStationSession:
             ]
             if grounded.get("distance") is not None:
                 lines.append(f"distance={grounded['distance']}")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": "\n".join(lines)},
@@ -3929,7 +4492,7 @@ class OperatorStationSession:
         # Display-grounding substitute (e.g., all_doors.ranked for a ranked query).
         if "all_doors.ranked" in handle:
             result_text = self._execute_grounding_display(handle)
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={"message": result_text},
@@ -3941,7 +4504,7 @@ class OperatorStationSession:
             f"Substitute '{handle}' was approved but no execution path exists for "
             f"primitive type '{spec.layer}'. I did not execute."
         )
-        return OperatorCommand(
+        return ApprovedCommand(
             kind="missing_skills",
             utterance=utterance,
             payload={"message": msg, "match": cap_match.compact()},
@@ -4267,7 +4830,28 @@ class OperatorStationSession:
         self.task_adapter.close()
         self.task_adapter = None
 
-    def run_task(self, instruction: str) -> dict[str, Any]:
+    def _record_rejected_raw_execution_attempt(self, value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        intent = OperatorIntent(
+            intent_type="unsupported",
+            canonical_instruction=value,
+            capability_status="unsupported",
+            required_capabilities=["task.execution_ticket.required"],
+            confidence=1.0,
+            reason="Raw task execution requires an ExecutionTicket.",
+        )
+        self._record_request_plan(value, intent)
+
+    def run_task(self, ticket: ExecutionTicket) -> dict[str, Any]:
+        if not isinstance(ticket, ExecutionTicket):
+            self._record_rejected_raw_execution_attempt(ticket)
+            raise TypeError("run_task requires an ExecutionTicket")
+        return self._run_task_with_ticket(ticket)
+
+    def _run_task_with_ticket(self, ticket: ExecutionTicket) -> dict[str, Any]:
+        self.last_execution_ticket = ticket
+        instruction = ticket.instruction
         self.active_claims = None
         self.log(f"starting task: {instruction}")
         self.log("compiling task/procedure and warming JIT templates before motion")
@@ -4480,8 +5064,13 @@ class OperatorStationSession:
             if graph.graph_status == "executable":
                 plan = candidate
                 self.request_plan_reuse_cache.store(plan)
-        except Exception:
-            pass
+        except Exception as exc:
+            self.log(f"concept teach planning failed: {exc}")
+            return (
+                "CONCEPT NOT STORED\n"
+                f"name={name!r}\n"
+                f"reason=planning_failed:{type(exc).__name__}"
+            )
 
         concept = self.knowledge_base.teach(name, utterance, plan=plan)
         plan_status = "plan pre-compiled and cached" if plan is not None else "no plan (will compile on first recall)"
@@ -4503,7 +5092,7 @@ class OperatorStationSession:
             return f"CONCEPT FORGOTTEN: {name!r}"
         return f"CONCEPT NOT FOUND: {name!r} (nothing forgotten)"
 
-    def _try_natural_sequence(self, utterance: str) -> OperatorCommand | None:
+    def _try_natural_sequence(self, utterance: str) -> ApprovedCommand | None:
         """Detect natural-language sequential patterns like 'do X then Y' or 'X followed by Y'.
 
         Single-word tokens → procedure_execute (named KB concepts).
@@ -4522,21 +5111,21 @@ class OperatorStationSession:
             return None
         seq = self.knowledge_base._is_sequence(",".join(cleaned))
         if seq is not None:
-            return OperatorCommand(kind="procedure_execute", utterance=utterance, payload={"steps": seq})
+            return ApprovedCommand(command_type="procedure_execute", utterance=utterance, payload={"steps": seq})
         # Multi-word parts that aren't named concepts → raw utterance sequence
         if all(cleaned):
-            return OperatorCommand(kind="sequence_execute", utterance=utterance, payload={"steps": cleaned})
+            return ApprovedCommand(command_type="sequence_execute", utterance=utterance, payload={"steps": cleaned})
         return None
 
-    def _command_from_concept(self, utterance: str) -> OperatorCommand | None:
-        """Resolve a bare concept name (or comma-separated sequence) to an OperatorCommand."""
+    def _command_from_concept(self, utterance: str) -> ApprovedCommand | None:
+        """Resolve a bare concept name (or comma-separated sequence) to an ApprovedCommand."""
         normalized = _normalize_utterance(utterance.strip())
 
         # Check if utterance is an anonymous comma-separated sequence of known concepts
         seq = self.knowledge_base._is_sequence(utterance.strip())
         if seq is not None:
             self.log(f"anonymous procedure detected: {seq}")
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="procedure_execute",
                 utterance=utterance,
                 payload={"steps": seq},
@@ -4561,7 +5150,7 @@ class OperatorStationSession:
 
         # Procedure-type concept — unpack its steps
         if concept.concept_type == "procedure":
-            return OperatorCommand(
+            return ApprovedCommand(
                 kind="procedure_execute",
                 utterance=utterance,
                 payload={"steps": list(concept.steps)},
@@ -4657,7 +5246,12 @@ class OperatorStationSession:
             if concept is None:
                 return f"PROCEDURE ERROR\nConcept '{step_id_name}' disappeared during execution."
             self.log(f"procedure step {step_idx + 1}/{len(steps)}: {concept.name!r} → {concept.utterance!r}")
-            result = self.run_task(concept.utterance)
+            result = self._run_task_from_instruction(
+                concept.utterance,
+                concept.utterance,
+                source="procedure_step",
+                record_plan=False,
+            )
             results.append(self.result_summary(result))
 
         step_labels = " → ".join(steps)
@@ -4736,14 +5330,38 @@ class OperatorStationSession:
         results: list[str] = []
         for step_idx, step_utterance in enumerate(utterance_steps):
             self.log(f"sequence step {step_idx + 1}/{len(utterance_steps)}: {step_utterance!r}")
-            result = self.run_task(step_utterance)
+            result = self._run_task_from_instruction(
+                step_utterance,
+                step_utterance,
+                source="sequence_step",
+                record_plan=False,
+            )
             results.append(self.result_summary(result))
 
         step_labels = " → ".join(utterance_steps)
         return f"PROCEDURE COMPLETE ({step_labels})\n" + "\n---\n".join(results)
 
     def _run_motor_command(self, action_name: str, count: int, original_utterance: str) -> str:
-        """Execute a motor primitive N times directly, bypassing task planning (Cortex/Spine)."""
+        """Authorize and execute an explicit low-level motor primitive."""
+        if action_name not in ACTION_PRIMITIVES:
+            return (
+                f"ERROR: Unknown motor action '{action_name}'.\n"
+                f"Known actions: {sorted(ACTION_PRIMITIVES)}"
+            )
+        ticket = self._raw_motor_ticket_for_command(
+            original_utterance,
+            action_name,
+            count,
+            source="operator",
+        )
+        return self._run_motor_with_ticket(ticket)
+
+    def _run_motor_with_ticket(self, ticket: RawMotorTicket) -> str:
+        if not isinstance(ticket, RawMotorTicket):
+            raise TypeError("_run_motor_with_ticket requires a RawMotorTicket")
+        self.last_raw_motor_ticket = ticket
+        action_name = ticket.action_name
+        count = ticket.repeat_count
         if action_name not in ACTION_PRIMITIVES:
             return (
                 f"ERROR: Unknown motor action '{action_name}'.\n"
@@ -4752,7 +5370,7 @@ class OperatorStationSession:
         actions = [action_name] * count
         self.log(f"motor_execute: {action_name} × {count}")
         if self.render_mode == "human":
-            # Act on the persistent session adapter — no reset, window stays open.
+            # Act on the persistent session adapter; no reset, window stays open.
             adapter = self.task_adapter or self.preview_adapter
             if adapter is None:
                 env = run_demo.build_env(self.env_id, self.render_mode)
@@ -4801,7 +5419,13 @@ class OperatorStationSession:
         results: list[str] = []
         for step_idx, step_utterance in enumerate(steps):
             self.log(f"mission step {step_idx + 1}/{len(steps)}: {step_utterance!r}")
-            result = self.run_task(step_utterance)
+            ticket = self._execution_ticket_for_instruction(
+                step_utterance,
+                step_utterance,
+                source="mission_step",
+                record_plan=False,
+            )
+            result = self._run_task_with_ticket(ticket)
             summary = self.result_summary(result)
             results.append(summary)
             if not result.get("final_state", {}).get("task_complete", False):
@@ -4824,11 +5448,15 @@ class OperatorStationSession:
             lines.append(f"  {c.name!r} → {c.utterance!r}{type_tag}{plan_tag}  (recalled {c.recall_count}x)")
         return "\n".join(lines)
 
-    def apply_knowledge_update(self, payload: dict[str, Any]) -> str:
+    def apply_knowledge_update(self, ticket: MemoryWriteTicket) -> str:
+        if not isinstance(ticket, MemoryWriteTicket):
+            raise TypeError("apply_knowledge_update requires a MemoryWriteTicket")
+        self.last_memory_write_ticket = ticket
         self.log("updating durable target knowledge")
-        for key in ("target_color", "target_type", "delivery_target"):
-            if key in payload:
-                self.memory.update_knowledge(key, payload[key])
+        for write in ticket.writes:
+            if write.scope != "knowledge":
+                raise ValueError(f"Unsupported memory write scope: {write.scope}")
+            self.memory.update_knowledge(write.key, write.value)
         return (
             "KNOWLEDGE UPDATED\n"
             f"delivery_target={self.memory.knowledge.get('delivery_target')}"
@@ -4842,6 +5470,13 @@ class OperatorStationSession:
         self.last_environment_invalidation_reason = None
         self.last_request_plan = None
         self.last_readiness_graph = None
+        self.last_execution_ticket = None
+        self.last_memory_write_ticket = None
+        self.last_raw_motor_ticket = None
+        self.last_operator_intent = None
+        self.last_cortical_envelope = None
+        self.last_approved_command = None
+        self.last_command_result = None
         self.memory.reset_episode()
         self.last_result = None
         if clear_memory:

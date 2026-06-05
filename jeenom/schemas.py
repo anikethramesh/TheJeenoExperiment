@@ -106,6 +106,7 @@ REQUEST_OBJECTIVE_TYPES = (
     "task",
     "query",
     "knowledge_update",
+    "motor_control",
     "control",
     "unsupported",
 )
@@ -133,6 +134,7 @@ REQUEST_PLAN_OPERATIONS = (
 )
 REQUEST_EXPECTED_RESPONSES = (
     "execute_task",
+    "execute_motor",
     "answer_query",
     "ask_clarification",
     "propose_synthesis",
@@ -155,6 +157,7 @@ READINESS_NODE_STATUSES = (
 )
 READINESS_NEXT_ACTIONS = (
     "execute_task",
+    "execute_motor",
     "answer_query",
     "ask_clarification",
     "ask_authorization",
@@ -1225,7 +1228,7 @@ class OperatorIntent:
     concept_steps: list[str] | None = None
     # sequence_instruction: ordered list of raw task utterances to execute sequentially
     utterance_steps: list[str] | None = None
-    # motor_command: direct action-primitive execution (bypasses task planning)
+    # motor_command: explicit low-level action primitive authorized by RawMotorTicket
     action_name: str | None = None    # key in ACTION_PRIMITIVES (e.g. "move_forward")
     repeat_count: int | None = None   # number of times to execute (>= 1)
     # mission_contract: L4 goal — ordered task sequence with abort-on-failure
@@ -1402,7 +1405,7 @@ class OperatorIntent:
             if self.knowledge_update is None:
                 raise SchemaValidationError("knowledge_update requires knowledge_update payload")
             if (
-                self.knowledge_update.get("delivery_target") is None
+                "delivery_target" not in self.knowledge_update
                 and self.target_selector is None
                 and self.grounding_query_plan is None
             ):
@@ -1967,6 +1970,187 @@ class MissionContract:
 
 
 @dataclass
+class CorticalEnvelope:
+    """Typed record for one operator turn through the cortical control plane."""
+
+    envelope_id: str
+    utterance: str
+    intent: OperatorIntent | None = None
+    request_plan: RequestPlan | None = None
+    readiness_graph: ReadinessGraph | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+    pending_context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(init=False)
+class ApprovedCommand:
+    """Typed station command authorized by a RequestPlan + ReadinessGraph."""
+
+    command_type: str
+    request_id: str = ""
+    source: str = "station"
+    utterance: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    request_plan: RequestPlan | None = None
+    readiness_graph: ReadinessGraph | None = None
+    capability_match: Any = None
+    ticket: Any = None
+
+    def __init__(
+        self,
+        command_type: str | None = None,
+        *,
+        kind: str | None = None,
+        request_id: str = "",
+        source: str = "station",
+        utterance: str = "",
+        payload: dict[str, Any] | None = None,
+        request_plan: RequestPlan | None = None,
+        readiness_graph: ReadinessGraph | None = None,
+        capability_match: Any = None,
+        ticket: Any = None,
+    ) -> None:
+        self.command_type = command_type if command_type is not None else kind or ""
+        self.request_id = request_id
+        self.source = source
+        self.utterance = utterance
+        self.payload = dict(payload or {})
+        self.request_plan = request_plan
+        self.readiness_graph = readiness_graph
+        self.capability_match = capability_match
+        self.ticket = ticket
+        self.__post_init__()
+
+    @property
+    def kind(self) -> str:
+        return self.command_type
+
+    @kind.setter
+    def kind(self, value: str) -> None:
+        self.command_type = value
+
+    def __post_init__(self) -> None:
+        if not self.command_type:
+            raise SchemaValidationError("ApprovedCommand requires command_type")
+        if self.readiness_graph is not None and self.request_id:
+            if self.readiness_graph.request_id != self.request_id:
+                raise SchemaValidationError("ApprovedCommand request_id must match ReadinessGraph")
+        if self.request_plan is not None and self.request_id:
+            if self.request_plan.request_id != self.request_id:
+                raise SchemaValidationError("ApprovedCommand request_id must match RequestPlan")
+
+
+@dataclass
+class ExecutionTicket:
+    """Authority token required before a task can enter the runtime loop."""
+
+    request_id: str
+    instruction: str
+    task_type: str
+    params: dict[str, Any]
+    request_plan: RequestPlan
+    readiness_graph: ReadinessGraph
+    source: str = "station"
+
+    def __post_init__(self) -> None:
+        if self.readiness_graph.request_id != self.request_id:
+            raise SchemaValidationError("ExecutionTicket request_id must match ReadinessGraph")
+        if self.request_plan.request_id != self.request_id:
+            raise SchemaValidationError("ExecutionTicket request_id must match RequestPlan")
+        if self.readiness_graph.graph_status != "executable":
+            raise SchemaValidationError("ExecutionTicket requires executable readiness graph")
+        if self.readiness_graph.next_action != "execute_task":
+            raise SchemaValidationError("ExecutionTicket requires next_action=execute_task")
+
+
+@dataclass
+class MemoryWriteTicket:
+    """Authority token for durable operator-claim or memory mutation."""
+
+    request_id: str
+    writes: list[MemoryUpdate]
+    request_plan: RequestPlan
+    readiness_graph: ReadinessGraph
+    source: str = "station"
+
+    def __post_init__(self) -> None:
+        if self.readiness_graph.request_id != self.request_id:
+            raise SchemaValidationError("MemoryWriteTicket request_id must match ReadinessGraph")
+        if self.request_plan.request_id != self.request_id:
+            raise SchemaValidationError("MemoryWriteTicket request_id must match RequestPlan")
+        if self.readiness_graph.graph_status != "executable":
+            raise SchemaValidationError("MemoryWriteTicket requires executable readiness graph")
+        if self.readiness_graph.next_action != "update_memory":
+            raise SchemaValidationError("MemoryWriteTicket requires next_action=update_memory")
+        if not self.writes:
+            raise SchemaValidationError("MemoryWriteTicket requires at least one write")
+
+
+@dataclass
+class RawMotorTicket:
+    """Authority token for an explicit low-level motor command."""
+
+    request_id: str
+    action_name: str
+    repeat_count: int
+    request_plan: RequestPlan
+    readiness_graph: ReadinessGraph
+    source: str = "station"
+
+    def __post_init__(self) -> None:
+        if self.readiness_graph.request_id != self.request_id:
+            raise SchemaValidationError("RawMotorTicket request_id must match ReadinessGraph")
+        if self.request_plan.request_id != self.request_id:
+            raise SchemaValidationError("RawMotorTicket request_id must match RequestPlan")
+        if self.readiness_graph.graph_status != "executable":
+            raise SchemaValidationError("RawMotorTicket requires executable readiness graph")
+        if self.readiness_graph.next_action != "execute_motor":
+            raise SchemaValidationError("RawMotorTicket requires next_action=execute_motor")
+        if not self.action_name:
+            raise SchemaValidationError("RawMotorTicket requires action_name")
+        if self.repeat_count < 1:
+            raise SchemaValidationError("RawMotorTicket repeat_count must be >= 1")
+
+
+@dataclass
+class MissionExecutionPlan:
+    """L4 mission plan plus child execution tickets."""
+
+    mission_id: str
+    description: str
+    request_plan: RequestPlan
+    readiness_graph: ReadinessGraph
+    child_tickets: list[ExecutionTicket] = field(default_factory=list)
+
+
+class CommandResult(str):
+    """Typed user-visible result from a station command."""
+
+    message: str
+    envelope: CorticalEnvelope | None
+    command: ApprovedCommand | None
+    ticket: ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None
+    result: dict[str, Any]
+
+    def __new__(
+        cls,
+        message: str,
+        *,
+        envelope: CorticalEnvelope | None = None,
+        command: ApprovedCommand | None = None,
+        ticket: ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> CommandResult:
+        obj = str.__new__(cls, message)
+        obj.message = message
+        obj.envelope = envelope
+        obj.command = command
+        obj.ticket = ticket
+        obj.result = dict(result or {})
+        return obj
+
+
+@dataclass
 class MemoryUpdate:
     scope: str
     key: str
@@ -2358,7 +2542,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "action_name": {
                 "type": ["string", "null"],
                 "description": (
-                    "For motor_command: the action primitive key to execute directly "
+                    "For motor_command: the low-level action primitive key to authorize "
                     "(e.g. 'move_forward', 'turn_right', 'turn_left'). "
                     "Null for all other intents."
                 ),

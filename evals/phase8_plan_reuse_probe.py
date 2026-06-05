@@ -42,8 +42,8 @@ from jeenom.plan_reuse import PlanReuseCache, plan_semantic_key
 
 
 
-# Utterance that produces an immediately executable plan (full metric specified).
-RANKED_UTTERANCE = "which door is closest by manhattan distance"
+# Utterance that produces an immediately executable ranked grounding plan.
+RANKED_UTTERANCE = "rank all the doors by manhattan distance"
 GOLDEN_UTTERANCE = "go to the red door"
 
 

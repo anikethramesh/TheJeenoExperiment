@@ -28,6 +28,13 @@ def _selector_value(intent_dict: dict[str, Any], key: str) -> Any:
     return selector.get(key)
 
 
+def _plan_value(intent_dict: dict[str, Any], key: str) -> Any:
+    plan = intent_dict.get("grounding_query_plan")
+    if not isinstance(plan, dict):
+        return None
+    return plan.get(key)
+
+
 def _run_probe(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, bool], LLMCompiler]:
     compiler = LLMCompiler()
     memory = OperationalMemory(root=Path(tempfile.mkdtemp()))
@@ -46,10 +53,14 @@ def _run_probe(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, bool
         "intent_type": intent.intent_type == args.expect_intent_type,
         "capability_status": intent.capability_status == args.expect_capability_status,
         "status_query": intent.status_query == args.expect_status_query,
-        "selector_object_type": _selector_value(intent_dict, "object_type") == "door",
-        "selector_relation": _selector_value(intent_dict, "relation") == "closest",
-        "selector_distance_metric_missing": _selector_value(intent_dict, "distance_metric") is None,
-        "selector_distance_reference_missing": _selector_value(intent_dict, "distance_reference") is None,
+        "query_plan_object_type": _plan_value(intent_dict, "object_type") == "door",
+        "query_plan_operation": _plan_value(intent_dict, "operation") == "answer",
+        "query_plan_ranked_handle": (
+            _plan_value(intent_dict, "primitive_handle")
+            == "grounding.all_doors.ranked.manhattan.agent"
+        ),
+        "query_plan_metric": _plan_value(intent_dict, "metric") == "manhattan",
+        "query_plan_order": _plan_value(intent_dict, "order") == "ascending",
     }
     if args.allow_fallback:
         checks["used_live_llm"] = True
@@ -74,11 +85,12 @@ def _print_report(
                 "intent_type": args.expect_intent_type,
                 "capability_status": args.expect_capability_status,
                 "status_query": args.expect_status_query,
-                "selector": {
+                "grounding_query_plan": {
                     "object_type": "door",
-                    "relation": "closest",
-                    "distance_metric": None,
-                    "distance_reference": None,
+                    "operation": "answer",
+                    "primitive_handle": "grounding.all_doors.ranked.manhattan.agent",
+                    "metric": "manhattan",
+                    "order": "ascending",
                 },
             },
         }
@@ -103,8 +115,8 @@ def _print_report(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Probe whether the live operator-intent LLM emits a clarification-ready "
-            "OperatorIntent for an underspecified grounding query."
+            "Probe whether the live operator-intent LLM emits a ranked Manhattan "
+            "OperatorIntent for an underspecified closest-door grounding query."
         )
     )
     parser.add_argument(
@@ -119,7 +131,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--expect-capability-status",
-        default="needs_clarification",
+        default="executable",
         help="Expected OperatorIntent.capability_status.",
     )
     parser.add_argument(

@@ -47,6 +47,8 @@ def _signals(text: str) -> list[str]:
 def _objective_type(intent: OperatorIntent) -> str:
     if intent.intent_type == "task_instruction":
         return "task"
+    if intent.intent_type == "motor_command":
+        return "motor_control"
     if intent.intent_type == "knowledge_update":
         return "knowledge_update"
     if intent.intent_type in {"status_query", "claim_reference", "cache_query"}:
@@ -63,6 +65,8 @@ def _expected_response(intent: OperatorIntent) -> str:
         return "propose_synthesis"
     if intent.intent_type == "task_instruction":
         return "execute_task"
+    if intent.intent_type == "motor_command":
+        return "execute_motor"
     if intent.intent_type == "knowledge_update":
         return "update_memory"
     if intent.intent_type in {"status_query", "claim_reference", "cache_query"}:
@@ -261,6 +265,30 @@ def build_request_plan(
     comparison = _comparison_from_text_or_plan(utterance, plan)
     distance_value = _distance_value_from_text_or_plan(utterance, plan)
 
+    if objective_type == "motor_control":
+        steps.append(
+            RequestPlanStep(
+                step_id="execute_raw_motor",
+                layer="action",
+                operation="execute",
+                inputs={
+                    "action_name": intent.action_name,
+                    "repeat_count": intent.repeat_count or 1,
+                },
+                outputs=["motor_result"],
+                constraints={"raw_motor": True},
+            )
+        )
+        return RequestPlan(
+            request_id=request_id,
+            original_utterance=utterance,
+            objective_type=objective_type,
+            objective_summary=intent.reason or "Explicit low-level motor command.",
+            steps=steps,
+            preservation_signals=_signals(utterance),
+            expected_response=expected_response,
+        )
+
     if objective_type == "control":
         steps.append(
             RequestPlanStep(
@@ -290,6 +318,7 @@ def build_request_plan(
                     operation="refuse",
                     required_handle=handle,
                     outputs=["operator_response"],
+                    environment_assumption_ids=environment_assumption_ids,
                 )
             )
 

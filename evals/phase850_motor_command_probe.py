@@ -138,13 +138,13 @@ def main() -> int:
     # ── Station dispatch: motor_command → motor_execute ───────────────────────
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         sess = _make_session()
-        from jeenom.operator_station import OperatorCommand
+        from jeenom.operator_station import ApprovedCommand
         cmd = sess.command_from_operator_intent(
             OperatorIntent.from_dict(raw),
             "go straight for 3 steps",
         )
         metrics["motor_command_routes_to_execute"] = (
-            isinstance(cmd, OperatorCommand)
+            isinstance(cmd, ApprovedCommand)
             and cmd.kind == "motor_execute"
             and cmd.payload.get("action") == "move_forward"
             and cmd.payload.get("count") == 3

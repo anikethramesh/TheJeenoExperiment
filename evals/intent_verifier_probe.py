@@ -159,13 +159,13 @@ def main() -> int:
     session = _make_session()
     _run(lambda: session.handle_utterance("go to the red door"))
     task_ran = [False]
-    original_run_task = session.run_task
+    original_run_task = session._run_task_with_ticket
 
-    def tracking_run_task(instruction):
+    def tracking_run_task(ticket):
         task_ran[0] = True
-        return original_run_task(instruction)
+        return original_run_task(ticket)
 
-    session.run_task = tracking_run_task
+    session._run_task_with_ticket = tracking_run_task
     result_far = _run(lambda: session.handle_utterance("go to the farthest door"))
     checks["farthest_completes_successfully"] = "task_complete=True" in result_far
     checks["farthest_does_execute_task"] = task_ran[0]
