@@ -23,13 +23,17 @@ core architecture boundaries:
 - station-owned runtime context, substrate package, and context-driven
   planner/verifier semantics
 
-Phase 10 extraction is complete. `OperatorStationSession` is still large, but
-the blocking boundaries are now explicit: runtime package injection,
+Phase 10 extraction is nearly complete. `OperatorStationSession` is still large,
+but the blocking boundaries are now explicit: runtime package injection,
 operational context, substrate adapter, domain helper, turn orchestrator,
 side-effect authority, command authority, and context-driven planning semantics.
 The baseline now includes a live operator regression probe because structural
 boundary checks alone were not enough to prove user-visible progress.
-The next architecture task is Phase 11: add the minimal evidence-planning loop.
+The current architecture task is Phase 10I: operator-defined primitive assembly,
+so commands like defining `convenientDistance = min(manhattan, euclidean)` can
+become typed, validated, reusable query primitives instead of unsupported text.
+Phase 10I is currently in red-bar mode: the evals/tests for this behavior have
+been added and are expected to fail until the implementation lands.
 
 The guiding split is:
 
@@ -192,16 +196,23 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Current baseline after Phase 10H:
+Last green baseline after Phase 10H live regression repair:
 
 - `python evals/eval_master.py --suite cleanup`: 28/28 passing.
 - `python evals/eval_master.py`: 57/57 passing.
 - `python -m pytest -q tests`: 229 passed.
 
+Current Phase 10I red-bar signal:
+
+- `python evals/eval_master.py --suite cleanup`: 28/29 passing;
+  `phase10i_user_defined_metric_probe.py` fails as expected.
+- `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 6 failed
+  as expected until operator-defined primitive assembly is implemented.
+
 Roadmap:
 
-- Phase 10: complete. Operator-station boundary cleanup is done for now; repo
-  slimming is deliberately deferred.
+- Phase 10I: add operator-defined primitive assembly for pure query/grounding
+  primitives.
 - Phase 11: add the minimal evidence-planning loop.
 - Phase 12: demonstrate the same cognition loop on MiniGrid and a robotics-like
   substrate.

@@ -25,8 +25,8 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 11 - Minimal Representation And Evidence Planning**
-  is next; Phase 10 operator-station boundary cleanup is complete.
+- Current phase: **Phase 10I - Operator-Defined Primitive Assembly**.
+  Phase 11 waits until collaborative primitive definition is real.
 - Phase 9D is complete. Operator turns now route through typed envelopes,
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
@@ -47,10 +47,21 @@ Elon-algorithm rule for this repo:
   verifier to the same runtime context it uses for planning.
 - A live operator regression probe now checks that answers, intents,
   RequestPlans, ReadinessGraphs, and plan reuse agree on the same outcome.
+- Phase 10I is open because operator-defined primitive/metric construction is
+  missing: commands such as "define convenientDistance as min(manhattan,
+  euclidean)" currently fall through unsupported instead of becoming typed
+  primitive-definition work.
 - Current verification signal:
-  - `python evals/eval_master.py --suite cleanup`: 28/28 passing
-  - `python evals/eval_master.py`: 57/57 passing
-  - `python -m pytest -q tests`: 229 passed
+  - Last green pre-10I baseline:
+    `python evals/eval_master.py --suite cleanup`: 28/28 passing,
+    `python evals/eval_master.py`: 57/57 passing,
+    `python -m pytest -q tests`: 229 passed.
+  - Current red-bar 10I signal:
+    `python evals/eval_master.py --suite cleanup`: 28/29 passing;
+    `phase10i_user_defined_metric_probe.py` fails as expected.
+  - Focused 10I unit signal:
+    `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 6 failed
+    as expected until implementation.
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -752,7 +763,7 @@ Measured outcome:
   - `python evals/eval_master.py`: 57/57 passing
   - `python -m pytest -q tests`: 229 passed
 
-Remaining debt after Phase 10:
+Remaining debt after Phase 10H:
 
 - `OperatorStationSession` is still large and still owns deeper MiniGrid-shaped
   branches. That is acceptable for the prototype while the boundary objects are
@@ -764,10 +775,106 @@ Remaining debt after Phase 10:
 - Repo/file-size minimization should be a later cleanup phase after capability
   pressure proves what should stay.
 
-Phase 10 stop rule:
+### Phase 10I - Operator-Defined Primitive Assembly
 
-- After 10H, close Phase 10 and move to Phase 11.
-- Do not add a 10I for station slimming now.
+Status: eval-first red bar added; implementation pending.
+
+Purpose: make collaborative primitive construction real. The operator must be
+able to define a new pure query/grounding primitive by composing existing
+primitives or formulas, then use it in later turns.
+
+Why this belongs in Phase 10:
+
+- This is not new MiniGrid capability; it is a missing architecture outcome.
+- The project goal is just-in-time primitive assembly under operator steering.
+- A command like "synthesize a new distance metric which is the minimum between
+  euclidean and manhattan distance; call it convenientDistance" should not fall
+  through as unsupported.
+- Phase 11 evidence planning should build on this capability, not work around
+  its absence.
+
+Non-goals:
+
+- Do not create a broad ontology.
+- Do not add arbitrary unsafe code execution.
+- Do not make actuation primitives synthesizable.
+- Do not chase operator-station line-count reduction in this slice.
+
+Eval-first requirements:
+
+- Added `evals/phase10i_user_defined_metric_probe.py`, registered in
+  `evals/manifest.py`; it is expected to fail until 10I is implemented.
+- Added `tests/test_phase10i_user_defined_metrics.py`; it is expected to fail
+  until 10I is implemented.
+- The Phase 10I live eval fails on the current system for:
+  - `synthesize a new distance metric which is the minimum between euclidean and
+    manhattan distance. call it convenientDistance`
+  - `rank all doors by convenientDistance`
+  - `what is the convenientDistance to all the doors`
+- It also throws wacky operator-defined metrics at the station:
+  - `ramesian = euclidean mod 5`
+  - `convenientDistance = min(euclidean, manhattan)`
+  - `nopeDistance = manhattan + 99` rejected by operator
+  - `rammer = move forward then euclidean` refused as unsafe actuation leakage
+- The eval must assert the first command becomes typed primitive-definition work,
+  not plain unsupported text.
+- The eval must assert JEENOM checks dependencies:
+  - Manhattan ranked distance already exists.
+  - Euclidean ranked distance is missing/synthesizable unless already built.
+- The eval must assert operator approval gates registration.
+- The eval must assert the new handle is registered only after validation.
+- The eval must assert future planning can use the new metric without reverting
+  to `manhattan` or `euclidean`.
+
+Required schema/message additions:
+
+- Add a typed primitive-definition intent/request. Possible shape:
+  `PrimitiveDefinitionRequest`.
+- Minimum fields:
+  - `definition_type`: e.g. `distance_metric`
+  - `name`: operator-facing metric/primitive name such as `convenientDistance`
+  - `normalized_name`: registry-safe name such as `convenient_distance`
+  - `expression`: structured formula such as `min(euclidean, manhattan)`
+  - `dependencies`: handles or metric names used by the expression
+  - `proposed_handle`: e.g.
+    `grounding.all_doors.ranked.convenient_distance.agent`
+  - `safety_class`: must be query-only for this slice
+  - `authority_level`: `operator`
+  - `provenance`: operator utterance, approval turn, dependency handles
+
+Required control-flow behavior:
+
+1. Compiler/semantic parser detects operator-defined primitive requests.
+2. Cortex/station builds a typed definition request and RequestPlan.
+3. Readiness checks dependency availability and synthesis requirements.
+4. If dependencies are missing but safe, JEENOM proposes the dependency
+   synthesis first.
+5. Once dependencies exist, JEENOM proposes the composed primitive.
+6. Operator approves or rejects.
+7. Synthesizer generates a pure query primitive.
+8. Validator runs deterministic fixtures.
+9. CapabilityRegistry registers the primitive only after validation.
+10. OperationalContext/PlanningSemantics can resolve the new metric name.
+11. KnowledgeBase records the primitive definition, dependencies, provenance,
+    validation result, and handle.
+
+Acceptance criteria:
+
+- The example `convenientDistance = min(euclidean, manhattan)` can be proposed,
+  approved, validated, registered, and used in a later ranked-door query.
+- A rejected proposal registers nothing.
+- A validation failure registers nothing and says so honestly.
+- The new primitive is query-only and cannot authorize motion by itself.
+- The new metric/handle appears in the capability registry and planning
+  semantics after registration.
+- Re-running `python evals/eval_master.py --suite cleanup`,
+  `python evals/eval_master.py`, and `python -m pytest -q tests` stays green.
+
+Phase 10 stop rule after 10I:
+
+- After 10I, close Phase 10 and move to Phase 11.
+- Do not add another Phase 10 slice unless a live operator outcome is missing
+  from the core just-in-time primitive assembly story.
 - `operator_station.py` may remain large if the blocking architecture boundaries
   are enforced.
 - Repo/file-size minimization becomes a later cleanup phase after the prototype
