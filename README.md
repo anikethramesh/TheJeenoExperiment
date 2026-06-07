@@ -73,7 +73,8 @@ Current architectural debt:
   `KnowledgeSnapshot`; deeper station extraction still needs to move more
   orchestration behind clean modules.
 - Phase 10A moved command/result trace construction into `CommandAuthority`;
-  side-effect ticket creation and substrate HOW still need extraction.
+  Phase 10B moved execution, raw-motor, and memory-write ticket minting into
+  `SideEffectAuthority`. Substrate HOW still needs extraction.
 - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest.
 - Request planning, primitive validation fixtures, and many station formatters
   still contain MiniGrid/door/grid assumptions.
@@ -176,11 +177,11 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Current baseline after Phase 10A:
+Current baseline after Phase 10B:
 
-- `python evals/eval_master.py --suite cleanup`: 20/20 passing.
-- `python evals/eval_master.py`: 49/49 passing.
-- `python -m pytest -q tests`: 203 passed.
+- `python evals/eval_master.py --suite cleanup`: 21/21 passing.
+- `python evals/eval_master.py`: 50/50 passing.
+- `python -m pytest -q tests`: 208 passed.
 
 Roadmap:
 

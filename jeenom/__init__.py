@@ -8,6 +8,7 @@ from .minigrid_adapter import MiniGridAdapter
 from .operator_station import OperatorStationSession, classify_utterance
 from .representation import RepresentationStore
 from .sense import MiniGridSense
+from .side_effect_authority import SideEffectAuthority
 from .spine import MiniGridSpine
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "OperationalMemory",
     "Readiness",
     "RepresentationStore",
+    "SideEffectAuthority",
     "SmokeTestCompiler",
     "build_compiler",
     "classify_utterance",

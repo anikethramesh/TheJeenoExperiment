@@ -29,6 +29,7 @@ from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .primitive_library import ACTION_PRIMITIVES, TASK_PRIMITIVES
 from .repair_loop import RepairEvent, RepairLoop
 from .representation import RepresentationStore
+from .side_effect_authority import SideEffectAuthority
 from .schemas import (
     ApprovedCommand,
     ArbitrationTrace,
@@ -395,6 +396,7 @@ class OperatorStationSession:
             knowledge_base=self.knowledge_base,
         )
         self.command_authority = CommandAuthority(station_name="OperatorStationSession")
+        self.side_effect_authority = SideEffectAuthority(source_name="OperatorStationSession")
         self.cortex = Cortex(self.memory, self.compiler, plan_cache=self.plan_cache)
         self.sense = MiniGridSense(self.memory, self.compiler, plan_cache=self.plan_cache)
         self.spine = MiniGridSpine(self.memory, None, self.compiler, plan_cache=self.plan_cache)
@@ -1367,11 +1369,10 @@ class OperatorStationSession:
         source: str,
     ) -> ExecutionTicket:
         task = self.compose_known_task(instruction)
-        return ExecutionTicket(
-            request_id=plan.request_id,
+        return self.side_effect_authority.issue_execution_ticket(
             instruction=instruction,
             task_type=task.task_type,
-            params=dict(task.params),
+            params=task.params,
             request_plan=plan,
             readiness_graph=graph,
             source=source,
@@ -1458,8 +1459,7 @@ class OperatorStationSession:
         *,
         source: str,
     ) -> RawMotorTicket:
-        return RawMotorTicket(
-            request_id=plan.request_id,
+        return self.side_effect_authority.issue_raw_motor_ticket(
             action_name=action_name,
             repeat_count=count,
             request_plan=plan,
@@ -1561,8 +1561,7 @@ class OperatorStationSession:
             readiness_graph=graph,
             reason="memory_write_ticket_created",
         )
-        return MemoryWriteTicket(
-            request_id=plan.request_id,
+        return self.side_effect_authority.issue_memory_write_ticket(
             writes=self._memory_writes_from_payload(payload),
             request_plan=plan,
             readiness_graph=graph,

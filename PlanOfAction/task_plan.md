@@ -31,9 +31,9 @@ Elon-algorithm rule for this repo:
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
   surface now have eval-backed enforcement before Operator Station extraction.
 - Current verification signal:
-  - `python evals/eval_master.py --suite cleanup`: 19/19 passing
-  - `python evals/eval_master.py`: 48/48 passing
-  - `python -m pytest -q tests`: 201 passed
+  - `python evals/eval_master.py --suite cleanup`: 21/21 passing
+  - `python evals/eval_master.py`: 50/50 passing
+  - `python -m pytest -q tests`: 208 passed
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -398,8 +398,8 @@ Extract only what we need:
 - `SubstrateAdapter`: HOW boundary for manifest, sensing, action, task runtime,
   reset, prewarm, and validation hooks.
 - `MiniGridSubstrateAdapter`: the current MiniGrid HOW.
-- `CommandAuthority`: command/result tracing and ticket lookup; ticket creation
-  moves in the side-effect authority slice.
+- `CommandAuthority`: command/result tracing and ticket lookup.
+- `SideEffectAuthority`: execution, raw-motor, and memory-write ticket minting.
 - MiniGrid domain helpers: door/color/grid formatting and grounding display.
 
 Do not create:
@@ -411,56 +411,112 @@ Do not create:
 
 Those come only if Phase 11 evals force them.
 
-Progress:
+Numbering rule:
 
-- 10A command/result authority extraction: done.
-  - Added `jeenom/command_authority.py` as a schema-only authority surface.
-  - Added `evals/phase10_command_authority_probe.py`.
-  - Added `tests/test_phase10_command_authority.py`.
-  - `OperatorStationSession._record_command_result()` and
-    `_pending_clarification_trace()` now delegate trace construction instead of
-    manufacturing `CorticalEnvelope`, `ApprovedCommand`, and `CommandResult`
-    inline.
+- Phase 10 uses lettered implementation slices only: 10A, 10B, 10C, ...
+- Every slice is eval/test first. There is no separate "eval slice"; the eval is
+  part of the slice it protects.
 
 Current Phase 10 baseline:
 
-- `python evals/eval_master.py --suite cleanup`: 20/20 passing
-- `python evals/eval_master.py`: 49/49 passing
-- `python -m pytest -q tests`: 203 passed
+- `python evals/eval_master.py --suite cleanup`: 21/21 passing
+- `python evals/eval_master.py`: 50/50 passing
+- `python -m pytest -q tests`: 208 passed
 
-Implementation slices:
+### Phase 10A - Command/Result Authority
 
-1. Add station-modularity evals.
-   - status: started with command-authority probe
-   - current behavior snapshot
-   - direct MiniGrid imports forbidden in the extracted orchestration kernel
-   - side effects must pass through authority/tickets
+Status: done.
 
-2. Extract command/result tracing.
-   - status: done
-   - move envelope/result construction out of the station
-   - keep `handle_utterance()` string-compatible
+Purpose: move "what happened this turn?" trace construction out of the station.
 
-3. Extract side-effect authority.
-   - status: pending
-   - task, motor, and memory paths use one authority/ticket module
-   - tests prove request id, plan, graph, and next action are bound
+Implemented:
 
-4. Extract the substrate adapter boundary.
-   - status: pending
-   - MiniGrid env ownership leaves the station facade
-   - scene construction, reset, raw motor, prewarm, and task runtime become
-     adapter responsibilities
+- Added `jeenom/command_authority.py` as a schema-only authority surface.
+- Added `evals/phase10_command_authority_probe.py`.
+- Added `tests/test_phase10_command_authority.py`.
+- `OperatorStationSession._record_command_result()` and
+  `_pending_clarification_trace()` now delegate trace construction instead of
+  manufacturing `CorticalEnvelope`, `ApprovedCommand`, and `CommandResult`
+  inline.
 
-5. Extract MiniGrid domain helpers.
-   - status: pending
-   - door/color/grid display and grounding helpers leave orchestration code
-   - orchestration stops knowing MiniGrid vocabulary
+Measured outcome:
 
-6. Add a minimal mock substrate smoke eval.
-   - status: pending
-   - prove the kernel can run against a non-MiniGrid manifest/adapter
-   - do not build a full robot or ARC port in this phase
+- Station no longer constructs command/result trace objects in result paths.
+- Public `CommandResult` compatibility is preserved.
+
+### Phase 10B - Side-Effect Authority
+
+Status: done.
+
+Purpose: move "who is allowed to change world or memory state?" ticket minting
+out of the station.
+
+Implemented:
+
+- Added `jeenom/side_effect_authority.py` as the schema-only ticket minting
+  surface.
+- Added `evals/phase10_side_effect_authority_probe.py`.
+- Added `tests/test_phase10_side_effect_authority.py`.
+- `OperatorStationSession` no longer directly constructs `ExecutionTicket`,
+  `RawMotorTicket`, or `MemoryWriteTicket`.
+
+Measured outcome:
+
+- Side-effect tickets have one named authority surface.
+- The station still plans and dispatches, but it does not mint authority tokens
+  inline.
+
+### Phase 10C - Substrate Adapter Boundary
+
+Status: pending.
+
+Purpose: move MiniGrid HOW out of the station facade.
+
+Target:
+
+- MiniGrid env ownership leaves `OperatorStationSession`.
+- Scene construction, reset, raw motor execution, prewarm, and task runtime
+  become adapter responsibilities.
+- The extracted orchestration path must not import MiniGrid directly.
+
+### Phase 10D - MiniGrid Domain Helpers
+
+Status: pending.
+
+Purpose: move door/color/grid-specific presentation and grounding helpers out of
+orchestration.
+
+Target:
+
+- Door/color/grid display leaves `OperatorStationSession`.
+- Grounding answer formatting leaves `OperatorStationSession`.
+- Orchestration stops knowing MiniGrid vocabulary beyond typed substrate
+  messages.
+
+### Phase 10E - Turn Orchestrator Extraction
+
+Status: pending.
+
+Purpose: isolate one operator turn through intent, plan, readiness, command,
+ticket, execution/answer, and result.
+
+Target:
+
+- `OperatorStationSession` becomes public facade plus session state.
+- `TurnOrchestrator` owns the repeatable control flow.
+- Existing CLI behavior and `CommandResult` compatibility stay stable.
+
+### Phase 10F - Mock Substrate Smoke
+
+Status: pending.
+
+Purpose: prove the extracted kernel is not MiniGrid-only.
+
+Target:
+
+- Add a minimal non-MiniGrid manifest/adapter.
+- Run one no-render cognition loop against it.
+- Do not build a full robot or ARC port in this phase.
 
 Acceptance criteria:
 
