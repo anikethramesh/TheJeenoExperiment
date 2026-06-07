@@ -4,65 +4,39 @@ config:
 ---
 flowchart TD
 
-  Start["Operator utterance"] --> CompileIntent["LLM / deterministic compile_operator_intent<br>utterance → OperatorIntent schema"]
-  CompileIntent --> VerifyIntent["IntentVerifier<br>semantic preservation signals<br>superlative / ordinal / metric / negation / cardinality"]
-  VerifyIntent --> RequestPlan["RequestPlan compiler<br>objective → typed dependency graph<br>grounding / claims / selector / task / answer"]
-  RequestPlan --> ContractLoad["Substrate contract manifest<br>primitive pre/postconditions<br>claims / frames / units<br>safety / authority / validators"]
-  ContractLoad --> Readiness["ReadinessGraph<br>evaluate each plan node against<br>CapabilityRegistry + contracts + Memory + ActiveClaims + SceneModel"]
+  Start["Operator utterance"]
+  Station["OperatorStation<br>wrap as CorticalEnvelope"]
+  SchemaIn["Schema gate<br>validate typed input"]
+  Intent["Cortex<br>compile + verify OperatorIntent"]
+  Plan["Cortex<br>build RequestPlan"]
+  Snapshot["KnowledgeBase<br>claim/procedure snapshot"]
+  Ready["ReadinessGraph<br>contracts + claims + authority"]
+  Gate["ApprovedCommand"]
 
-  Readiness -->|needs clarification| Ask["Ask one narrow clarification<br>store pending RequestPlan"]
-  Ask --> Start
+  Start --> Station --> SchemaIn --> Intent --> Plan
+  Plan --> Ready
+  Snapshot --> Ready
+  Ready --> Gate
 
-  Readiness -->|missing authority| AskAuthority["Ask / require operator authority<br>do not execute"]
-  AskAuthority --> Start
+  Gate -->|ask / clarify / refuse / answer| Result["CommandResult<br>with provenance"]
+  Result --> End["Await next steering"]
 
-  Readiness -->|contract mismatch| ContractBlock["Report failed primitive contract<br>frame / unit / claim / validation issue"]
-  ContractBlock --> Start
+  Gate -->|needs evidence| EvidenceMsg["EvidenceFrame"]
+  EvidenceMsg --> Sense["Sense<br>architecture WHAT"]
+  Sense --> SenseHow["SubstrateAdapter<br>sensing HOW"]
+  SenseHow --> Observation["ObservationClaim<br>source + confidence + freshness"]
+  Observation --> KnowledgeWrite["KnowledgeBase<br>record claim/provenance"]
+  KnowledgeWrite --> Snapshot
 
-  Readiness -->|stale or missing claims| RefreshClaims["Refresh / compute ActiveClaims<br>using registered grounding primitives"]
-  RefreshClaims --> Readiness
+  Gate -->|memory update| MemoryTicket["MemoryWriteTicket"]
+  MemoryTicket --> OperatorClaim["KnowledgeBase<br>record operator claim/procedure"]
+  OperatorClaim --> Snapshot
 
-  Readiness -->|synthesizable missing primitive| Propose["Explain gap + proposal<br>operator approves synthesis"]
-  Propose -->|approved| Synthesize["Synthesize + validate + register primitive"]
-  Synthesize --> Readiness
-  Propose -->|rejected / redirect| Start
+  Gate -->|task executable| ExecTicket["ExecutionTicket"]
+  ExecTicket --> Spine["Spine<br>ExecutionContract"]
+  Spine --> ActionHow["SubstrateAdapter<br>action/planner/controller HOW"]
+  ActionHow --> ExecClaim["ExecutionClaim<br>result + provenance"]
+  ExecClaim --> KnowledgeWrite
 
-  Readiness -->|unsupported or missing skills| Refuse["Report blocking plan node<br>do not execute"]
-  Refuse --> Start
-
-  Readiness -->|answer query| Answer["Compose answer from SceneModel / grounding claims / operator claims"]
-  Answer --> Start
-
-  Readiness -->|memory update| MemoryUpdate["Write operator claim or update episodic memory<br>(concept_teach → KnowledgeBase,<br>delivery_target → OperationalMemory.knowledge,<br>only declared writes)"]
-  MemoryUpdate --> Start
-
-  Readiness -->|ready task| Materialize["Materialize TaskRequest + Procedure<br>from grounded RequestPlan"]
-  Materialize --> CompileProc["LLM compile_procedure if needed<br>TaskRequest → Procedure"]
-  CompileProc --> Prewarm["JIT prewarm<br>compile/cache templates before render"]
-
-  Prewarm --> Cache["PlanCache<br>ProcedureRecipe<br>SensePlanTemplate<br>SkillPlanTemplate"]
-
-  Cache --> Preflight["Contract preflight<br>validation hooks / shadow checks<br>no unsafe schema-only execution"]
-  Preflight --> Loop["Runtime control loop<br>NO LLM during render"]
-
-  Loop --> EF["Cortex creates EvidenceFrame"]
-  EF --> SenseCache{"Sense template cached?"}
-  SenseCache -->|hit| SenseRun["Sense executes cached template<br>latest observation → WorldModelSample"]
-  SenseCache -->|miss outside render| SenseCompile["LLM compile_sense_plan<br>then cache"]
-  SenseCompile --> SenseRun
-
-  SenseRun --> Evidence["OperationalEvidence + Percepts"]
-  Evidence --> CortexUpdate["Cortex updates Claims / State / Provenance"]
-
-  CortexUpdate --> Contract["Cortex issues ExecutionContract"]
-  Contract --> SkillCache{"Skill template cached?"}
-  SkillCache -->|hit| SpineRun["Spine executes cached template<br>latest percepts/state → action"]
-  SkillCache -->|miss outside render| SkillCompile["LLM compile_skill_plan<br>then cache"]
-  SkillCompile --> SpineRun
-
-  SpineRun --> Report["ExecutionReport + ExecutionContext"]
-  Report --> Done{"Task complete?"}
-
-  Done -->|no| Loop
-  Done -->|yes| Memory["End-of-episode memory update<br>durable Knowledge + episodic memory"]
-  Memory --> End["Finish"]
+  Gate -->|explicit motor| MotorTicket["RawMotorTicket"]
+  MotorTicket --> Spine

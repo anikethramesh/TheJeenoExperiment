@@ -4,6 +4,7 @@ from .capability_registry import CapabilityRegistry
 from .schemas import (
     EnvironmentAssumption,
     EnvironmentIdentity,
+    KnowledgeSnapshot,
     ReadinessGraph,
     ReadinessNode,
     RequestPlan,
@@ -154,7 +155,16 @@ def evaluate_request_plan(
     active_claims: StationActiveClaims | None = None,
     claims_valid: bool = False,
     environment_identity: EnvironmentIdentity | None = None,
+    knowledge_snapshot: KnowledgeSnapshot | None = None,
 ) -> ReadinessGraph:
+    if knowledge_snapshot is not None:
+        if active_claims is None:
+            active_claims = knowledge_snapshot.active_claims
+        if not claims_valid:
+            claims_valid = knowledge_snapshot.claims_valid
+        if environment_identity is None:
+            environment_identity = knowledge_snapshot.environment_identity
+
     nodes: list[ReadinessNode] = []
     statuses_by_step: dict[str, str] = {}
     graph_violated_assumptions: list[str] = []

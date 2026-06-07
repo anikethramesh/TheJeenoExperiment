@@ -13,6 +13,7 @@ Migrated from: primitive_synthesis_probe.py, collaborative_synthesis_probe.py,
 from __future__ import annotations
 
 import ast
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -174,7 +175,8 @@ def _check_synthesis(checks: dict[str, bool]) -> None:
     checks["smoke_synthesizer_refuses"] = result.status == "refused"
 
     # 3. LLMSynthesizer falls back without API key
-    llm_synth = LLMSynthesizer(api_key=None)
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}):
+        llm_synth = LLMSynthesizer(api_key=None)
     checks["llm_synthesizer_has_fallback_reason"] = bool(llm_synth._fallback_reason)
 
     # 4. Validator passes correct Euclidean code

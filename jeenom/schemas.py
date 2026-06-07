@@ -71,7 +71,27 @@ OPERATOR_CLAIM_REFERENCES = ("next_closest", "other_door", "threshold_filter")
 #                 invalidated when the scene changes (StationActiveClaims).
 #   "operator"  — asserted by the operator; durable across restarts; invalidated only
 #                 by explicit retraction (KnowledgeBase, OperationalMemory.knowledge).
-CLAIM_SCOPES = ("grounding", "operator")
+CLAIM_SCOPES = ("grounding", "operator", "execution", "episodic", "procedure")
+CLAIM_KINDS = (
+    "fact",
+    "belief",
+    "hypothesis",
+    "operator_assertion",
+    "observation",
+    "execution",
+    "procedure",
+)
+CLAIM_STATUSES = (
+    "confirmed",
+    "asserted",
+    "observed",
+    "inferred",
+    "hypothesis",
+    "invalidated",
+    "unknown",
+)
+CLAIM_FRESHNESS = ("current", "stale", "unknown")
+CLAIM_AUTHORITIES = ("operator", "runtime", "system", "compiler", "sense", "spine")
 GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
 OPERATOR_OBJECT_TYPES = ("door",)
@@ -1873,6 +1893,135 @@ class ExecutionClaim:
     success: bool = True
     steps_taken: int = 0
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ClaimRecord:
+    """Representation-store claim wrapper.
+
+    Existing specialized claim types remain valid at block boundaries. ClaimRecord
+    is the small common shape used by the knowledge surface so facts, beliefs,
+    hypotheses, operator assertions, observations, and execution results retain
+    authority/provenance/freshness.
+    """
+
+    claim_id: str
+    key: str
+    value: Any
+    kind: str
+    status: str
+    scope: str
+    authority: str
+    source: str
+    confidence: float = 1.0
+    provenance: dict[str, Any] = field(default_factory=dict)
+    freshness: str = "current"
+    invalidation: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in CLAIM_KINDS:
+            raise SchemaValidationError(
+                f"ClaimRecord.kind must be one of: {', '.join(CLAIM_KINDS)}"
+            )
+        if self.status not in CLAIM_STATUSES:
+            raise SchemaValidationError(
+                f"ClaimRecord.status must be one of: {', '.join(CLAIM_STATUSES)}"
+            )
+        if self.scope not in CLAIM_SCOPES:
+            raise SchemaValidationError(
+                f"ClaimRecord.scope must be one of: {', '.join(CLAIM_SCOPES)}"
+            )
+        if self.authority not in CLAIM_AUTHORITIES:
+            raise SchemaValidationError(
+                f"ClaimRecord.authority must be one of: {', '.join(CLAIM_AUTHORITIES)}"
+            )
+        if self.freshness not in CLAIM_FRESHNESS:
+            raise SchemaValidationError(
+                f"ClaimRecord.freshness must be one of: {', '.join(CLAIM_FRESHNESS)}"
+            )
+        if not isinstance(self.confidence, (int, float)) or isinstance(self.confidence, bool):
+            raise SchemaValidationError("ClaimRecord.confidence must be numeric")
+        if not 0.0 <= float(self.confidence) <= 1.0:
+            raise SchemaValidationError("ClaimRecord.confidence must be between 0 and 1")
+        self.confidence = float(self.confidence)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ClaimRecord":
+        mapping = _ensure_mapping(data, "ClaimRecord")
+        return cls(
+            claim_id=_ensure_str(mapping.get("claim_id"), "ClaimRecord.claim_id"),
+            key=_ensure_str(mapping.get("key"), "ClaimRecord.key"),
+            value=mapping.get("value"),
+            kind=_ensure_str(mapping.get("kind"), "ClaimRecord.kind"),
+            status=_ensure_str(mapping.get("status"), "ClaimRecord.status"),
+            scope=_ensure_str(mapping.get("scope"), "ClaimRecord.scope"),
+            authority=_ensure_str(mapping.get("authority"), "ClaimRecord.authority"),
+            source=_ensure_str(mapping.get("source"), "ClaimRecord.source"),
+            confidence=float(mapping.get("confidence", 1.0)),
+            provenance=_ensure_dict(mapping.get("provenance", {}), "ClaimRecord.provenance"),
+            freshness=_ensure_str(mapping.get("freshness", "current"), "ClaimRecord.freshness"),
+            invalidation=_ensure_dict(mapping.get("invalidation", {}), "ClaimRecord.invalidation"),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "claim_id": self.claim_id,
+            "key": self.key,
+            "value": self.value,
+            "kind": self.kind,
+            "status": self.status,
+            "scope": self.scope,
+            "authority": self.authority,
+            "source": self.source,
+            "confidence": self.confidence,
+            "provenance": dict(self.provenance),
+            "freshness": self.freshness,
+            "invalidation": dict(self.invalidation),
+        }
+
+
+@dataclass
+class KnowledgeSnapshot:
+    """Typed snapshot consumed by planning/readiness instead of station fields."""
+
+    claims: dict[str, ClaimRecord] = field(default_factory=dict)
+    procedures: dict[str, dict[str, Any]] = field(default_factory=dict)
+    provenance: list[dict[str, Any]] = field(default_factory=list)
+    active_claims: StationActiveClaims | None = None
+    scene_model: SceneModel | None = None
+    environment_identity: EnvironmentIdentity | None = None
+    claims_valid: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "claims": {key: claim.as_dict() for key, claim in self.claims.items()},
+            "procedures": {key: dict(value) for key, value in self.procedures.items()},
+            "provenance": [dict(item) for item in self.provenance],
+            "active_claims": (
+                self.active_claims.compact_summary()
+                if self.active_claims is not None
+                else None
+            ),
+            "scene_model": (
+                {
+                    "agent_x": self.scene_model.agent_x,
+                    "agent_y": self.scene_model.agent_y,
+                    "agent_dir": self.scene_model.agent_dir,
+                    "step_count": self.scene_model.step_count,
+                    "source": self.scene_model.source,
+                }
+                if self.scene_model is not None
+                else None
+            ),
+            "environment_identity": (
+                self.environment_identity.as_dict()
+                if self.environment_identity is not None
+                else None
+            ),
+            "claims_valid": self.claims_valid,
+            "metadata": dict(self.metadata),
+        }
 
 
 @dataclass

@@ -4,7 +4,6 @@ import argparse
 import inspect
 import re
 import tempfile
-import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,6 +11,7 @@ from typing import Any, Iterable
 from .capability_arbitrator import ArbitratorBackend, build_arbitrator
 from .capability_matcher import CapabilityMatchResult, CapabilityMatcher, default_matcher
 from .capability_registry import CapabilityRegistry
+from .command_authority import CommandAuthority
 from .primitive_synthesizer import SynthesizerBackend, build_synthesizer
 from .primitive_validator import PrimitiveValidator, default_validator
 from .readiness_graph import evaluate_request_plan
@@ -28,6 +28,7 @@ from .mismatch import MismatchDetector, OperationalMismatch, default_detector
 from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .primitive_library import ACTION_PRIMITIVES, TASK_PRIMITIVES
 from .repair_loop import RepairEvent, RepairLoop
+from .representation import RepresentationStore
 from .schemas import (
     ApprovedCommand,
     ArbitrationTrace,
@@ -385,6 +386,15 @@ class OperatorStationSession:
         self.verbose = verbose
         self.last_result: dict[str, Any] | None = None
         self.capability_registry = CapabilityRegistry.minigrid_default()
+        # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
+        self.knowledge_base = KnowledgeBase(
+            storage_path=self.memory.memory_dir / "knowledge_base.json"
+        )
+        self.representation = RepresentationStore(
+            memory=self.memory,
+            knowledge_base=self.knowledge_base,
+        )
+        self.command_authority = CommandAuthority(station_name="OperatorStationSession")
         self.cortex = Cortex(self.memory, self.compiler, plan_cache=self.plan_cache)
         self.sense = MiniGridSense(self.memory, self.compiler, plan_cache=self.plan_cache)
         self.spine = MiniGridSpine(self.memory, None, self.compiler, plan_cache=self.plan_cache)
@@ -410,7 +420,6 @@ class OperatorStationSession:
         self.task_adapter: MiniGridAdapter | None = None
         self.pending_clarification: PendingClarification | None = None
         self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
-        self.active_claims: StationActiveClaims | None = None
         self.last_execution_ticket: ExecutionTicket | None = None
         self.last_memory_write_ticket: MemoryWriteTicket | None = None
         self.last_raw_motor_ticket: RawMotorTicket | None = None
@@ -428,14 +437,21 @@ class OperatorStationSession:
         self.last_plan_reuse_verdict: ReuseVerdict | None = None
         self.last_operational_mismatches: list[OperationalMismatch] = []
         self.last_repair_events: list[RepairEvent] = []
-        # KB lives alongside knowledge.yaml in memory_dir (always persistent)
-        self.knowledge_base = KnowledgeBase(
-            storage_path=self.memory.memory_dir / "knowledge_base.json"
-        )
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
         self.last_arbitration_trace: ArbitrationTrace | None = None
         self.synthesizer: SynthesizerBackend = build_synthesizer(compiler_name)
         self.validator: PrimitiveValidator = default_validator
+
+    @property
+    def active_claims(self) -> StationActiveClaims | None:
+        return self.representation.get_active_claims()
+
+    @active_claims.setter
+    def active_claims(self, claims: StationActiveClaims | None) -> None:
+        if claims is None:
+            self.representation.clear_active_claims(reason="station cleared active claims")
+            return
+        self.representation.set_active_claims(claims)
 
     def log(self, message: str) -> None:
         if self.verbose:
@@ -501,16 +517,14 @@ class OperatorStationSession:
         self,
         request_id: str | None,
     ) -> ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None:
-        if request_id is None:
-            return None
-        for ticket in (
-            self.last_execution_ticket,
-            self.last_memory_write_ticket,
-            self.last_raw_motor_ticket,
-        ):
-            if ticket is not None and ticket.request_id == request_id:
-                return ticket
-        return None
+        return self.command_authority.ticket_for_trace(
+            request_id,
+            (
+                self.last_execution_ticket,
+                self.last_memory_write_ticket,
+                self.last_raw_motor_ticket,
+            ),
+        )
 
     def _trace_command_type(
         self,
@@ -518,12 +532,7 @@ class OperatorStationSession:
         graph: ReadinessGraph | None,
         plan: RequestPlan | None,
     ) -> str:
-        if graph is not None:
-            return graph.next_action
-        if plan is not None:
-            return plan.expected_response
-        first_line = message.splitlines()[0] if message else ""
-        return first_line.split(" ", 1)[0].lower() if first_line else "response"
+        return self.command_authority.trace_command_type(message, graph=graph, plan=plan)
 
     def _record_command_result(
         self,
@@ -533,16 +542,18 @@ class OperatorStationSession:
         plan: RequestPlan | None,
         graph: ReadinessGraph | None,
     ) -> CommandResult:
-        envelope = CorticalEnvelope(
-            envelope_id=f"envelope:{uuid.uuid4().hex}",
-            utterance=utterance,
+        command_result = self.command_authority.record_result(
+            utterance,
+            message,
             intent=self.last_operator_intent,
-            request_plan=plan,
-            readiness_graph=graph,
-            provenance={
-                "station": "OperatorStationSession",
-                "compiler": self.compiler_name,
-            },
+            plan=plan,
+            graph=graph,
+            tickets=(
+                self.last_execution_ticket,
+                self.last_memory_write_ticket,
+                self.last_raw_motor_ticket,
+            ),
+            compiler_name=self.compiler_name,
             pending_context={
                 "clarification": self.pending_clarification.clarification_type
                 if self.pending_clarification is not None
@@ -551,33 +562,10 @@ class OperatorStationSession:
                 if self.pending_synthesis_proposal is not None
                 else None,
             },
+            last_result=self.last_result,
         )
-        request_id = (
-            graph.request_id
-            if graph is not None
-            else plan.request_id
-            if plan is not None
-            else envelope.envelope_id
-        )
-        command = ApprovedCommand(
-            command_type=self._trace_command_type(message, graph, plan),
-            request_id=request_id,
-            source="station",
-            payload={"first_line": message.splitlines()[0] if message else ""},
-        )
-        ticket = self._ticket_for_trace(request_id)
-        result_payload: dict[str, Any] = {"message": message}
-        if ticket is not None and self.last_result is not None:
-            result_payload["last_result"] = dict(self.last_result)
-        command_result = CommandResult(
-            message,
-            envelope=envelope,
-            command=command,
-            ticket=ticket,
-            result=result_payload,
-        )
-        self.last_cortical_envelope = envelope
-        self.last_approved_command = command
+        self.last_cortical_envelope = command_result.envelope
+        self.last_approved_command = command_result.command
         self.last_command_result = command_result
         return command_result
 
@@ -586,23 +574,14 @@ class OperatorStationSession:
         utterance: str,
         clarification_type: str,
     ) -> dict[str, Any]:
-        envelope = CorticalEnvelope(
-            envelope_id=f"pending:{uuid.uuid4().hex}",
-            utterance=utterance,
+        return self.command_authority.pending_clarification_trace(
+            utterance,
+            clarification_type,
             intent=self.last_operator_intent,
-            request_plan=self.last_request_plan,
-            readiness_graph=self.last_readiness_graph,
-            provenance={
-                "station": "OperatorStationSession",
-                "compiler": self.compiler_name,
-            },
-            pending_context={"clarification": clarification_type},
+            plan=self.last_request_plan,
+            graph=self.last_readiness_graph,
+            compiler_name=self.compiler_name,
         )
-        return {
-            "request_plan": self.last_request_plan,
-            "readiness_graph": self.last_readiness_graph,
-            "pending_envelope": envelope,
-        }
 
     def handle_utterance(self, utterance: str) -> CommandResult:
         self.last_cortical_envelope = None
@@ -1183,6 +1162,19 @@ class OperatorStationSession:
 
         return ApprovedCommand(command_type="unsupported", utterance=utterance)
 
+    def _record_request_state(
+        self,
+        *,
+        request_plan: RequestPlan | None = None,
+        readiness_graph: ReadinessGraph | None = None,
+        reason: str = "station_request_state",
+    ) -> None:
+        self.representation.record_turn_graph(
+            request_plan=request_plan,
+            readiness_graph=readiness_graph,
+            reason=reason,
+        )
+
     def _record_request_plan(self, utterance: str, intent: OperatorIntent) -> None:
         claims_valid = self._claims_valid_for_current_environment()
         active_summary = (
@@ -1230,8 +1222,11 @@ class OperatorStationSession:
                 )
                 self.last_request_plan = fresh_plan
                 self.last_readiness_graph = readiness_graph
-                self.memory.episodic_memory["last_request_plan"] = fresh_plan.as_dict()
-                self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+                self._record_request_state(
+                    request_plan=fresh_plan,
+                    readiness_graph=readiness_graph,
+                    reason="request_plan_reused",
+                )
                 self._run_mismatch_detection(fresh_plan)
                 self.log(
                     f"request plan reused: key={cached_entry.key} "
@@ -1252,8 +1247,11 @@ class OperatorStationSession:
         )
         self.last_request_plan = fresh_plan
         self.last_readiness_graph = readiness_graph
-        self.memory.episodic_memory["last_request_plan"] = fresh_plan.as_dict()
-        self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+        self._record_request_state(
+            request_plan=fresh_plan,
+            readiness_graph=readiness_graph,
+            reason="request_plan_recorded",
+        )
 
         # Store plans that are immediately executable so future turns can reuse them.
         if readiness_graph.graph_status == "executable":
@@ -1277,7 +1275,11 @@ class OperatorStationSession:
                     environment_identity=self.current_environment_identity,
                 )
                 self.last_readiness_graph = readiness_graph
-                self.memory.episodic_memory["last_readiness_graph"] = readiness_graph.as_dict()
+                self._record_request_state(
+                    request_plan=fresh_plan,
+                    readiness_graph=readiness_graph,
+                    reason="request_plan_repaired",
+                )
                 if readiness_graph.graph_status == "executable":
                     self.request_plan_reuse_cache.store(fresh_plan)
 
@@ -1476,8 +1478,11 @@ class OperatorStationSession:
         plan, graph = self._local_motor_plan_and_graph(utterance, action_name, count)
         self.last_request_plan = plan
         self.last_readiness_graph = graph
-        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
-        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
+        self._record_request_state(
+            request_plan=plan,
+            readiness_graph=graph,
+            reason="raw_motor_ticket_created",
+        )
         return self._raw_motor_ticket_from_plan(
             action_name,
             count,
@@ -1551,8 +1556,11 @@ class OperatorStationSession:
         )
         self.last_request_plan = plan
         self.last_readiness_graph = graph
-        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
-        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
+        self._record_request_state(
+            request_plan=plan,
+            readiness_graph=graph,
+            reason="memory_write_ticket_created",
+        )
         return MemoryWriteTicket(
             request_id=plan.request_id,
             writes=self._memory_writes_from_payload(payload),
@@ -4191,8 +4199,11 @@ class OperatorStationSession:
         )
         self.last_request_plan = plan
         self.last_readiness_graph = graph
-        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
-        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
+        self._record_request_state(
+            request_plan=plan,
+            readiness_graph=graph,
+            reason="clarification_resumed",
+        )
         self.pending_clarification = None
         if graph.graph_status != "executable":
             return self._clarification_blocked_message(graph)
@@ -4274,8 +4285,11 @@ class OperatorStationSession:
         )
         self.last_request_plan = plan
         self.last_readiness_graph = graph
-        self.memory.episodic_memory["last_request_plan"] = plan.as_dict()
-        self.memory.episodic_memory["last_readiness_graph"] = graph.as_dict()
+        self._record_request_state(
+            request_plan=plan,
+            readiness_graph=graph,
+            reason="candidate_clarification_resumed",
+        )
         self.pending_clarification = None
         if graph.graph_status != "executable":
             return self._clarification_blocked_message(graph)
@@ -4537,7 +4551,7 @@ class OperatorStationSession:
                 return scene
             self.log("environment_identity_changed")
             self.active_claims = None
-            self.memory.scene_model = None
+            self.representation.clear_scene_model()
             self.last_environment_invalidation_reason = "environment_identity_changed"
         adapter = self.preview_adapter or self.task_adapter
         close_after = False
@@ -4613,7 +4627,7 @@ class OperatorStationSession:
         if changed:
             self.log("environment_identity_changed")
             self.active_claims = None
-            self.memory.scene_model = None
+            self.representation.clear_scene_model()
             self.last_environment_invalidation_reason = "environment_identity_changed"
         self.current_environment_identity = identity
         return changed
@@ -4636,7 +4650,7 @@ class OperatorStationSession:
         if current is not None and current.fingerprint() != identity.fingerprint():
             self.log("environment_identity_changed")
             self.active_claims = None
-            self.memory.scene_model = None
+            self.representation.clear_scene_model()
             self.current_environment_identity = identity
             self.last_environment_invalidation_reason = "environment_identity_changed"
             return False
@@ -5453,10 +5467,10 @@ class OperatorStationSession:
             raise TypeError("apply_knowledge_update requires a MemoryWriteTicket")
         self.last_memory_write_ticket = ticket
         self.log("updating durable target knowledge")
-        for write in ticket.writes:
-            if write.scope != "knowledge":
-                raise ValueError(f"Unsupported memory write scope: {write.scope}")
-            self.memory.update_knowledge(write.key, write.value)
+        if any(write.scope != "knowledge" for write in ticket.writes):
+            unsupported = sorted({write.scope for write in ticket.writes if write.scope != "knowledge"})
+            raise ValueError(f"Unsupported memory write scope: {', '.join(unsupported)}")
+        self.representation.apply_memory_write_ticket(ticket)
         return (
             "KNOWLEDGE UPDATED\n"
             f"delivery_target={self.memory.knowledge.get('delivery_target')}"
@@ -5480,13 +5494,7 @@ class OperatorStationSession:
         self.memory.reset_episode()
         self.last_result = None
         if clear_memory:
-            self.memory.update_knowledge("target_color", None, persist=False)
-            self.memory.update_knowledge("target_type", None, persist=False)
-            self.memory.update_knowledge("delivery_target", None, persist=False)
-            self.memory.update_knowledge("last_task_type", None, persist=False)
-            self.memory.update_knowledge("last_instruction", None)
-            for concept in list(self.knowledge_base.all_concepts()):
-                self.knowledge_base.forget(concept.name)
+            self.representation.clear_operator_knowledge()
             return "RESET: episodic state and durable knowledge cleared"
         return "RESET: episodic state cleared; durable knowledge kept"
 

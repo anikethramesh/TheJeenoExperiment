@@ -4,90 +4,41 @@ config:
 ---
 flowchart LR
 
-  U["Human / Operator<br>task, correction, missing knowledge"]
-  L["LLM Interface<br>language ↔ CorticalSchema"]
+  OP["OperatorStation<br>operator I/O + session"]
+  MSG["Typed Message Gate<br>schemas only"]
 
-  subgraph C["CORTEX<br>memory-backed operational model"]
-    CS["CorticalSchema<br>shared grammar"]
-    RP["RequestPlan<br>typed objective graph<br>grounding / claims / selector / task / answer"]
-    SCM["Substrate Contract Manifest<br>pre/postconditions<br>claims / frames / units<br>safety / authority / validators"]
-
-    subgraph M["Operational Memory<br>what carries across time"]
-      U1["Understanding<br>task recipes / reusable patterns"]
-      I1["Embodied Intelligence<br>substrate contracts & primitive bindings<br>tool / calibration / config fingerprint"]
-      K1["Operator Claims<br>named concepts / deployment facts<br>durable, operator-asserted"]
-    end
-
-    R["ReadinessGraph<br>per-step verdicts<br>execute / clarify / synthesize / refuse"]
-
-    subgraph A["Active Operational Model<br>what is true now"]
-      CL["Grounding Claims<br>scene-fingerprinted / session-scoped<br>derived from observation"]
-      PR["Procedure"]
-      ES["Execution State"]
-      PG["Provenance"]
-    end
-
-    O["Orchestration<br>alignment / arbitration / contract management"]
+  subgraph ARCH["JEENOM WHAT"]
+    CX["Cortex<br>intent, plan, repair, synthesize, ask"]
+    RG["ReadinessGraph<br>execute / ask / refuse / gather evidence"]
+    KB["KnowledgeBase<br>claims + procedures + provenance"]
+    SE["Sense<br>evidence requests -> observation claims"]
+    SP["Spine<br>execution contracts -> execution claims"]
   end
 
-  subgraph SENSE["SENSE<br>JIT sensory composition"]
-    SPL["Sensing Primitive Library<br>available sensing primitives"]
-    QP["Query Parser<br>EvidenceFrame + ExecutionContext<br>→ SensePlanTemplate"]
-    SO["Sensory Orchestrator<br>instantiates template over latest observations"]
-    WMS["WorldModelSample<br>sampled world state"]
-    PROJ["Projection<br>OperationalEvidence for Cortex<br>Percepts for Spine"]
-  end
+  SUB["SubstrateAdapter<br>concrete HOW bindings"]
 
-  subgraph SPINE["SPINE<br>JIT action composition"]
-    APL["Action Primitive Library<br>available action primitives"]
-    CP["Contract Parser<br>ExecutionContract + Percepts<br>→ SkillPlanTemplate"]
-    SKO["Skill Orchestrator<br>instantiates template over latest state"]
-    ASE["ActiveSkillExecution<br>running embodied behaviour"]
-    REP["Reporting<br>ExecutionReport for Cortex<br>ExecutionContext for Sense"]
-  end
+  OP -->|CorticalEnvelope| MSG
+  MSG -->|OperatorIntent / steering| CX
+  CX -->|RequestPlan| RG
+  KB -->|claim/procedure snapshot| RG
+  RG -->|ApprovedCommand + verdict| MSG
+  MSG -->|CommandResult / clarification| OP
 
-  Sensors[("Sensors / simulator / metadata<br>camera / lidar / grid / maps / state")] 
-  Actuators[("Actuation / Control<br>env.step / Nav2 / PX4 / MoveIt / BTs")]
+  RG -->|EvidenceFrame| MSG
+  MSG --> SE
+  SE -->|sense HOW| SUB
+  SUB -->|observation result| SE
+  SE -->|ObservationClaim| MSG
+  MSG --> KB
 
-  U <--> L
-  L --> IV["Intent Verifier<br>utterance signal extraction<br>semantic signal → required_capabilities injection<br>proactive, deterministic, substrate-independent"]
-  IV --> RP
-  RP --> SCM
-  SCM --> R
-  R --> CS
+  RG -->|ExecutionTicket + ExecutionContract| MSG
+  MSG --> SP
+  SP -->|action HOW| SUB
+  SUB -->|execution result| SP
+  SP -->|ExecutionClaim| MSG
+  MSG --> KB
 
-  CS --- M
-  CS --- R
-  CS --- A
-  CS --- O
+  RG -->|MemoryWriteTicket| MSG
+  MSG --> KB
 
-  M --> R
-  CL -. "grounding claims<br>scene fingerprint + provenance" .-> R
-  K1 -. "operator claims<br>durable / explicit retraction" .-> R
-  SPL -. sensing handles + contracts .-> SCM
-  APL -. action handles + contracts .-> SCM
-  R --> A
-  A <--> O
-  O -. durable updates .-> M
-
-  Sensors --> SO
-  SPL --> QP
-  QP --> SO
-  SO --> WMS
-  WMS --> PROJ
-
-  APL --> CP
-  CP --> SKO
-  SKO --> ASE
-  ASE --> REP
-  ASE --> Actuators
-
-  R -- "ready query / evidence need" --> O
-  O -- "EvidenceFrame<br>what evidence matters?" --> QP
-  PROJ -- "OperationalEvidence" --> A
-
-  O -- "ExecutionContract<br>what skill should run?<br>contract preflight already passed" --> CP
-  REP -- "ExecutionReport" --> A
-
-  REP -- "ExecutionContext<br>what Spine is doing now" --> QP
-  PROJ -- "Percepts<br>skill-relevant cues" --> SKO
+  KB -->|updated snapshot| CX

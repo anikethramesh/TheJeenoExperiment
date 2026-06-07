@@ -1,47 +1,72 @@
-# JEENO Implementation Plan
+# JEENOM Implementation Plan
 
-This file is the current roadmap. It replaces the earlier phase diary with a
-compact record of what exists, what invariants must hold, and what comes next.
+This is the current roadmap. Keep it simple. JEENOM is not a MiniGrid solver;
+MiniGrid is the first stress substrate.
+
+## Objective
+
+Build a steerable cognition layer where:
+
+- Sense, Cortex, and Spine expose architecture-level primitive roles.
+- Substrates provide concrete HOW bindings for those roles.
+- The operator steers WHY: goal, constraints, risk, budget, authority, and
+  stopping rule.
+- JEENOM owns WHAT: intent, evidence needs, claims, plans, procedures,
+  readiness, execution authority, and reusable macro structure.
+- The same cognition loop can run on MiniGrid and a robotics-like substrate, and
+  later pressure an ARC-style interactive reasoning substrate.
+
+Elon-algorithm rule for this repo:
+
+- Delete before adding.
+- Simplify before generalizing.
+- Add an architecture object only when an eval exposes a real failure mode.
+- Do not introduce ontology because it sounds right.
 
 ## Current Known State
 
-- Current phase: **Phase 9D - Strict Cortical Schema Enforcement** is complete;
-  the project is ready to start Phase 10.
-- Phase 9A cleanup, the initial Phase 9B substrate-contract slice, and Phase 9C
-  objective distillation are implemented.
-- Current cleanup/audit signal:
-  - `python evals/eval_master.py --suite cleanup`: 15/15 passing
-  - `python evals/eval_master.py`: 44/44 passing
-  - `python -m pytest -q tests`: 196 passed
+- Current phase: **Phase 10 - Operator Station Extraction**.
+- Phase 9D is complete. Operator turns now route through typed envelopes,
+  request plans, readiness graphs, approved commands, and tickets.
+- Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
+  surface now have eval-backed enforcement before Operator Station extraction.
+- Current verification signal:
+  - `python evals/eval_master.py --suite cleanup`: 19/19 passing
+  - `python evals/eval_master.py`: 48/48 passing
+  - `python -m pytest -q tests`: 201 passed
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
 ## Core Invariants
 
+- WHY is steered.
+- WHAT is architectural.
+- HOW is substrate/tool-specific.
+- JEENOM must not hardcode HOW inside the orchestration layer.
+- Sense, Cortex, and Spine are architecture-native roles; concrete cameras,
+  grid observations, path planners, controllers, game actions, and policies are
+  substrate bindings.
+- Canonical blocks communicate through typed messages only:
+  `OperatorStation`, `Cortex`, `Sense`, `Spine`, `ReadinessGraph`,
+  `KnowledgeBase`, and `SubstrateAdapter`.
 - LLM compiler outputs are typed schema objects only.
-- Runtime validates and executes deterministic primitives.
-- Unknown primitives must be rejected, clarified, or routed through explicit
-  synthesis/repair paths.
 - No LLM calls are allowed inside the rendered control loop.
-- Procedure, sense, and skill templates must be compiled/prewarmed before render.
 - `OperatorIntent` is not the execution plan.
 - `RequestPlan` and `ReadinessGraph` are the execution-control plane.
-- Claims are the universal fact abstraction:
-  - Grounding claims are derived from scene observation, session-scoped, and
-    scene-fingerprinted.
-  - Operator claims are asserted by the operator, durable, and invalidated only
-    by explicit retraction.
-- Invalid or stale plan/claim reuse must never execute silently.
-- Substrate primitives are not just names. Every robot or simulator port must
-  expose typed primitive contracts: preconditions, postconditions/effects,
-  required claims, produced claims, safety class, authority level, frames/units,
-  failure modes, validation hooks, and substrate fingerprint assumptions.
-- A valid LLM schema or valid primitive name is not sufficient for execution.
-  The `ReadinessGraph` must also prove that the primitive contract is satisfied.
-- Schemas are executable authority boundaries, not logging artifacts. No station
-  path may execute motion, mutate memory, register synthesis, answer from claims,
-  resume clarification, or run a mission step unless the action is represented by
-  a current typed plan, readiness verdict, and approved command/ticket.
+- Claims are the universal representation unit. A claim must carry enough
+  provenance, scope, authority, freshness, and confidence to decide whether it
+  can be used.
+- Operator claims are durable authority. Observation/world claims are evidence;
+  they are not operator truth unless the operator promotes them.
+- Substrate primitives are contractual objects, not string handles.
+- Side effects require typed authority:
+  - `ExecutionTicket` for task/runtime entry
+  - `RawMotorTicket` for explicit low-level motor action
+  - `MemoryWriteTicket` for durable operator-claim mutation
+- JEENOM must distinguish known, visible, inferred, stale, unknown, searchable,
+  and not-knowable. It must not report global certainty from local visibility.
+- Reusable macro actions are earned: only promote a solved decomposition after
+  it has claims, provenance, preconditions, postconditions, and failure modes.
 
 ## Completed Phases
 
@@ -50,35 +75,31 @@ compact record of what exists, what invariants must hold, and what comes next.
 Status: done.
 
 Proved the basic MiniGrid wrapper, observation, action, render, and simple task
-execution path. This established MiniGrid as the first test substrate, not the
-target architecture.
+execution path.
 
-### Phase 1 - Minimal JEENO Vertical Slice
+### Phase 1 - Minimal JEENOM Vertical Slice
 
 Status: done.
 
 Implemented the first Cortex/Sense/Spine split with typed runtime contracts:
 world samples, operational evidence, percepts, execution contracts, execution
-reports, and operational memory. This created the basic separation between
-understanding, sensing, and actuation.
+reports, and operational memory.
 
 ### Phase 2 - Typed LLM Compiler Boundary
 
 Status: done.
 
 Established that LLMs compile typed schema objects and never directly execute.
-Runtime code validates compiler outputs and rejects unknown primitives. A
-deterministic smoke-test compiler exists for offline evals and regression tests.
+Runtime code validates compiler outputs and rejects unknown primitives.
 
 ### Phase 3 - JIT Template Cache And Prewarm
 
 Status: done.
 
-Added cached `ProcedureRecipe`, `SensePlanTemplate`, and `SkillPlanTemplate`
-objects. Known task families can be prewarmed before render so the rendered
-runtime loop runs from validated cached templates.
+Added cached procedure, sense, and skill templates. Known task families can be
+prewarmed before render so runtime executes from validated cached templates.
 
-The key guardrail from this phase remains active:
+Guardrail:
 
 - runtime LLM calls during render: 0
 - cache misses during render: 0
@@ -88,458 +109,494 @@ The key guardrail from this phase remains active:
 Status: done.
 
 Ran the same `go_to_object` structure in a larger GoToDoor environment. This
-proved that the cached runtime pattern can transfer across a larger instance of
-the same task family, but it did not prove broad task competence.
+proved same-task transfer, not broad competence.
 
 ### Phase 5 - CLI Operator Station
 
 Status: done.
 
-Added `OperatorStationSession` and `run_operator_station.py`. The station owns
-environment configuration, compiler choice, memory, plan cache, render mode, and
-last result. It supports task instructions, knowledge updates, status/cache
-queries, reset, and quit from natural operator turns.
+Added `OperatorStationSession` and `run_operator_station.py` as the first public
+operator interface.
 
-### Phase 6 - Memory-Grounded References And Session Semantics
+### Phase 6 - Memory-Grounded References
 
 Status: done.
 
 Added durable delivery-target knowledge and episodic references such as
-`last_target`, `last_task`, and `last_successful_instruction`. The operator can
-ask for the delivery target, repeat the last task, or refer to the previous
-target.
+`last_target`, `last_task`, and `last_successful_instruction`.
 
-The intended current semantic decision is still:
+Current semantic decision:
 
 - each task starts from fresh task-episode semantics for now
 - continuous-world task chaining is future work
 - reset clears episodic context but keeps durable operator claims by default
 
-### Phase 7 - Operator Understanding, Readiness, And Synthesis
+### Phase 7 - Understanding, Readiness, And Synthesis
 
 Status: done.
 
-Built the main understanding and readiness stack:
+Built the first typed control plane:
 
-- `OperatorIntent` schema for typed operator intent.
-- LLM compiler plus deterministic fallback.
-- `TargetSelector` and `GroundingQueryPlan` for scene/query grounding.
-- `SceneModel` projected from sense output.
-- `StationActiveClaims` for scene-scoped grounding claims.
-- `CapabilityRegistry` derived from the primitive substrate.
-- `CapabilityMatcher` for exact required-handle matching.
-- `IntentVerifier` to inject missed semantic requirements such as farthest,
-  ordinal, ranked, metric, and cardinality signals.
-- `CapabilityArbitrator` for typed gap decisions.
-- Safe synthesis scaffolding for pure grounding/query primitives.
-- Collaborative synthesis proposal flow with operator approval.
-- `RequestPlan`, `RequestPlanStep`, `ReadinessGraph`, and `ReadinessNode`.
+- `OperatorIntent`
+- `TargetSelector` and `GroundingQueryPlan`
+- `SceneModel` and `StationActiveClaims`
+- `CapabilityRegistry`, `CapabilityMatcher`, and `CapabilityArbitrator`
+- `IntentVerifier`
+- safe synthesis scaffolding for pure grounding/query primitives
+- `RequestPlan`, `RequestPlanStep`, `ReadinessGraph`, and `ReadinessNode`
 
-This phase moved the project from phrase handling toward an inspectable control
-plane: language produces typed intent, intent produces a request plan, and the
-readiness graph decides whether to clarify, synthesize, answer, update memory,
-execute, or refuse.
-
-### Phase 8 - Cross-Environment Adaptation And Abstraction Hierarchy
-
-Status: done, with cleanup required before further capability expansion.
-
-Added the pieces needed to test whether the architecture can scale beyond one
-MiniGrid happy path:
-
-- Environment identity and explicit environment assumptions.
-- Conservative `RequestPlan` reuse with semantic plan keys.
-- Stale claim and invalid reuse detection.
-- Named concept knowledge base with durable operator claims.
-- Mismatch detection for stale claims, absent entities, invalidated grounding,
-  unsupported grounding, missing primitives, and constraint weakening.
-- Unified claim vocabulary for grounding and operator claims.
-- Procedure concepts and raw multi-step utterance sequences.
-- Direct motor-command composition for simple primitive repetitions.
-- Explicit 5-level hierarchy:
-  - L0 primitive
-  - L1 command
-  - L2 procedure
-  - L3 task
-  - L4 goal/mission
-- `command_registry.py` for motor and sensory command definitions.
-- Typed observation and execution claims inside Cortex.
-- `MissionContract` and mission execution with abort-on-failure semantics.
-- Initial operational repair loop scaffolding.
-
-Phase 8 also exposed the main cleanup problem: some newer execution paths are
-not yet fully governed by the same readiness and safety boundaries as the older
-task path.
-
-## Phase 9 - Cleanup And Structural Enforcement
-
-Status: current umbrella phase.
-
-Goal: close the architecture leaks exposed by Phase 8 before moving into
-operational hardening, harder MiniGrid domains, or robot ports. Phase 9 is not a
-feature phase; it is the phase that makes the control plane non-optional.
-
-Phase 9 is organized into four subphases:
-
-- **9A - Cleanup**: restore immediate safety/readiness gates and green local
-  verification.
-- **9B - Substrate Contract Foundation**: make primitive contracts visible to
-  readiness.
-- **9C - Objective Distillation**: remove lossy vocabulary-driven intent checks.
-- **9D - Strict Cortical Schema Enforcement**: make typed plans/tickets the only
-  executable authority.
-
-### Phase 9A - Cleanup
+### Phase 8 - Adaptation And Abstraction Hierarchy
 
 Status: done.
 
-Goal: restore the architectural gates before adding new capability. This phase
-is mandatory before harder MiniGrid domains, richer repair, or robot ports.
+Added environment identity, plan reuse, stale-claim detection, named concepts,
+mismatch detection, command registry, typed claims, mission contracts, and the
+5-level hierarchy: primitive, command, procedure, task, goal/mission.
 
-Tasks:
+This exposed the problem: newer station paths were not all governed by the same
+readiness and safety boundaries.
 
-- Restore the project-local test suite to green.
-- Fix eval coverage so `eval_master.py` catches unit-level architectural
-  regressions.
-- Keep eval execution manifest-driven:
-  - `python evals/eval_master.py --list` shows the selected probes
-  - `python evals/eval_master.py --suite cleanup` runs the Phase 9 red-bar suite
-  - utility modules such as harnesses are not treated as evals
-- Repair the motor-command safety boundary:
-  - direct primitives are useful for explicit motor commands
-  - task requests like "pick up the red key" must not bypass task/readiness gates
-  - unsupported task capability must refuse or enter a typed repair path
-- Restore or explicitly redesign episode semantics:
-  - repeat/reference tasks currently drift toward continuous-world adapter reuse
-  - current docs and tests still expect fresh task-episode semantics
-  - choose one behavior and update code, docs, and evals together
-- Fix the repair loop:
-  - repair must re-evaluate and re-dispatch when it claims success
-  - otherwise it must honestly report that it only cleared state
-- Resolve arbitrator interface drift in tests and test doubles.
-- Restore or replace deleted eval coverage where still architecturally relevant:
-  - query plan probes
-  - grounding composition probes
-  - primitive synthesis probes
-  - operator clarification probes
-- Update golden and stress evals so they test architecture invariants, not only
-  a single successful MiniGrid seed.
-- Keep the runtime-render guarantees intact:
-  - runtime LLM calls during render: 0
-  - cache misses during render: 0
+### Phase 9 - Cleanup And Structural Enforcement
 
-Exit criteria:
+Status: done.
 
+Goal: make the architecture non-optional before adding new phases.
+
+Phase 9A fixed immediate safety/readiness leaks and restored green local
+verification.
+
+Phase 9B made primitive contracts visible to readiness: preconditions,
+postconditions, required/produced claims, frames/units, safety class, authority,
+failure modes, validation hooks, and substrate fingerprints.
+
+Phase 9C added `SelectionObjective` so semantic preservation can use structured
+intent rather than scattered vocabulary checks.
+
+Phase 9D made typed cortical objects the execution currency:
+
+- `CorticalEnvelope`
+- `ApprovedCommand`
+- `ExecutionTicket`
+- `RawMotorTicket`
+- `MemoryWriteTicket`
+- `MissionExecutionPlan`
+- `CommandResult`
+
+Phase 9D exit state:
+
+- `python evals/eval_master.py --suite cleanup`: 15/15 passing
+- `python evals/eval_master.py`: 44/44 passing
+- `python -m pytest -q tests`: 196 passed
+
+#### Phase 9E - Block, Schema, And Knowledge Enforcement
+
+Status: done.
+
+Goal:
+
+Make the simple architecture enforce itself before adding Phase 10 extraction or
+new substrates.
+
+Canonical architecture:
+
+- `OperatorStation`: operator I/O, session state, pending clarification, result
+  display. It does not own planning, sensing, execution, or durable knowledge.
+- `Cortex`: intent preservation, RequestPlan construction, ReadinessGraph
+  arbitration, repair/synthesis decisions, and steering questions.
+- `ReadinessGraph`: the execution gate. It consumes schemas, primitive
+  contracts, authority, and knowledge snapshots. It is not a memory store.
+- `Sense`: satisfies evidence requests through substrate HOW and returns
+  observation claims.
+- `Spine`: satisfies execution contracts through substrate HOW and returns
+  execution claims.
+- `KnowledgeBase`: the representation boundary for claims, procedures, and
+  provenance.
+- `SubstrateAdapter`: concrete HOW for sensors, controllers, planners,
+  MiniGrid actions, ARC actions, and validation hooks.
+
+Where we have not drifted:
+
+- The core blocks exist in code.
+- `RequestPlan`, `ReadinessGraph`, `ApprovedCommand`, tickets, and
+  `CommandResult` exist.
+- Sense and Spine have typed runtime contracts.
+- Primitive contracts and readiness checks exist.
+- Phase 9D evals are green.
+
+Drift found before 9E:
+
+- Knowledge has drifted into multiple pockets:
+  - `OperationalMemory.knowledge`
+  - `OperationalMemory.episodic_memory`
+  - `OperationalMemory.scene_model`
+  - `KnowledgeBase`
+  - `Cortex._claims`
+  - `OperatorStationSession.active_claims`
+- `OperatorStationSession` still does too much and can touch memory, active
+  claims, scene models, formatting, MiniGrid details, repair, synthesis, and
+  runtime execution.
+- Sense and Cortex can still read memory pockets directly instead of receiving
+  typed knowledge snapshots or writing claims through a representation boundary.
+- ReadinessGraph still accepts `active_claims` and scene/memory context as
+  direct arguments rather than querying a representation surface.
+- Procedures, provenance, facts, beliefs, hypotheses, observation claims, and
+  operator claims are not yet accessed through one enforced surface.
+- Schema objects exist, but loose dict payloads still move between some paths.
+- `MemoryWriteTicket` protected some durable writes, but older station paths
+  could still mutate memory pockets directly.
+
+What was implemented:
+
+- Added `ClaimRecord` as the minimal common claim wrapper for facts, beliefs,
+  hypotheses, operator assertions, observations, execution results, and
+  procedures.
+- Added `KnowledgeSnapshot` so readiness can consume typed knowledge state
+  instead of station fields.
+- Added `RepresentationStore` as the thin boundary over existing
+  `OperationalMemory` and `KnowledgeBase`.
+- Routed station active grounding claims through a representation-backed
+  property.
+- Routed station request-plan/readiness provenance through the representation
+  store.
+- Routed durable knowledge writes through `MemoryWriteTicket` into the
+  representation store.
+- Removed direct station writes to `memory.knowledge`,
+  `memory.episodic_memory`, and `memory.scene_model`.
+
+Non-bloat rule:
+
+- Do not build a giant ontology.
+- Do not add a world-model subsystem yet.
+- Do not add a hypothesis engine yet.
+- Do not add a macro-promotion framework yet.
+- Keep existing working objects unless an eval proves they are lossy.
+
+Implementation order:
+
+1. **9E.1 - Block boundary enforcement**
+   - Define allowed responsibilities for each block.
+   - Add static evals for forbidden dependencies and direct boundary bypasses.
+   - Move obvious cross-block calls behind narrow interfaces only when required
+     by failing evals.
+   - OperatorStation may orchestrate a turn, but it must not become the owner of
+     Sense, Spine, KnowledgeBase, or substrate HOW.
+
+2. **9E.2 - Schema/message enforcement**
+   - Every block boundary uses typed messages.
+   - No raw dict is allowed as authority or control flow.
+   - Existing schemas are preferred: `OperatorIntent`, `RequestPlan`,
+     `ReadinessGraph`, `ApprovedCommand`, tickets, `ObservationClaim`,
+     `ExecutionClaim`, `ProcedureRecipe`, and `CommandResult`.
+   - Add only the smallest missing schema if needed, likely one generic
+     `ClaimRecord`/`KnowledgeClaim` wrapper for fact, belief, hypothesis,
+     operator assertion, observation evidence, and execution result.
+
+3. **9E.3 - KnowledgeBase enforcement**
+   - Add a thin representation facade over existing `OperationalMemory` and
+     `KnowledgeBase`.
+   - The facade owns claims, procedures, provenance, invalidation, and snapshots.
+   - Durable writes require `MemoryWriteTicket`.
+   - Observation and execution reports enter as claims/provenance.
+   - Scene/world snapshots are evidence sources, not durable truth unless the
+     operator promotes them.
+   - ReadinessGraph consumes claim/procedure snapshots from this surface, not
+     random station fields.
+
+Minimum knowledge API:
+
+- `put_claim`
+- `get_claim`
+- `query_claims`
+- `invalidate_claims`
+- `put_procedure`
+- `get_procedure`
+- `record_provenance`
+
+Required enforcement:
+
+- Durable writes require `MemoryWriteTicket` or an equivalent typed authority.
+- Observation claims carry source, confidence, scope, freshness, and provenance.
+- Operator claims carry operator authority and explicit invalidation semantics.
+- Hypotheses and beliefs must be distinguishable from confirmed facts.
+- Procedures carry provenance, preconditions, postconditions, and failure modes
+  when promoted for reuse.
+- ReadinessGraph consumes the representation surface, not random station fields.
+- Runtime execution produces claims/provenance through the same surface.
+- Direct dictionary mutation outside the representation module is treated as an
+  architectural violation.
+
+Evals/tests to add first:
+
+- Block-boundary probe: station/cortex/sense/spine cannot import or mutate each
+  other's internals except through approved interfaces.
+- Direct-memory probe: no path outside the representation module writes
+  `memory.knowledge[...]`, `memory.episodic_memory[...]`, `scene_model`, or
+  `active_claims` directly.
+- Schema-boundary probe: block methods reject loose dict authority and accept
+  only typed message objects.
+- Claim-shape probe: fact, belief, hypothesis, operator claim, observation
+  claim, and execution claim round-trip through the same representation API.
+- Provenance probe: every stored claim has source, authority, confidence or
+  certainty state, freshness/invalidation, and provenance.
+- Procedure probe: named concepts and procedures are accessible through the
+  representation API, not only `KnowledgeBase`.
+- Readiness probe: readiness reads claim/procedure state through representation
+  snapshots, not station fields.
+
+Phase 9E evals/tests:
+
+- `phase9e_block_boundary_probe.py` - passing
+- `phase9e_schema_boundary_probe.py` - passing
+- `phase9e_knowledge_surface_probe.py` - passing
+- `phase9e_readiness_snapshot_probe.py` - passing
+- `tests/test_phase9e_representation.py` - passing
+
+Acceptance criteria:
+
+- The canonical blocks are enforced.
+- The schema/message boundary is enforced.
+- The knowledge base is no longer an informal collection of dicts.
+- Existing Phase 9D behavior remains green.
+- Every architectural block has a controlled read/write/query path into
+  knowledge.
+- Old memory pockets may remain internally, but they are behind the facade.
+- Phase 10 extraction starts only after Phase 9E is green.
+
+Phase 9E exit state:
+
+- `python evals/eval_master.py --suite cleanup`: 19/19 passing
+- `python evals/eval_master.py`: 48/48 passing
+- `python -m pytest -q tests`: 201 passed
+
+## Phase 10 - Operator Station Extraction
+
+Status: current.
+
+Goal: shrink `OperatorStationSession` into a thin facade and move substrate HOW
+out of the orchestration path.
+
+Why this comes before substrate generalization:
+
+- The station currently owns conversation flow, deterministic fast paths, LLM
+  intent routing, readiness dispatch, clarification, synthesis, repair, memory
+  writes, MiniGrid adapter ownership, query formatting, and runtime execution.
+- If we add robotics or ARC pressure now, we will just discover substrate leaks
+  inside a 5k-line station.
+
+Keep:
+
+- public CLI behavior
+- `CommandResult` compatibility
+- Phase 9 gates and ticket authority
+- MiniGrid golden path
+
+Extract only what we need:
+
+- `OperatorStationSession`: public facade and session state.
+- `TurnOrchestrator`: one turn through intent, plan, readiness, command, ticket,
+  and result.
+- `SubstrateAdapter`: HOW boundary for manifest, sensing, action, task runtime,
+  reset, prewarm, and validation hooks.
+- `MiniGridSubstrateAdapter`: the current MiniGrid HOW.
+- `CommandAuthority`: command/result tracing and ticket lookup; ticket creation
+  moves in the side-effect authority slice.
+- MiniGrid domain helpers: door/color/grid formatting and grounding display.
+
+Do not create:
+
+- a full world-model subsystem
+- a hypothesis engine
+- a macro-promotion framework
+- a general cognitive-operation registry
+
+Those come only if Phase 11 evals force them.
+
+Progress:
+
+- 10A command/result authority extraction: done.
+  - Added `jeenom/command_authority.py` as a schema-only authority surface.
+  - Added `evals/phase10_command_authority_probe.py`.
+  - Added `tests/test_phase10_command_authority.py`.
+  - `OperatorStationSession._record_command_result()` and
+    `_pending_clarification_trace()` now delegate trace construction instead of
+    manufacturing `CorticalEnvelope`, `ApprovedCommand`, and `CommandResult`
+    inline.
+
+Current Phase 10 baseline:
+
+- `python evals/eval_master.py --suite cleanup`: 20/20 passing
+- `python evals/eval_master.py`: 49/49 passing
+- `python -m pytest -q tests`: 203 passed
+
+Implementation slices:
+
+1. Add station-modularity evals.
+   - status: started with command-authority probe
+   - current behavior snapshot
+   - direct MiniGrid imports forbidden in the extracted orchestration kernel
+   - side effects must pass through authority/tickets
+
+2. Extract command/result tracing.
+   - status: done
+   - move envelope/result construction out of the station
+   - keep `handle_utterance()` string-compatible
+
+3. Extract side-effect authority.
+   - status: pending
+   - task, motor, and memory paths use one authority/ticket module
+   - tests prove request id, plan, graph, and next action are bound
+
+4. Extract the substrate adapter boundary.
+   - status: pending
+   - MiniGrid env ownership leaves the station facade
+   - scene construction, reset, raw motor, prewarm, and task runtime become
+     adapter responsibilities
+
+5. Extract MiniGrid domain helpers.
+   - status: pending
+   - door/color/grid display and grounding helpers leave orchestration code
+   - orchestration stops knowing MiniGrid vocabulary
+
+6. Add a minimal mock substrate smoke eval.
+   - status: pending
+   - prove the kernel can run against a non-MiniGrid manifest/adapter
+   - do not build a full robot or ARC port in this phase
+
+Acceptance criteria:
+
+- `OperatorStationSession` is a thin facade.
+- Orchestration has no direct MiniGrid imports.
+- Substrate HOW is behind `SubstrateAdapter`.
+- MiniGrid-specific formatting lives outside the kernel.
+- All side effects still require typed tickets.
+- All public turns still return `CommandResult`.
+- `python evals/eval_master.py --suite cleanup` passes.
 - `python evals/eval_master.py` passes.
 - `python -m pytest -q tests` passes.
-- Unsupported object/task requests cannot execute through motor-command leakage.
-- Repeat/reference behavior is consistent with the documented episode policy.
-- Repair-loop evals prove either successful re-dispatch or honest non-execution.
-- README and this task plan match the actual project state.
-
-### Phase 9B - Substrate Contract Foundation
-
-Status: done; initial foundation slice implemented.
-
-Goal: make the substrate boundary explicit before operational hardening. JEENOM
-must not merely solve MiniGrid through a better station; it must know what a
-robot or simulator primitive is allowed to do, what facts it requires, and when
-reuse or execution is unsafe.
-
-Tasks:
-
-- Extend primitive manifests with contract metadata:
-  - preconditions and postconditions/effects
-  - required claims and produced claims
-  - units and coordinate/reference frames
-  - safety class and authority level
-  - failure modes
-  - validation hooks for shadow/simulation/preflight checks
-  - substrate/config/tool/calibration fingerprint metadata
-- Extend `ReadinessGraph` so it gates on primitive contracts, not only primitive
-  names and implementation status.
-- Extend claim metadata with freshness, confidence, frame/source provenance, and
-  authority. Low-confidence, expired, or frame-mismatched claims must block.
-- Extend plan reuse invalidation so substrate/config/tool/calibration changes
-  reject reuse even when the semantic task shape is identical.
-- Add Phase 9B evals/tests before broad implementation:
-  - malformed primitive contracts are rejected
-  - authority-sensitive primitives block without explicit authority
-  - safety-classed actuation requires a validation hook
-  - stale/low-confidence/frame-mismatched claims block
-  - substrate fingerprint changes invalidate reuse
-  - MiniGrid-specific nouns do not appear in generic contract gates
-- Keep current MiniGrid behavior green while proving MiniGrid is only one
-  substrate adapter.
-
-Exit criteria:
-
-- Phase 9B substrate-contract evals pass.
-- `python evals/eval_master.py` passes.
 - `python -m pytest -q tests` passes.
-- Existing MiniGrid evals still pass without weakening the new generic gates.
 
-### Phase 9C - Objective Distillation
-
-Status: done.
-
-Goal: eliminate scattered vocabulary-based semantic normalization by having the
-LLM explicitly distill the operator's selection intent into a structured field.
-
-Problem this solved: `OperatorIntent` carried a plan (how to execute) but no
-explicit structured statement of what the operator wanted. Every validation layer
-had to re-derive intent from utterance text using hardcoded vocabulary lists.
-Adding a new primitive domain (temperature, size) required updating keyword lists
-in `semantic_normalizer.py`, `intent_verifier.py`, and `operator_station.py`.
-
-What was built:
-
-- `SelectionObjective` dataclass in `schemas.py` with two fields that matter:
-  - `direction: "minimum" | "maximum"` — closed enum, validated strictly
-  - `attribute: str` — open string; the LLM uses controlled vocabulary but the
-    code does not hardcode it
-- `selection_objective: SelectionObjective | None` field added to `OperatorIntent`
-- `OperatorIntent.from_dict()` parses `selection_objective` (optional,
-  backwards-compatible — existing LLM output without it continues to work)
-- `selection_objective` added to the JSON schema so structured LLM output can
-  include it, and to the LLM prompt with explicit vocabulary instruction:
-  `direction="maximum"` for farthest/hottest/largest/greatest, `direction="minimum"`
-  for closest/coldest/smallest
-- `IntentVerifier.enrich()` now has two paths:
-  - **Objective-based (primary)**: when `selection_objective` is set, inversion
-    check is `direction=="maximum" → expect order=="descending"`. Pure enum logic.
-    No vocabulary scanning. Attribute-agnostic.
-  - **Vocabulary-based (fallback)**: when `selection_objective` is absent
-    (SmokeTestCompiler, legacy LLM output), existing `infer_direction_from_utterance`
-    path runs unchanged.
-- `_validate_grounding_query_plan_preserves_utterance` in `operator_station.py`
-  updated with same two-path structure, gated on `intent.selection_objective`
-- `SmokeTestCompiler` updated to set `selection_objective` on intents it builds
-  for farthest, ordinal-farthest, and ordinal-closest cases
-- `test_objective_distillation.py` — 20 tests: parsing, inversion detection,
-  handle injection, vocabulary fallback, dual-direction plans, and the core
-  scalability proof (`test_objective_path_does_not_need_utterance_text`: a
-  completely opaque utterance still triggers inversion detection because the
-  check reads the objective, not the text)
-- `test_expose_compiler_boundary.py` transport A updated to include
-  `selection_objective: {direction: "maximum"}` with an inverted plan so the
-  expose test exercises the objective-based path end-to-end
-
-Scalability proof: adding a temperature ranking primitive requires one change —
-add `"temperature"` as an attribute example in the LLM prompt. No changes to
-`semantic_normalizer.py`, `intent_verifier.py`, or `operator_station.py`.
-
-Exit state:
-
-- `python evals/eval_master.py`: 37/37 passing (no regressions).
-- `python -m pytest -q tests`: 193 passed, 3 intentional failures (repair loop
-  expose tests from Phase 9A, unchanged, document Phase 10 work).
-
-### Phase 9D - Strict Cortical Schema Enforcement
-
-Status: done.
-
-Goal: make the typed cortical control plane mandatory. The architecture already
-has the right schema objects, but `OperatorStationSession` still has loose
-string/dict authority paths. Phase 9D turns schemas from audit records into the
-only executable currency.
-
-Problem this fixes:
-
-- `OperatorCommand(kind: str, payload: dict)` was the effective station router.
-- Deterministic fast paths can return loose commands before the full control
-  plane.
-- `run_task(instruction: str)` accepts raw natural-language strings.
-- Memory updates accept loose payload dicts.
-- Raw motor commands were described and implemented as bypassing task planning;
-  this is now ticket-gated for explicit low-level commands.
-- Clarification resumes can directly run tasks or write memory.
-- Missions and procedures decompose into raw task strings and call `run_task`
-  step by step.
-- Current evals can pass while these structural leaks remain.
-
-Required schema/control-plane additions:
-
-- `CorticalEnvelope`: one operator turn with utterance, `OperatorIntent`,
-  `RequestPlan`, `ReadinessGraph`, provenance, and pending/resume context.
-- `ApprovedCommand`: typed command variants replacing loose
-  `OperatorCommand(kind, payload)`.
-- `ExecutionTicket`: the only object allowed to start task execution.
-- `MemoryWriteTicket`: the only object allowed to mutate durable memory.
-- `RawMotorTicket`: explicit low-level motor authority backed by a plan and
-  readiness verdict.
-- `MissionExecutionPlan`: parent mission plan plus child task plans/tickets.
-- `CommandResult`: user-visible response plus plan/graph/ticket trace.
-
-Current Phase 9D implementation progress:
-
-- Done:
-  - Phase 9D red-bar evals are added and wired into `eval_master.py`.
-  - `ExecutionTicket` is required for task runtime entry.
-  - Raw string task execution is rejected and leaves a blocking audit plan.
-  - Mission child execution now builds child execution tickets.
-  - `MemoryWriteTicket` is required for durable knowledge writes.
-  - Concept teaching no longer stores concepts when planning/compiler validation
-    fails.
-  - `RawMotorTicket` for explicit low-level motor commands.
-  - Raw motor plans now use `objective_type=motor_control`,
-    `expected_response=execute_motor`, and `ReadinessGraph.next_action=execute_motor`.
-  - `CommandResult` now wraps every public `handle_utterance()` response while
-    preserving string compatibility for the CLI and older evals.
-  - `CorticalEnvelope`/`ApprovedCommand`/`CommandResult` traces are recorded for
-    status, scene query, knowledge update, task, and raw motor paths.
-  - Pending clarification now stores request-plan/readiness/envelope context.
-  - Clarification answers re-enter `RequestPlan`/`ReadinessGraph` evaluation
-    before task execution, query answer, or memory write continuation.
-  - Loose `OperatorCommand(kind, payload)` routing was removed from
-    `operator_station.py`; station command objects now use `ApprovedCommand`.
-  - Older evals that asserted `OperatorCommand` were updated to assert
-    `ApprovedCommand`.
-- Pending:
-  - None for Phase 9D.
-
-Implementation tasks completed:
-
-- Replace station dispatch on string `kind` values with typed approved command
-  variants.
-- Rename or restrict `run_task` so it accepts an `ExecutionTicket`, not a raw
-  instruction string.
-- Convert deterministic fast paths into deterministic `OperatorIntent` producers
-  or typed envelope producers, not direct executors.
-- Route every operator turn through:
-  `OperatorIntent -> RequestPlan -> ReadinessGraph -> ApprovedCommand -> CommandResult`.
-- Keep explicit raw motor controls, but require a `RawMotorTicket` and primitive
-  contract approval.
-- Require `MemoryWriteTicket` for delivery-target updates, concept writes, and
-  any future durable operator claim writes.
-- Store pending clarification as a pending envelope/plan, then re-evaluate
-  readiness when the operator answers.
-- Represent mission/procedure children as child request plans and tickets, not
-  raw task strings.
-- Make repair update the active envelope/plan/graph and either redispatch through
-  a valid ticket or report honest non-execution.
-- Update the LLM prompt and schema docs so raw motor is a typed, authorized
-  low-level command, not an unplanned bypass.
-
-Phase 9D eval status:
-
-- `phase9d_schema_enforcement_probe.py` - passing
-  - every user-visible command path records envelope, plan, graph, and result
-    trace
-  - no loose station command can mutate state
-- `phase9d_execution_ticket_probe.py` - passing
-  - direct raw-string task execution is rejected
-  - successful task execution requires `ExecutionTicket`
-  - ticket request id matches the active `RequestPlan` and `ReadinessGraph`
-- `phase9d_memory_write_gate_probe.py` - passing
-  - durable knowledge writes require `MemoryWriteTicket`
-  - concept teach cannot silently swallow planning failures
-  - unsupported or malformed memory updates do not write durable state
-- `phase9d_motor_ticket_probe.py` - passing
-  - explicit low-level motor commands still work
-  - motor execution produces a `RawMotorTicket`
-  - object/task requests cannot become raw motor tickets
-  - hazardous or restricted motor primitives require contract approval
-- `phase9d_clarification_resume_gate_probe.py` - passing
-  - clarification answers re-enter readiness
-  - clarification resume cannot directly call task execution or memory mutation
-- `phase9d_mission_child_ticket_probe.py` - passing
-  - mission parent plans carry child task plans/tickets
-  - unsupported child steps abort before motion
-  - no mission path loops over raw task strings as executable authority
-- `phase9d_static_architecture_probe.py` - passing
-  - fail if task execution accepts raw strings
-  - fail on station-side direct calls that bypass approved tickets
-  - fail if memory mutation APIs accept loose dict payloads as authority
-
-Phase 9D unit tests to add:
-
-- schema round-trip and validation tests for envelope, ticket, and result types
-- station tests proving every branch returns a typed `CommandResult`
-- monkeypatch tests proving task execution cannot happen without a ticket
-- memory tests proving writes require typed ticket authority
-- motor tests proving raw motor is planned/gated
-- mission tests proving child plans/tickets exist
-- clarification tests proving resume goes back through readiness
-
-Exit criteria:
-
-- New Phase 9D evals fail on the current loose-router implementation for the
-  right reasons.
-- After implementation, `python evals/eval_master.py --suite cleanup` passes.
-- After implementation, `python evals/eval_master.py` passes.
-- After implementation, `python -m pytest -q tests` passes.
-- No station path can execute, mutate memory, register synthesis, answer from
-  claims, resume clarification, or run mission children from raw string/dict
-  authority.
-- `RequestPlan + ReadinessGraph + approved typed ticket` is the mandatory
-  execution currency.
-
-Exit state:
-
-- `python evals/eval_master.py --suite cleanup`: 15/15 passing.
-- `python evals/eval_master.py`: 44/44 passing.
-- `python -m pytest -q tests`: 196 passed.
-
-## Phase 10 - Operational Hardening
+## Phase 11 - Minimal Representation And Evidence Planning
 
 Status: planned.
 
-Goal: close the loop on cross-environment robustness after Phase 9A cleanup and
-Phase 9B substrate contracts are complete.
+Goal: prove JEENOM can collaborate about uncertainty without building a giant
+ontology.
+
+Minimum loop:
+
+1. Operator gives WHY.
+2. JEENOM turns it into WHAT.
+3. JEENOM checks claims it already has.
+4. If evidence is missing, JEENOM says what is unknown and how it could find out.
+5. Operator steers budget/scope/risk.
+6. JEENOM executes sensing/action through substrate HOW.
+7. JEENOM updates claims and tries the plan again.
+
+Minimal additions:
+
+- Extend existing claims rather than adding many new classes.
+- Add `RequestPlan` evidence steps.
+- Add `ReadinessGraph` status/action for `needs_evidence`.
+- Add simple typed steering constraints: budget, scope, risk, stopping rule.
+- Keep operator claims separate from observation/world claims.
+- Let procedures reuse solved decompositions only when the evidence supports it.
+
+Pressure tests:
+
+- MiniGrid visible-only query:
+  - "closest/farthest door" must answer with scope or ask to search
+  - no omniscient full-grid answer unless the substrate explicitly provides that
+    as an authorized HOW
+- Robotics-like mock:
+  - path-planner primitive returns reachable/unreachable/path
+  - JEENOM converts that into claims and plan decisions
+
+Acceptance criteria:
+
+- JEENOM can say: known, visible, inferred, stale, unknown, searchable, or
+  not-knowable.
+- Evidence gathering is represented as a plan, not a phrase branch.
+- Operator steering changes typed plan constraints.
+- MiniGrid and robotics-like mock both use the same cognition loop.
+
+## Phase 12 - Cross-Substrate Demonstration
+
+Status: planned.
+
+Goal: prove the same architecture works on MiniGrid and a robotics-like
+substrate.
+
+Demo requirements:
+
+- Same `OperatorIntent`, `RequestPlan`, `ReadinessGraph`, claims, tickets, and
+  orchestration kernel.
+- Different substrate HOW:
+  - MiniGrid: grid observation, grid actions, grid pathing.
+  - Robotics-like mock or robot stack: sensors, pose/map, path planner,
+    controller/action binding.
+- Same operator collaboration pattern:
+  - ask for missing evidence
+  - accept steering constraints
+  - compose a plan from available primitives
+  - execute through tickets
+  - update claims/provenance
+
+Acceptance criteria:
+
+- One MiniGrid task and one robotics-like task follow the same cognitive flow.
+- Differences are confined to substrate adapter and domain helpers.
+- No MiniGrid vocabulary leaks into the generic kernel.
+
+## Phase 13 - ARC-Style Steerable Prototype
+
+Status: later.
+
+Goal: pressure the same architecture with an ARC-like interactive reasoning
+substrate.
+
+Do not start by trying to solve ARC. Start with a tiny ARC-like substrate:
+
+- observation/state API
+- legal action API
+- transition feedback
+- score/end feedback
+- substrate-specific state parser
+
+JEENOM should own:
+
+- representing observations as claims
+- comparing state transitions
+- asking for steering
+- planning the next experiment/action
+- updating claims/procedures from feedback
+
+Acceptance criteria:
+
+- The ARC-like prototype uses the same WHY/WHAT/HOW split.
+- The LLM does not directly solve by free-form answer.
+- The operator can steer experiments and strategy.
+
+## Phase 14 - Operational Hardening
+
+Status: later.
+
+Goal: make the architecture reliable after the extraction and cross-substrate
+proofs exist.
 
 Planned work:
 
-- Strengthen repair actions: `REFRESH_CLAIMS`, `REGROUND`, `CLARIFY`,
-  `SYNTHESIZE`, and `ABORT`.
-- Track synthesized primitive provenance, validation fixtures, reuse history,
-  and failure history.
-- Add intervention metrics: operator asks, repairs, reuse decisions, synthesis
-  attempts, validation failures, and successful transfers.
-- Build a full transfer eval that proves valid reuse is accepted, invalid reuse
-  is rejected, repairs are logged, interventions are counted, and render-time
-  guarantees are preserved.
-- Handle missing primitive, ambiguity, no-path, and blocked-task cases through
-  explicit operator ask, fallback, repair, or mission abort.
+- repair metrics
+- synthesis provenance
+- intervention counts
+- transfer evals
+- missing primitive / ambiguity / no-path handling
+- render-time guarantees preserved across substrates
 
-## Phase 11 - Harder MiniGrid Integration
+## Phase 15 - Capability Stress Tests
 
 Status: later.
 
-Only begin after Phase 9 cleanup and Phase 10 hardening are stable.
-
-Target domains include MultiRoom, DoorKey, and KeyCorridor. These require new
-capabilities before they are meaningful architecture tests:
-
-- exploration
-- pickup
-- drop
-- toggle/open
-- unlock
-- inventory state
-- blocked-path detection
-- replan
-- richer object grounding
-
-The goal is not to solve MiniGrid for its own sake. The goal is to pressure the
-architecture with task families that require new primitives, new claims, and
-repairable failures.
-
-## Phase 12 - Port
-
-Status: later.
-
-Porting should happen after the architecture gates are stable.
-
-Order of work:
-
-- Register the new substrate's primitive set and capability metadata.
-- Port Sense bindings.
-- Port Spine/action bindings.
-- Reuse the same OperatorIntent, RequestPlan, ReadinessGraph, claims, memory,
-  arbitration, and repair layers.
-- Run transfer and hardening evals against the new substrate.
-
-The port succeeds only if the understanding layer remains largely unchanged and
-the substrate-specific work is concentrated in primitive registration and
-runtime bindings.
+Use harder MiniGrid, real robotics, or ARC-like tasks only as architecture
+pressure tests. The goal is not benchmark chasing; the goal is to expose missing
+primitive contracts, missing claims, missing evidence, bad decomposition, and
+bad steering.

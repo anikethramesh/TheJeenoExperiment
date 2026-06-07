@@ -17,6 +17,7 @@ Verifies that:
 from __future__ import annotations
 
 import ast
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -152,7 +153,8 @@ def main() -> int:
     checks["trace_has_decision_type"] = compact["decision_type"] == "refuse"
 
     # ── 6. LLMArbitrator falls back without API key ────────────────────────
-    llm_arb = LLMArbitrator(api_key=None)
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}):
+        llm_arb = LLMArbitrator(api_key=None)
     checks["llm_arb_has_fallback_reason"] = bool(llm_arb._fallback_reason)
     llm_decision = llm_arb.arbitrate(
         utterance="go to the farthest door",

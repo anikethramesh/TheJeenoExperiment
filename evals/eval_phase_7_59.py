@@ -11,6 +11,7 @@ Migrated from: capability_matcher_probe.py, intent_verifier_probe.py,
 from __future__ import annotations
 
 import ast
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -337,7 +338,8 @@ def _check_arbitrator(checks: dict[str, bool]) -> None:
     checks["schema_allows_safe_substitute"] = valid.safe_to_execute
 
     # 5. LLMArbitrator falls back without API key
-    llm_arb = LLMArbitrator(api_key=None)
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}):
+        llm_arb = LLMArbitrator(api_key=None)
     checks["llm_arb_has_fallback_reason"] = bool(llm_arb._fallback_reason)
 
     # 6. build_arbitrator
