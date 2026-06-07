@@ -16,7 +16,7 @@ from .primitive_synthesizer import SynthesizerBackend, build_synthesizer
 from .primitive_validator import PrimitiveValidator, default_validator
 from .readiness_graph import evaluate_request_plan
 from .request_planner import build_request_plan
-from .intent_verifier import IntentVerificationResult, IntentVerifier, default_verifier
+from .intent_verifier import IntentVerificationResult, IntentVerifier
 from .cortex import Cortex
 from .llm_compiler import CompilerBackend, SmokeTestCompiler, build_compiler, canonical_task_params
 from .memory import OperationalMemory
@@ -25,6 +25,7 @@ from .minigrid_runtime_package import (
     default_minigrid_domain_helper,
 )
 from .plan_cache import PlanCache
+from .planning_semantics import PlanningSemantics
 from .knowledge_base import KnowledgeBase, NamedConcept
 from .mismatch import MismatchDetector, OperationalMismatch, default_detector
 from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
@@ -337,6 +338,8 @@ class OperatorStationSession:
         self.operational_context = self.runtime_package.operational_context
         self.context_fingerprint = self.operational_context.fingerprint()
         self.domain_helper = self.runtime_package.domain_helper
+        self.planning_semantics = PlanningSemantics(self.operational_context)
+        self.intent_verifier = IntentVerifier(planning_semantics=self.planning_semantics)
         self.turn_orchestrator = TurnOrchestrator(
             classify_utterance=classify_utterance,
             normalize_utterance=_normalize_utterance,
@@ -612,7 +615,18 @@ class OperatorStationSession:
         # Runs unconditionally on ALL LLM outputs before any routing.
         # Blueprint Rule 9: deterministic gate between compiler output and
         # CapabilityMatcher — regardless of what the LLM declared.
-        intent, verif_result = default_verifier.enrich(utterance, intent)
+        intent, verif_result = self.intent_verifier.enrich(utterance, intent)
+        promoted_intent = self._promote_verified_query_intent(
+            utterance,
+            intent,
+            verif_result,
+        )
+        if promoted_intent is not intent:
+            self.log(
+                "intent verifier promoted unresolved utterance to "
+                f"{promoted_intent.intent_type}"
+            )
+            intent = promoted_intent
         self.last_operator_intent = intent
         if verif_result.injected_handles:
             self.log(f"intent verifier injected: {verif_result.summary()}")
@@ -1026,6 +1040,21 @@ class OperatorStationSession:
             reason=reason,
         )
 
+    def _request_plan_is_reusable(
+        self,
+        plan: RequestPlan,
+        readiness_graph: ReadinessGraph | None = None,
+    ) -> bool:
+        if plan.objective_type == "unsupported":
+            return False
+        if plan.expected_response == "refuse":
+            return False
+        if any(step.operation == "refuse" for step in plan.steps):
+            return False
+        if readiness_graph is not None and readiness_graph.graph_status != "executable":
+            return False
+        return True
+
     def _record_request_plan(self, utterance: str, intent: OperatorIntent) -> None:
         claims_valid = self._claims_valid_for_current_environment()
         active_summary = (
@@ -1041,9 +1070,15 @@ class OperatorStationSession:
             intent,
             active_claims_summary=active_summary,
             environment_identity=self.current_environment_identity,
+            planning_semantics=self.planning_semantics,
         )
 
-        cached_entry = self.request_plan_reuse_cache.lookup(fresh_plan)
+        cacheable_plan = self._request_plan_is_reusable(fresh_plan)
+        cached_entry = (
+            self.request_plan_reuse_cache.lookup(fresh_plan)
+            if cacheable_plan
+            else None
+        )
         if cached_entry is not None:
             verdict = self.request_plan_reuse_cache.can_reuse(
                 cached_entry,
@@ -1105,7 +1140,7 @@ class OperatorStationSession:
         )
 
         # Store plans that are immediately executable so future turns can reuse them.
-        if readiness_graph.graph_status == "executable":
+        if self._request_plan_is_reusable(fresh_plan, readiness_graph):
             self.request_plan_reuse_cache.store(fresh_plan)
 
         self._run_mismatch_detection(fresh_plan)
@@ -1131,7 +1166,7 @@ class OperatorStationSession:
                     readiness_graph=readiness_graph,
                     reason="request_plan_repaired",
                 )
-                if readiness_graph.graph_status == "executable":
+                if self._request_plan_is_reusable(fresh_plan, readiness_graph):
                     self.request_plan_reuse_cache.store(fresh_plan)
 
         self.log(
@@ -1199,6 +1234,7 @@ class OperatorStationSession:
             intent,
             active_claims_summary=active_summary,
             environment_identity=self.current_environment_identity,
+            planning_semantics=self.planning_semantics,
         )
         graph = evaluate_request_plan(
             plan,
@@ -1289,6 +1325,7 @@ class OperatorStationSession:
             intent,
             active_claims_summary=None,
             environment_identity=self.current_environment_identity,
+            planning_semantics=self.planning_semantics,
         )
         graph = evaluate_request_plan(
             plan,
@@ -1395,6 +1432,7 @@ class OperatorStationSession:
             intent,
             active_claims_summary=None,
             environment_identity=self.current_environment_identity,
+            planning_semantics=self.planning_semantics,
         )
         graph = evaluate_request_plan(
             plan,
@@ -2814,6 +2852,136 @@ class OperatorStationSession:
             summary["active_claims"] = self.active_claims.compact_summary()
         return summary
 
+    def _capability_status_for_handle(self, handle: str | None) -> str:
+        if handle is None:
+            return "needs_clarification"
+        spec = self.capability_registry.lookup(handle)
+        if spec is None:
+            return "missing_skills"
+        if spec.implementation_status == "implemented":
+            return "executable"
+        if spec.implementation_status == "synthesizable" or spec.safe_to_synthesize:
+            return "synthesizable"
+        if spec.implementation_status in {"planned", "missing"}:
+            return "missing_skills"
+        return "unsupported"
+
+    def _requested_ranked_handle_from_verification(
+        self,
+        verif_result: IntentVerificationResult,
+    ) -> str | None:
+        for signal in verif_result.signals:
+            if ".ranked." in signal.required_handle:
+                return signal.required_handle
+        return None
+
+    def _promote_verified_query_intent(
+        self,
+        utterance: str,
+        intent: OperatorIntent,
+        verif_result: IntentVerificationResult,
+    ) -> OperatorIntent:
+        """Turn verifier-rescued unresolved text into a real query intent."""
+        if intent.intent_type not in {"unsupported", "ambiguous"}:
+            return intent
+        if not verif_result.signals:
+            return intent
+
+        handle = self._requested_ranked_handle_from_verification(verif_result)
+        if handle is None:
+            return intent
+
+        normalized = _normalize_utterance(utterance)
+        signal_types = {signal.signal_type for signal in verif_result.signals}
+        object_type = (
+            self.planning_semantics.object_type_from_text(normalized)
+            or self.domain_helper.default_object_type
+        )
+        metric = self.domain_helper.metric_from_grounding_handle(handle)
+        is_cardinality = "cardinality" in signal_types
+        ordinal_words = {
+            "first": 1,
+            "1st": 1,
+            "second": 2,
+            "2nd": 2,
+            "third": 3,
+            "3rd": 3,
+            "fourth": 4,
+            "4th": 4,
+            "fifth": 5,
+            "5th": 5,
+        }
+        ordinal_word: str | None = None
+        ordinal_value: int | None = None
+        ordinal_direction: str | None = None
+        for source in [
+            *(signal.detected_term for signal in verif_result.signals),
+            normalized,
+        ]:
+            ordinal_match = re.search(
+                r"\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th)\s+"
+                r"(closest|nearest|shortest|farthest|furthest)\b",
+                source,
+            )
+            if ordinal_match:
+                ordinal_word = ordinal_match.group(1)
+                ordinal_value = ordinal_words[ordinal_word]
+                direction_term = ordinal_match.group(2)
+                ordinal_direction = (
+                    "farthest"
+                    if direction_term in {"farthest", "furthest"}
+                    else "closest"
+                )
+                break
+        is_descending = any(
+            term in normalized
+            for term in ("farthest", "furthest", "most distant", "least close")
+        ) or ordinal_direction == "farthest"
+        if ordinal_value is not None:
+            operation = "answer"
+            answer_fields = [f"{ordinal_word}_{ordinal_direction}"]
+            tie_policy = "clarify"
+        elif is_cardinality:
+            operation = "rank"
+            answer_fields = ["ranked_doors", "distance"]
+            tie_policy = "display"
+        else:
+            operation = "answer"
+            answer_fields = ["target", "distance"]
+            tie_policy = "clarify"
+        return replace(
+            intent,
+            intent_type="status_query",
+            status_query="ground_target",
+            task_type=None,
+            target=None,
+            target_selector=None,
+            grounding_query_plan={
+                "object_type": object_type,
+                "operation": operation,
+                "primitive_handle": handle,
+                "metric": metric,
+                "reference": "agent",
+                "order": "descending" if is_descending else "ascending",
+                "ordinal": ordinal_value,
+                "color": None,
+                "exclude_colors": [],
+                "distance_value": None,
+                "tie_policy": tie_policy,
+                "answer_fields": answer_fields,
+                "required_capabilities": [handle],
+                "preserved_constraints": [
+                    signal.signal_type for signal in verif_result.signals
+                ],
+            },
+            capability_status=self._capability_status_for_handle(handle),
+            required_capabilities=[handle],
+            reason=(
+                "Verifier promoted unresolved utterance into a typed grounding "
+                f"query. Original reason: {intent.reason}"
+            ),
+        )
+
     def _try_compose_grounding_result(
         self,
         utterance: str,
@@ -3025,6 +3193,69 @@ class OperatorStationSession:
             utterance=f"go to the {matches[0].color} door",
         )
 
+    def _command_from_grounding_followup(self, utterance: str) -> ApprovedCommand | None:
+        normalized = _normalize_utterance(utterance)
+        if self.active_claims is None:
+            return None
+        if not self._claims_valid_for_current_environment():
+            return None
+        if "distance" not in normalized:
+            return None
+
+        metric = next(
+            (
+                candidate
+                for candidate in self.planning_semantics.metrics
+                if re.search(rf"\b{re.escape(candidate)}\b", normalized)
+            ),
+            None,
+        )
+        if metric is None:
+            return None
+
+        last_query = dict(self.active_claims.last_grounding_query or {})
+        object_type = str(
+            last_query.get("object_type")
+            or self.planning_semantics.default_object_type
+            or self.domain_helper.default_object_type
+        )
+        handle = self.planning_semantics.ranked_handle(metric, object_type=object_type)
+        if handle is None:
+            return None
+
+        intent = OperatorIntent(
+            intent_type="status_query",
+            status_query="ground_target",
+            grounding_query_plan={
+                "object_type": object_type,
+                "operation": "rank",
+                "primitive_handle": handle,
+                "metric": metric,
+                "reference": last_query.get("distance_reference") or "agent",
+                "order": "ascending",
+                "ordinal": None,
+                "color": None,
+                "exclude_colors": [],
+                "distance_value": None,
+                "tie_policy": "display",
+                "answer_fields": ["ranked_doors", "distance"],
+                "required_capabilities": [handle],
+                "preserved_constraints": ["followup", object_type, metric],
+            },
+            capability_status=self._capability_status_for_handle(handle),
+            required_capabilities=[handle],
+            confidence=0.85,
+            reason=(
+                "Metric-only follow-up resolved against the last ranked "
+                "grounding context."
+            ),
+        )
+        self.log(
+            "grounding follow-up resolved: "
+            f"object_type={object_type} metric={metric} handle={handle}"
+        )
+        return self.command_from_operator_intent(intent, utterance)
+
     def _utterance_requests_navigation(self, normalized: str) -> bool:
         return bool(
             re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
@@ -3233,6 +3464,14 @@ class OperatorStationSession:
         if wants_task:
             return self._task_command_for_entry(entry, utterance)
         label = "farthest" if order == "descending" else "closest"
+        ordinal_labels = {
+            1: "first",
+            2: "second",
+            3: "third",
+            4: "fourth",
+            5: "fifth",
+        }
+        ordinal_label = ordinal_labels.get(ordinal, str(ordinal))
         return ApprovedCommand(
             kind="clarification",
             utterance=utterance,
@@ -3241,7 +3480,7 @@ class OperatorStationSession:
                     "GROUNDING ANSWER\n"
                     f"ordinal={ordinal}\n"
                     f"order={order}\n"
-                    f"{ordinal} {label}={self.domain_helper.entry_label(entry)}"
+                    f"{ordinal_label} {label}={self.domain_helper.entry_label(entry)}"
                 )
             },
         )
@@ -3867,6 +4106,7 @@ class OperatorStationSession:
             intent,
             active_claims_summary=active_summary,
             environment_identity=self.current_environment_identity,
+            planning_semantics=self.planning_semantics,
         )
         graph = evaluate_request_plan(
             plan,
@@ -3953,6 +4193,7 @@ class OperatorStationSession:
             intent,
             active_claims_summary=active_summary,
             environment_identity=self.current_environment_identity,
+            planning_semantics=self.planning_semantics,
         )
         graph = evaluate_request_plan(
             plan,
@@ -4674,6 +4915,7 @@ class OperatorStationSession:
                 intent,
                 active_claims_summary=None,
                 environment_identity=self.current_environment_identity,
+                planning_semantics=self.planning_semantics,
             )
             graph = evaluate_request_plan(
                 candidate,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .planning_semantics import PlanningSemantics, default_planning_semantics
 from .schemas import (
     EnvironmentAssumption,
     EnvironmentIdentity,
@@ -12,36 +13,8 @@ from .schemas import (
 )
 
 
-_COLORS = ("red", "green", "blue", "yellow", "purple", "grey")
-
-
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
-
-
-def _signals(text: str) -> list[str]:
-    normalized = _normalize(text)
-    signals: list[str] = []
-    checks = {
-        "superlative.closest": ("closest", "nearest", "shortest"),
-        "superlative.farthest": ("farthest", "furthest", "most distant", "least close"),
-        "ordinal": ("first", "second", "third", "fourth", "fifth"),
-        "cardinality.all": ("all", "each", "every"),
-        "negation": ("not", "except", "other than"),
-        "metric.euclidean": ("euclidean",),
-        "metric.manhattan": ("manhattan",),
-        "threshold": ("above", "below", "within", "at least", "at most"),
-        "reference": ("that", "same", "previous", "last"),
-    }
-    for signal, terms in checks.items():
-        if any(term in normalized for term in terms):
-            signals.append(signal)
-    for color in _COLORS:
-        if re.search(rf"\b{color}\b", normalized):
-            signals.append(f"color.{color}")
-    if re.search(r"\bdoor(s)?\b", normalized):
-        signals.append("object_type.door")
-    return signals
 
 
 def _objective_type(intent: OperatorIntent) -> str:
@@ -74,17 +47,6 @@ def _expected_response(intent: OperatorIntent) -> str:
     return "refuse"
 
 
-def _metric_from_text_or_plan(text: str, plan: dict[str, Any] | None) -> str | None:
-    if plan is not None and plan.get("metric"):
-        return str(plan["metric"])
-    normalized = _normalize(text)
-    if "euclidean" in normalized:
-        return "euclidean"
-    if "manhattan" in normalized:
-        return "manhattan"
-    return None
-
-
 def _comparison_from_text_or_plan(text: str, plan: dict[str, Any] | None) -> str | None:
     if plan is not None and plan.get("comparison"):
         return str(plan["comparison"])
@@ -107,35 +69,6 @@ def _distance_value_from_text_or_plan(text: str, plan: dict[str, Any] | None) ->
     if match is None:
         return None
     return int(match.group(1))
-
-
-def _ranked_handle(metric: str | None) -> str | None:
-    if metric is None:
-        return None
-    return f"grounding.all_doors.ranked.{metric}.agent"
-
-
-def _filter_handle(metric: str | None) -> str | None:
-    if metric is None:
-        return None
-    return f"claims.filter.threshold.{metric}"
-
-
-def _target_handle(intent: OperatorIntent) -> str | None:
-    selector = intent.target_selector or {}
-    relation = selector.get("relation")
-    metric = selector.get("distance_metric")
-    reference = selector.get("distance_reference")
-    if relation == "closest":
-        if metric is None or reference is None:
-            return None
-        return f"grounding.closest_door.{metric}.{reference}"
-    if selector:
-        return "grounding.unique_door.color_filter"
-    target = intent.target or {}
-    if target.get("object_type") == "door":
-        return "grounding.unique_door.color_filter"
-    return None
 
 
 def build_environment_assumptions(
@@ -247,6 +180,7 @@ def build_request_plan(
     *,
     active_claims_summary: dict[str, Any] | None = None,
     environment_identity: EnvironmentIdentity | None = None,
+    planning_semantics: PlanningSemantics | None = None,
 ) -> RequestPlan:
     """Build a typed, dependency-aware request plan from validated operator intent.
 
@@ -258,12 +192,14 @@ def build_request_plan(
     objective_type = _objective_type(intent)
     expected_response = _expected_response(intent)
     steps: list[RequestPlanStep] = []
+    semantics = planning_semantics or default_planning_semantics()
     environment_assumptions = build_environment_assumptions(environment_identity)
     environment_assumption_ids = _assumption_ids_for_environment(environment_assumptions)
     plan = intent.grounding_query_plan
-    metric = _metric_from_text_or_plan(utterance, plan)
+    metric = semantics.metric_from_text_or_plan(utterance, plan)
     comparison = _comparison_from_text_or_plan(utterance, plan)
     distance_value = _distance_value_from_text_or_plan(utterance, plan)
+    ranked_claims_output = semantics.ranked_claims_output
 
     if objective_type == "motor_control":
         steps.append(
@@ -285,7 +221,7 @@ def build_request_plan(
             objective_type=objective_type,
             objective_summary=intent.reason or "Explicit low-level motor command.",
             steps=steps,
-            preservation_signals=_signals(utterance),
+            preservation_signals=semantics.preservation_signals(utterance),
             expected_response=expected_response,
         )
 
@@ -304,7 +240,7 @@ def build_request_plan(
             objective_type=objective_type,
             objective_summary=intent.reason or intent.intent_type,
             steps=steps,
-            preservation_signals=_signals(utterance),
+            preservation_signals=semantics.preservation_signals(utterance),
             expected_response=expected_response,
         )
 
@@ -361,8 +297,8 @@ def build_request_plan(
         required = list(plan.get("required_capabilities") or [])
         if ranked_handle is None:
             ranked_handle = next(
-                (handle for handle in required if "all_doors.ranked" in handle),
-                _ranked_handle(metric),
+                (handle for handle in required if ".ranked." in handle),
+                semantics.ranked_handle(metric, object_type=plan.get("object_type")),
             )
         if plan.get("operation") in {"rank", "list", "answer", "filter", "select"}:
             steps.append(
@@ -371,17 +307,19 @@ def build_request_plan(
                     layer="grounding",
                     operation="rank",
                     required_handle=ranked_handle,
-                    inputs={"object_type": plan.get("object_type", "door")},
-                outputs=["active_claims.ranked_scene_doors"],
-                constraints={
-                    "metric": metric,
-                    "reference": plan.get("reference") or "agent",
-                },
-                environment_assumption_ids=environment_assumption_ids,
-            )
+                    inputs={
+                        "object_type": plan.get("object_type", semantics.default_object_type)
+                    },
+                    outputs=[ranked_claims_output],
+                    constraints={
+                        "metric": metric,
+                        "reference": plan.get("reference") or "agent",
+                    },
+                    environment_assumption_ids=environment_assumption_ids,
+                )
             )
     elif intent.target_selector is not None:
-        handle = _target_handle(intent)
+        handle = semantics.target_handle(intent)
         steps.append(
             RequestPlanStep(
                 step_id="ground_target",
@@ -402,8 +340,8 @@ def build_request_plan(
                 step_id="filter_distance_threshold",
                 layer="claims",
                 operation="filter",
-                required_handle=_filter_handle(metric),
-                inputs={"entries": "active_claims.ranked_scene_doors"},
+                required_handle=semantics.filter_handle(metric),
+                inputs={"entries": ranked_claims_output},
                 outputs=["filtered_candidates"],
                 depends_on=depends,
                 constraints={
@@ -411,13 +349,13 @@ def build_request_plan(
                     "comparison": comparison,
                     "threshold": distance_value,
                 },
-                memory_reads=["active_claims.ranked_scene_doors"],
+                memory_reads=[ranked_claims_output],
                 scene_fingerprint_required=True,
                 environment_assumption_ids=environment_assumption_ids,
             )
         )
 
-    if plan is not None and (
+    if plan is not None and plan.get("operation") not in {"rank", "list"} and (
         plan.get("ordinal") is not None
         or plan.get("order") is not None
         or any(str(field).endswith(("closest", "farthest")) for field in plan.get("answer_fields", []))
@@ -425,7 +363,7 @@ def build_request_plan(
         source = (
             "filtered_candidates"
             if any(s.step_id == "filter_distance_threshold" for s in steps)
-            else "active_claims.ranked_scene_doors"
+            else ranked_claims_output
         )
         depends = [
             steps[-1].step_id
@@ -458,17 +396,14 @@ def build_request_plan(
         target = intent.target or {}
         object_type = target.get("object_type") or (intent.target_selector or {}).get("object_type")
         if object_type is None and intent.task_type == "go_to_object":
-            object_type = "door"
+            object_type = semantics.default_object_type
+        task_handle = semantics.task_handle(intent.task_type, object_type)
         steps.append(
             RequestPlanStep(
                 step_id="execute_task",
                 layer="task",
                 operation="execute",
-                required_handle=(
-                    "task.go_to_object.door"
-                    if intent.task_type == "go_to_object" or object_type == "door"
-                    else None
-                ),
+                required_handle=task_handle,
                 inputs={"task_type": intent.task_type, "object_type": object_type},
                 outputs=["task_result"],
                 depends_on=task_dep,
@@ -502,7 +437,7 @@ def build_request_plan(
                     operation="answer",
                     outputs=["operator_response"],
                     depends_on=depends,
-                    memory_reads=["active_claims.ranked_scene_doors"]
+                    memory_reads=[ranked_claims_output]
                     if active_claims_summary is not None
                     else [],
                 )
@@ -524,7 +459,7 @@ def build_request_plan(
         objective_type=objective_type,
         objective_summary=intent.reason or intent.canonical_instruction or intent.intent_type,
         steps=steps,
-        preservation_signals=_signals(utterance),
+        preservation_signals=semantics.preservation_signals(utterance),
         expected_response=expected_response,
         environment_assumptions=environment_assumptions,
     )

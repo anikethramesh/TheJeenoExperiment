@@ -25,7 +25,8 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 10 - Operator Station Extraction**.
+- Current phase: **Phase 11 - Minimal Representation And Evidence Planning**
+  is next; Phase 10 operator-station boundary cleanup is complete.
 - Phase 9D is complete. Operator turns now route through typed envelopes,
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
@@ -41,10 +42,15 @@ Elon-algorithm rule for this repo:
 - Phase 10G has a first-cut `RuntimePackage`: the station can be initialized
   with an injected substrate/context/helper/registry package instead of birthing
   MiniGrid pieces inline.
+- Phase 10H is complete. Planner and verifier control-plane handles now derive
+  from `PlanningSemantics` over `OperationalContext`, and the station binds its
+  verifier to the same runtime context it uses for planning.
+- A live operator regression probe now checks that answers, intents,
+  RequestPlans, ReadinessGraphs, and plan reuse agree on the same outcome.
 - Current verification signal:
-  - `python evals/eval_master.py --suite cleanup`: 26/26 passing
-  - `python evals/eval_master.py`: 55/55 passing
-  - `python -m pytest -q tests`: 223 passed
+  - `python evals/eval_master.py --suite cleanup`: 28/28 passing
+  - `python evals/eval_master.py`: 57/57 passing
+  - `python -m pytest -q tests`: 229 passed
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -381,7 +387,7 @@ Phase 9E exit state:
 
 ## Phase 10 - Operator Station Extraction
 
-Status: current.
+Status: done.
 
 Goal: shrink `OperatorStationSession` into a thin facade and move substrate HOW
 out of the orchestration path.
@@ -428,11 +434,11 @@ Numbering rule:
 - Every slice is eval/test first. There is no separate "eval slice"; the eval is
   part of the slice it protects.
 
-Current Phase 10 baseline:
+Phase 10 exit baseline after live regression coverage:
 
-- `python evals/eval_master.py --suite cleanup`: 26/26 passing
-- `python evals/eval_master.py`: 55/55 passing
-- `python -m pytest -q tests`: 223 passed
+- `python evals/eval_master.py --suite cleanup`: 28/28 passing
+- `python evals/eval_master.py`: 57/57 passing
+- `python -m pytest -q tests`: 229 passed
 
 ### Phase 10A - Command/Result Authority
 
@@ -683,15 +689,15 @@ Measured outcome:
 - `operator_station.py` is 5246 lines after 10G. This slice prioritizes
   substrate-neutral construction over line-count reduction.
 
-Remaining 10G debt:
+10G handoff to 10H:
 
 - `classify_utterance()` still uses a default MiniGrid domain helper for legacy
-  deterministic parsing. That is not construction coupling, but 10H should move
-  the planning/verifier boundary toward context-driven domain semantics.
+  deterministic parsing. That is not construction coupling, but 10H moved the
+  planning/verifier boundary toward context-driven domain semantics.
 
 ### Phase 10H - Context-Driven Planning Boundary
 
-Status: pending.
+Status: done.
 
 Purpose: remove the blocking MiniGrid/domain assumptions from the planning and
 verification boundary before moving to Phase 11.
@@ -712,18 +718,51 @@ Target:
   profile; that is not Phase 10 cleanup debt unless it leaks into the
   architecture-neutral path.
 
-Acceptance criteria:
+Implemented:
 
-- Context/domain helper is passed into the planner/verifier boundary where
-  relevant.
-- The core MiniGrid meanings `door`, `color`, `manhattan`, and `euclidean` are
-  no longer duplicated as control-plane assumptions across station, planner, and
+- Added `jeenom/planning_semantics.py`.
+- Added context capability-handle templates to `MiniGridOperationalContext`.
+- `request_planner.build_request_plan()` accepts `planning_semantics`.
+- `IntentVerifier` accepts `planning_semantics` and injects context-derived
+  handles instead of hardcoded MiniGrid ranking handles.
+- `OperatorStationSession` owns `planning_semantics` and a verifier bound to
+  that same object.
+- All station-local `build_request_plan()` calls pass the session semantics.
+- Added `evals/phase10_context_planning_probe.py`.
+- Added `evals/phase10_live_operator_regression_probe.py`.
+- Added `tests/test_phase10_context_planning.py`.
+- Added `tests/test_phase10_live_operator_regressions.py`.
+- Registered the Phase 10H eval in `evals/manifest.py`.
+
+Measured outcome:
+
+- A non-MiniGrid token-ranking context can produce
+  `grounding.all_tokens.ranked.score.agent` through both the planner and the
   verifier.
-- Unsupported or non-MiniGrid contexts fail honestly instead of silently using
-  MiniGrid defaults.
-- All current evals and tests pass.
-- Add a Phase 10H eval that fails if the worst hardcoded domain assumptions
-  drift back into the planning boundary.
+- The 10H probe fails if the worst hardcoded MiniGrid handles drift back into
+  `request_planner.py` or `intent_verifier.py`.
+- The live regression probe fails if a ranked-distance answer is backed by an
+  unsupported/refuse plan, if metric follow-up loses prior grounding context, or
+  if unresolved/refuse plans are cached as reusable progress.
+- `operator_station.py` is 5488 lines after the 10H live-regression fix. Phase
+  10 deliberately did not chase file slimming, and this regression fix added
+  station code that should be extracted later.
+- Verification after 10H:
+  - `python evals/eval_master.py --suite cleanup`: 28/28 passing
+  - `python evals/eval_master.py`: 57/57 passing
+  - `python -m pytest -q tests`: 229 passed
+
+Remaining debt after Phase 10:
+
+- `OperatorStationSession` is still large and still owns deeper MiniGrid-shaped
+  branches. That is acceptable for the prototype while the boundary objects are
+  enforced.
+- `classify_utterance()` still uses the default MiniGrid domain helper for
+  legacy deterministic parsing.
+- The LLM compiler prompt/profile still contains MiniGrid examples. That is a
+  substrate profile issue, not a Phase 10 control-plane boundary leak.
+- Repo/file-size minimization should be a later cleanup phase after capability
+  pressure proves what should stay.
 
 Phase 10 stop rule:
 

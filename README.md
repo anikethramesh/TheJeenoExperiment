@@ -12,18 +12,24 @@ tested in MiniGrid.
 
 ## Current Status
 
-JEENOM is an architecture prototype in MiniGrid. **Phase 9E: Block, Schema, And
-Knowledge Enforcement** is complete. The project now has eval-backed enforcement
-for three simple boundaries:
+JEENOM is an architecture prototype in MiniGrid. **Phase 10: Operator Station
+Extraction** is complete. The project now has eval-backed enforcement for the
+core architecture boundaries:
 
 - canonical blocks: `OperatorStation`, `Cortex`, `ReadinessGraph`, `Sense`,
   `Spine`, `KnowledgeBase`, and `SubstrateAdapter`
 - typed messages between those blocks
 - one knowledge surface for claims, procedures, and provenance
+- station-owned runtime context, substrate package, and context-driven
+  planner/verifier semantics
 
-The current architecture task is Phase 10 extraction: shrink
-`OperatorStationSession` into a substrate-independent orchestration facade plus
-session, substrate, and operational-context adapters.
+Phase 10 extraction is complete. `OperatorStationSession` is still large, but
+the blocking boundaries are now explicit: runtime package injection,
+operational context, substrate adapter, domain helper, turn orchestrator,
+side-effect authority, command authority, and context-driven planning semantics.
+The baseline now includes a live operator regression probe because structural
+boundary checks alone were not enough to prove user-visible progress.
+The next architecture task is Phase 11: add the minimal evidence-planning loop.
 
 The guiding split is:
 
@@ -82,11 +88,11 @@ Current architectural debt:
   10D added the typed `OperationalContext` and `MiniGridOperationalContext`;
   Phase 10E added a context-bound `MiniGridDomainHelper`; Phase 10F added
   `TurnOrchestrator` for top-level turn routing; Phase 10G added
-  `RuntimePackage` injection.
+  `RuntimePackage` injection; Phase 10H added `PlanningSemantics` so planner
+  and verifier handles derive from `OperationalContext`.
 - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest.
-- Request planning, primitive validation fixtures, intent verification, and
-  deeper station branches still need to consume `OperationalContext` instead of
-  carrying direct MiniGrid/door/grid assumptions.
+- Deeper station branches, primitive validation fixtures, and the LLM compiler
+  profile still carry MiniGrid-shaped assumptions.
 - Contract preflight is represented and gated, but not yet a general executable
   proof system for arbitrary robot stacks.
 - Robotics-like and ARC-style substrate pressure remain future work.
@@ -186,16 +192,16 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Current baseline after Phase 10G:
+Current baseline after Phase 10H:
 
-- `python evals/eval_master.py --suite cleanup`: 26/26 passing.
-- `python evals/eval_master.py`: 55/55 passing.
-- `python -m pytest -q tests`: 223 passed.
+- `python evals/eval_master.py --suite cleanup`: 28/28 passing.
+- `python evals/eval_master.py`: 57/57 passing.
+- `python -m pytest -q tests`: 229 passed.
 
 Roadmap:
 
-- Phase 10: finish operator station architecture boundaries with runtime package
-  injection and context-driven planning; do not chase repo slimming here.
+- Phase 10: complete. Operator-station boundary cleanup is done for now; repo
+  slimming is deliberately deferred.
 - Phase 11: add the minimal evidence-planning loop.
 - Phase 12: demonstrate the same cognition loop on MiniGrid and a robotics-like
   substrate.

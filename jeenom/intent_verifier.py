@@ -17,36 +17,22 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .planning_semantics import PlanningSemantics, default_planning_semantics
 from .semantic_normalizer import infer_direction_from_utterance, normalize_distance_ordinal
 
 if TYPE_CHECKING:
     from .schemas import OperatorIntent, SelectionObjective
 
 SIGNAL_SUPERLATIVE = "superlative"   # farthest, furthest, most distant
-SIGNAL_CARDINALITY = "cardinality"   # all doors, sort/rank/list by distance
+SIGNAL_CARDINALITY = "cardinality"   # all objects, sort/rank/list by distance
 SIGNAL_ORDINAL = "ordinal"           # second closest, third nearest
-SIGNAL_DISTANCE_VALUE = "distance_value"  # door with distance N
+SIGNAL_DISTANCE_VALUE = "distance_value"  # object with distance N
 
 _SUPERLATIVE_TERMS: frozenset[str] = frozenset([
     "farthest", "furthest", "most distant", "most far",
     "farthest away", "furthest away", "longest way", "maximum distance",
     "max distance", "least close", "least nearest",
 ])
-
-_CARDINALITY_TRIGGERS: list[tuple[re.Pattern[str], str]] = [
-    # "sort/rank/order/list" near "doors" or "by distance"
-    (re.compile(r"\b(sort|rank|ranked|ranking|order|list)\b.{0,40}\b(door|doors|them|distance)\b"), "sort/rank/list"),
-    # "all/every/each" + "door(s)"
-    (re.compile(r"\b(all|every|each)\b.{0,20}\b(door|doors)\b"), "all/every/each doors"),
-    # "all/every" + them/of them in a door context
-    (re.compile(r"\b(all of them|all the doors|each of them|every one of them)\b"), "all of them"),
-    # "distance(s) of" multiple objects
-    (re.compile(r"\bdistances?\s+of\s+(all|the|every|each)\b"), "distance of all"),
-    # "distance" + "all" + "doors" (any order within window)
-    (re.compile(r"\ball\b.{0,30}\bdistance\b|\bdistance\b.{0,30}\ball\b.{0,20}\bdoor"), "distance+all+door"),
-    # descending/ascending without "closest" already handled by ranked check
-    (re.compile(r"\b(descending|ascending)\b.{0,30}\b(door|doors|distance)\b"), "descending/ascending order"),
-]
 
 _ORDINAL_PATTERN: re.Pattern[str] = re.compile(
     r"\b(second|third|fourth|fifth|2nd|3rd|4th|5th)\s+(closest|nearest|farthest|furthest)\b"
@@ -57,10 +43,45 @@ _DISTANCE_VALUE_PATTERN: re.Pattern[str] = re.compile(
 )
 
 
-def _detect_metric(normalized: str) -> str:
-    if "euclidean" in normalized:
-        return "euclidean"
-    return "manhattan"
+def _detect_metric(normalized: str, semantics: PlanningSemantics) -> str | None:
+    for metric in semantics.metrics:
+        if re.search(rf"\b{re.escape(metric)}\b", normalized):
+            return metric
+    return semantics.default_metric
+
+
+def _cardinality_triggers(semantics: PlanningSemantics) -> list[tuple[re.Pattern[str], str]]:
+    object_terms: list[str] = []
+    for object_type in semantics.object_types:
+        object_terms.extend([object_type, semantics.pluralize(object_type)])
+    object_terms.append("them")
+    object_pattern = "|".join(re.escape(term) for term in object_terms if term)
+    if not object_pattern:
+        object_pattern = "objects?"
+    return [
+        (
+            re.compile(
+                rf"\b(sort|rank|ranked|ranking|order|list)\b.{{0,40}}\b({object_pattern}|distance)\b"
+            ),
+            "sort/rank/list",
+        ),
+        (
+            re.compile(rf"\b(all|every|each)\b.{{0,20}}\b({object_pattern})\b"),
+            "all/every/each objects",
+        ),
+        (re.compile(r"\b(all of them|each of them|every one of them)\b"), "all of them"),
+        (re.compile(r"\bdistances?\s+of\s+(all|the|every|each)\b"), "distance of all"),
+        (
+            re.compile(
+                rf"\ball\b.{{0,30}}\bdistance\b|\bdistance\b.{{0,30}}\ball\b.{{0,20}}\b({object_pattern})"
+            ),
+            "distance+all+object",
+        ),
+        (
+            re.compile(rf"\b(descending|ascending)\b.{{0,30}}\b({object_pattern}|distance)\b"),
+            "descending/ascending order",
+        ),
+    ]
 
 
 @dataclass
@@ -89,247 +110,43 @@ class IntentVerificationResult:
 
 
 class IntentVerifier:
-    """Proactive, deterministic semantic signal extractor.
+    """Proactive, deterministic semantic signal extractor."""
 
-    Reads the utterance directly. Does not trust the LLM's required_capabilities
-    field. Injects missing handles so CapabilityMatcher can fire correctly.
-    """
+    def __init__(self, planning_semantics: PlanningSemantics | None = None) -> None:
+        self.planning_semantics = planning_semantics or default_planning_semantics()
 
     def verify(self, utterance: str, intent: "OperatorIntent") -> IntentVerificationResult:
-        normalized = " ".join(utterance.lower().strip().split())
-        metric = _detect_metric(normalized)
-        signals: list[IntentSignal] = []
-
-        # ── Ordinal signals ────────────────────────────────────────────────
-        # Check ordinal before superlative so "second farthest" is not
-        # collapsed into plain "farthest".
-        ordinal_semantics = normalize_distance_ordinal(normalized)
-        if ordinal_semantics is not None:
-            handle = f"grounding.all_doors.ranked.{ordinal_semantics.metric}.agent"
-            signals.append(IntentSignal(
-                signal_type=SIGNAL_ORDINAL,
-                detected_term=(
-                    f"{ordinal_semantics.ordinal_word} "
-                    f"{ordinal_semantics.direction_term}"
-                ),
-                required_handle=handle,
-            ))
-        else:
-            m = _ORDINAL_PATTERN.search(normalized)
-            if m:
-                ordinal = m.group(1)
-                direction = m.group(2)
-                handle = f"grounding.all_doors.ranked.{metric}.agent"
-                signals.append(IntentSignal(
-                    signal_type=SIGNAL_ORDINAL,
-                    detected_term=f"{ordinal} {direction}",
-                    required_handle=handle,
-                ))
-
-        # ── Superlative signals ────────────────────────────────────────────
-        for term in _SUPERLATIVE_TERMS:
-            if not signals and term in normalized:
-                signals.append(IntentSignal(
-                    signal_type=SIGNAL_SUPERLATIVE,
-                    detected_term=term,
-                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
-                ))
-                break  # one superlative signal is enough
-
-        # ── Cardinality signals ────────────────────────────────────────────
-        if not signals:  # superlative takes precedence
-            for pattern, label in _CARDINALITY_TRIGGERS:
-                if pattern.search(normalized):
-                    signals.append(IntentSignal(
-                        signal_type=SIGNAL_CARDINALITY,
-                        detected_term=label,
-                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
-                    ))
-                    break
-
-        # ── Distance-value reference signals ──────────────────────────────
-        if not signals and "door" in normalized:
-            m = _DISTANCE_VALUE_PATTERN.search(normalized)
-            if m:
-                signals.append(IntentSignal(
-                    signal_type=SIGNAL_DISTANCE_VALUE,
-                    detected_term=f"distance {m.group('distance')}",
-                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
-                ))
-
-        return self._inject(intent, signals)
-
-    def _inject(
-        self,
-        intent: "OperatorIntent",
-        signals: list[IntentSignal],
-    ) -> IntentVerificationResult:
-        if not signals:
-            return IntentVerificationResult()
-
-        import dataclasses
+        signals, inversion_detected, inversion_reason = self._analyze(utterance, intent)
         existing = set(intent.required_capabilities or [])
-        to_inject = [
-            s.required_handle for s in signals
-            if s.required_handle not in existing
-        ]
-
-        if to_inject:
-            enriched = dataclasses.replace(
-                intent,
-                required_capabilities=list(existing) + to_inject,
-            )
-            # Mutate the intent in-place via the caller — we return the signals
-            # and injected list; the caller applies the enriched intent.
-        else:
-            enriched = intent  # noqa: F841 — caller uses signals list
-
         return IntentVerificationResult(
             signals=signals,
-            injected_handles=to_inject,
+            injected_handles=[
+                signal.required_handle
+                for signal in signals
+                if signal.required_handle not in existing
+            ],
+            inversion_detected=inversion_detected,
+            inversion_reason=inversion_reason,
         )
 
-    def enrich(self, utterance: str, intent: "OperatorIntent") -> tuple["OperatorIntent", IntentVerificationResult]:
+    def enrich(
+        self,
+        utterance: str,
+        intent: "OperatorIntent",
+    ) -> tuple["OperatorIntent", IntentVerificationResult]:
         """Return (enriched_intent, result). Primary API for the station."""
         import dataclasses
-        normalized = " ".join(utterance.lower().strip().split())
-        metric = _detect_metric(normalized)
-        signals: list[IntentSignal] = []
 
-        ordinal_semantics = normalize_distance_ordinal(normalized)
-        if ordinal_semantics is not None:
-            handle = f"grounding.all_doors.ranked.{ordinal_semantics.metric}.agent"
-            signals.append(IntentSignal(
-                signal_type=SIGNAL_ORDINAL,
-                detected_term=(
-                    f"{ordinal_semantics.ordinal_word} "
-                    f"{ordinal_semantics.direction_term}"
-                ),
-                required_handle=handle,
-            ))
-        else:
-            m = _ORDINAL_PATTERN.search(normalized)
-            if m:
-                ordinal = m.group(1)
-                direction = m.group(2)
-                handle = f"grounding.all_doors.ranked.{metric}.agent"
-                signals.append(IntentSignal(
-                    signal_type=SIGNAL_ORDINAL,
-                    detected_term=f"{ordinal} {direction}",
-                    required_handle=handle,
-                ))
-
-        for term in _SUPERLATIVE_TERMS:
-            if not signals and term in normalized:
-                signals.append(IntentSignal(
-                    signal_type=SIGNAL_SUPERLATIVE,
-                    detected_term=term,
-                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
-                ))
-                break
-
-        if not signals:
-            for pattern, label in _CARDINALITY_TRIGGERS:
-                if pattern.search(normalized):
-                    signals.append(IntentSignal(
-                        signal_type=SIGNAL_CARDINALITY,
-                        detected_term=label,
-                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
-                    ))
-                    break
-
-        if not signals and "door" in normalized:
-            m = _DISTANCE_VALUE_PATTERN.search(normalized)
-            if m:
-                signals.append(IntentSignal(
-                    signal_type=SIGNAL_DISTANCE_VALUE,
-                    detected_term=f"distance {m.group('distance')}",
-                    required_handle=f"grounding.all_doors.ranked.{metric}.agent",
-                ))
-
-        # ── Plan order inversion check (Blueprint Rule 9 hard stop) ──────────
-        # Two paths:
-        #   1. Objective-based (primary): intent.selection_objective carries a
-        #      structured direction enum ("maximum"/"minimum") set by the LLM.
-        #      Check is pure enum-to-enum logic. No vocabulary scanning.
-        #   2. Vocabulary-based (fallback): when selection_objective is absent
-        #      (SmokeTestCompiler, legacy LLM output), fall back to
-        #      infer_direction_from_utterance. Adding new domain words only
-        #      requires updating semantic_normalizer — not this file.
-        inversion_detected = False
-        inversion_reason = ""
-        grounding_plan = getattr(intent, "grounding_query_plan", None)
-        if grounding_plan is not None:
-            plan_order = (
-                grounding_plan.get("order") if isinstance(grounding_plan, dict) else None
-            )
-            if plan_order is not None:
-                selection_obj = getattr(intent, "selection_objective", None)
-                if selection_obj is not None:
-                    # ── Objective-based path ───────────────────────────────
-                    # direction=="maximum" → plan must sort descending (largest first)
-                    # direction=="minimum" → plan must sort ascending  (smallest first)
-                    expected_order = (
-                        "descending" if selection_obj.direction == "maximum" else "ascending"
-                    )
-                    if plan_order != expected_order:
-                        answer_fields = {
-                            str(f).lower()
-                            for f in (grounding_plan.get("answer_fields") or [])
-                        }
-                        covers = (
-                            (selection_obj.direction == "maximum" and "farthest" in answer_fields)
-                            or (selection_obj.direction == "minimum" and "closest" in answer_fields)
-                        )
-                        if not covers:
-                            inversion_detected = True
-                            inversion_reason = (
-                                f"Objective says direction={selection_obj.direction!r} "
-                                f"(requires order={expected_order!r}) "
-                                f"but plan declares order={plan_order!r}."
-                            )
-                else:
-                    # ── Vocabulary-based fallback ──────────────────────────
-                    expected_order = infer_direction_from_utterance(normalized)
-                    if expected_order is not None and plan_order != expected_order:
-                        answer_fields = {
-                            str(f).lower()
-                            for f in (grounding_plan.get("answer_fields") or [])
-                        }
-                        covers = (
-                            (expected_order == "descending" and "farthest" in answer_fields)
-                            or (expected_order == "ascending" and "closest" in answer_fields)
-                        )
-                        if not covers:
-                            inversion_detected = True
-                            inversion_reason = (
-                                f"Utterance implies order={expected_order!r} "
-                                f"but plan declares order={plan_order!r}."
-                            )
-
-        # ── Objective-based handle injection (primary) ───────────────────────
-        # When selection_objective is set, required handles are derivable from
-        # the objective fields — no keyword scanning needed. This replaces the
-        # vocabulary-based SIGNAL_SUPERLATIVE / SIGNAL_CARDINALITY scan above
-        # (which already ran but found nothing for LLM-compiled intents with
-        # a correct selection_objective).
-        selection_obj = getattr(intent, "selection_objective", None)
-        if selection_obj is not None and not signals:
-            metric = selection_obj.metric or "manhattan"
-            handle = f"grounding.all_doors.ranked.{metric}.agent"
-            existing_caps = set(intent.required_capabilities or [])
-            if handle not in existing_caps:
-                signals.append(IntentSignal(
-                    signal_type=SIGNAL_SUPERLATIVE,
-                    detected_term=f"objective:{selection_obj.direction}",
-                    required_handle=handle,
-                ))
-
+        signals, inversion_detected, inversion_reason = self._analyze(utterance, intent)
         if not signals and not inversion_detected:
             return intent, IntentVerificationResult()
 
         existing = set(intent.required_capabilities or [])
-        to_inject = [s.required_handle for s in signals if s.required_handle not in existing]
+        to_inject = [
+            signal.required_handle
+            for signal in signals
+            if signal.required_handle not in existing
+        ]
         enriched = dataclasses.replace(
             intent,
             required_capabilities=list(existing) + to_inject,
@@ -339,6 +156,146 @@ class IntentVerifier:
             injected_handles=to_inject,
             inversion_detected=inversion_detected,
             inversion_reason=inversion_reason,
+        )
+
+    def _analyze(
+        self,
+        utterance: str,
+        intent: "OperatorIntent",
+    ) -> tuple[list[IntentSignal], bool, str]:
+        normalized = " ".join(utterance.lower().strip().split())
+        semantics = self.planning_semantics
+        metric = _detect_metric(normalized, semantics)
+        object_type = semantics.object_type_from_text(normalized)
+        signals: list[IntentSignal] = []
+
+        ordinal_semantics = normalize_distance_ordinal(normalized)
+        if ordinal_semantics is not None and semantics.metric_supported(ordinal_semantics.metric):
+            handle = semantics.ranked_handle(ordinal_semantics.metric, object_type=object_type)
+            if handle is not None:
+                signals.append(IntentSignal(
+                    signal_type=SIGNAL_ORDINAL,
+                    detected_term=(
+                        f"{ordinal_semantics.ordinal_word} "
+                        f"{ordinal_semantics.direction_term}"
+                    ),
+                    required_handle=handle,
+                ))
+        else:
+            m = _ORDINAL_PATTERN.search(normalized)
+            if m and metric is not None:
+                handle = semantics.ranked_handle(metric, object_type=object_type)
+                if handle is not None:
+                    signals.append(IntentSignal(
+                        signal_type=SIGNAL_ORDINAL,
+                        detected_term=f"{m.group(1)} {m.group(2)}",
+                        required_handle=handle,
+                    ))
+
+        for term in _SUPERLATIVE_TERMS:
+            if not signals and term in normalized and metric is not None:
+                handle = semantics.ranked_handle(metric, object_type=object_type)
+                if handle is not None:
+                    signals.append(IntentSignal(
+                        signal_type=SIGNAL_SUPERLATIVE,
+                        detected_term=term,
+                        required_handle=handle,
+                    ))
+                break
+
+        if not signals and metric is not None:
+            for pattern, label in _cardinality_triggers(semantics):
+                if pattern.search(normalized):
+                    handle = semantics.ranked_handle(metric, object_type=object_type)
+                    if handle is not None:
+                        signals.append(IntentSignal(
+                            signal_type=SIGNAL_CARDINALITY,
+                            detected_term=label,
+                            required_handle=handle,
+                        ))
+                    break
+
+        if not signals and object_type is not None and metric is not None:
+            m = _DISTANCE_VALUE_PATTERN.search(normalized)
+            if m:
+                handle = semantics.ranked_handle(metric, object_type=object_type)
+                if handle is not None:
+                    signals.append(IntentSignal(
+                        signal_type=SIGNAL_DISTANCE_VALUE,
+                        detected_term=f"distance {m.group('distance')}",
+                        required_handle=handle,
+                    ))
+
+        inversion_detected, inversion_reason = self._detect_inversion(normalized, intent)
+        selection_obj = getattr(intent, "selection_objective", None)
+        if selection_obj is not None and not signals:
+            objective_metric = selection_obj.metric or semantics.default_metric
+            objective_object_type = getattr(selection_obj, "object_type", None) or object_type
+            handle = semantics.ranked_handle(
+                objective_metric,
+                object_type=objective_object_type,
+            )
+            existing_caps = set(intent.required_capabilities or [])
+            if handle is not None and handle not in existing_caps:
+                signals.append(IntentSignal(
+                    signal_type=SIGNAL_SUPERLATIVE,
+                    detected_term=f"objective:{selection_obj.direction}",
+                    required_handle=handle,
+                ))
+
+        return signals, inversion_detected, inversion_reason
+
+    def _detect_inversion(
+        self,
+        normalized: str,
+        intent: "OperatorIntent",
+    ) -> tuple[bool, str]:
+        grounding_plan = getattr(intent, "grounding_query_plan", None)
+        if grounding_plan is None:
+            return False, ""
+        plan_order = grounding_plan.get("order") if isinstance(grounding_plan, dict) else None
+        if plan_order is None:
+            return False, ""
+
+        selection_obj = getattr(intent, "selection_objective", None)
+        if selection_obj is not None:
+            expected_order = (
+                "descending" if selection_obj.direction == "maximum" else "ascending"
+            )
+            if plan_order == expected_order:
+                return False, ""
+            answer_fields = {
+                str(field).lower()
+                for field in (grounding_plan.get("answer_fields") or [])
+            }
+            covers = (
+                (selection_obj.direction == "maximum" and "farthest" in answer_fields)
+                or (selection_obj.direction == "minimum" and "closest" in answer_fields)
+            )
+            if covers:
+                return False, ""
+            return True, (
+                f"Objective says direction={selection_obj.direction!r} "
+                f"(requires order={expected_order!r}) "
+                f"but plan declares order={plan_order!r}."
+            )
+
+        expected_order = infer_direction_from_utterance(normalized)
+        if expected_order is None or plan_order == expected_order:
+            return False, ""
+        answer_fields = {
+            str(field).lower()
+            for field in (grounding_plan.get("answer_fields") or [])
+        }
+        covers = (
+            (expected_order == "descending" and "farthest" in answer_fields)
+            or (expected_order == "ascending" and "closest" in answer_fields)
+        )
+        if covers:
+            return False, ""
+        return True, (
+            f"Utterance implies order={expected_order!r} "
+            f"but plan declares order={plan_order!r}."
         )
 
 

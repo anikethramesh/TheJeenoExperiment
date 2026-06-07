@@ -29,6 +29,10 @@ class TurnOrchestrator:
         if command.kind == "unresolved":
             command = station._command_from_active_claim_text(utterance) or command
             if command.kind == "unresolved":
+                grounding_followup = station._command_from_grounding_followup(utterance)
+                if grounding_followup is not None:
+                    command = grounding_followup
+            if command.kind == "unresolved":
                 concept_command = station._command_from_concept(utterance)
                 if concept_command is not None:
                     command = concept_command
