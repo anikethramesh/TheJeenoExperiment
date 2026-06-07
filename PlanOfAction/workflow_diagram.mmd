@@ -7,6 +7,15 @@ flowchart LR
   OP["OperatorStation<br>operator I/O + session"]
   MSG["Typed Message Gate<br>schemas only"]
 
+  subgraph RUN["Runtime package"]
+    CTX["OperationalContext<br>WHERE / MEANING"]
+    SUB["SubstrateAdapter<br>concrete HOW bindings"]
+  end
+
+  REG["CapabilityRegistry<br>contracts + context task families"]
+  FP["Context fingerprint<br>cache / reuse boundary"]
+  SLICE["Compact context slice<br>LLM only when needed"]
+
   subgraph ARCH["JEENOM WHAT"]
     CX["Cortex<br>intent, plan, repair, synthesize, ask"]
     RG["ReadinessGraph<br>execute / ask / refuse / gather evidence"]
@@ -15,11 +24,18 @@ flowchart LR
     SP["Spine<br>execution contracts -> execution claims"]
   end
 
-  SUB["SubstrateAdapter<br>concrete HOW bindings"]
+  CTX --> REG
+  SUB --> REG
+  CTX --> FP
+  SUB --> FP
+  CTX --> SLICE
 
   OP -->|CorticalEnvelope| MSG
   MSG -->|OperatorIntent / steering| CX
+  SLICE -. "only for compile / repair / synthesis" .-> CX
   CX -->|RequestPlan| RG
+  REG --> RG
+  FP --> RG
   KB -->|claim/procedure snapshot| RG
   RG -->|ApprovedCommand + verdict| MSG
   MSG -->|CommandResult / clarification| OP

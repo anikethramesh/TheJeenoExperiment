@@ -20,15 +20,20 @@ from .intent_verifier import IntentVerificationResult, IntentVerifier, default_v
 from .cortex import Cortex
 from .llm_compiler import CompilerBackend, SmokeTestCompiler, build_compiler, canonical_task_params
 from .memory import OperationalMemory
-from .minigrid_substrate_adapter import MiniGridSubstrateAdapter
+from .minigrid_runtime_package import (
+    build_minigrid_runtime_package,
+    default_minigrid_domain_helper,
+)
 from .plan_cache import PlanCache
 from .knowledge_base import KnowledgeBase, NamedConcept
 from .mismatch import MismatchDetector, OperationalMismatch, default_detector
 from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .repair_loop import RepairEvent, RepairLoop
 from .representation import RepresentationStore
+from .runtime_package import RuntimePackage
 from .side_effect_authority import SideEffectAuthority
 from .substrate_adapter import SubstrateAdapter
+from .turn_orchestrator import TurnOrchestrator
 from .schemas import (
     ApprovedCommand,
     ArbitrationTrace,
@@ -53,7 +58,7 @@ from .schemas import (
 )
 
 
-SUPPORTED_COLORS = ("red", "green", "blue", "yellow", "purple", "grey", "gray")
+_DEFAULT_DOMAIN_HELPER = default_minigrid_domain_helper()
 
 
 @dataclass
@@ -79,10 +84,6 @@ class PendingSynthesisProposal:
     similar_handles: list[str]
     proposed_description: str | None = None
     proposed_condition: dict[str, Any] | None = None
-
-
-def _normalize_color(color: str) -> str:
-    return "grey" if color == "gray" else color
 
 
 def _scene_object_to_dict(obj: SceneObject) -> dict[str, Any]:
@@ -288,72 +289,19 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
 
 
 def _parse_target_fact(normalized: str) -> dict[str, str] | None:
-    color_pattern = "|".join(SUPPORTED_COLORS)
-    patterns = [
-        rf"^(?:please )?(?:your |the |my |our )?delivery target is (?:the )?(?P<color>{color_pattern}) (?P<object_type>door)$",
-        rf"^(?:please )?(?:the )?(?P<color>{color_pattern}) (?P<object_type>door) is (?:your |the |my |our )?delivery target$",
-        rf"^(?:please )?target is (?:the )?(?P<color>{color_pattern}) (?P<object_type>door)$",
-        rf"^(?:please )?remember (?:that )?(?:the )?(?P<color>{color_pattern}) (?P<object_type>door)$",
-        rf"^(?:please )?set (?:the )?delivery target to (?:the )?(?P<color>{color_pattern}) (?P<object_type>door)$",
-        rf"^(?:please )?use (?:the )?(?P<color>{color_pattern}) (?P<object_type>door) as (?:your |the |my |our )?delivery target$",
-    ]
-    for pattern in patterns:
-        match = re.match(pattern, normalized)
-        if match:
-            return {
-                "target_color": _normalize_color(match.group("color")),
-                "target_type": match.group("object_type"),
-                "delivery_target": {
-                    "color": _normalize_color(match.group("color")),
-                    "object_type": match.group("object_type"),
-                },
-            }
-    return None
+    return _DEFAULT_DOMAIN_HELPER.parse_target_fact(normalized)
 
 
 def _canonicalize_task_instruction(utterance: str) -> str:
-    match = _parse_go_to_object_utterance(utterance)
-    if not match:
-        return utterance
-
-    verb = match["verb"]
-    if verb in {"go the", "head to", "navigate to"}:
-        verb = "go to"
-    return f"{verb} the {match['color']} {match['object_type']}"
+    return _DEFAULT_DOMAIN_HELPER.canonicalize_task_instruction(utterance)
 
 
 def _parse_go_to_object_utterance(utterance: str) -> dict[str, str] | None:
-    normalized = _normalize_utterance(utterance)
-    color_pattern = "|".join(SUPPORTED_COLORS)
-    match = re.search(
-        rf"\b(?P<verb>go to|go the|reach|find|get to|head to|navigate to)\s+"
-        rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door)\b",
-        normalized,
-    )
-    if not match:
-        return None
-    return {
-        "verb": match.group("verb"),
-        "color": _normalize_color(match.group("color")),
-        "object_type": match.group("object_type"),
-    }
+    return _DEFAULT_DOMAIN_HELPER.parse_go_to_object_utterance(utterance)
 
 
 def _parse_exact_go_to_object_utterance(utterance: str) -> dict[str, str] | None:
-    normalized = _normalize_utterance(utterance)
-    color_pattern = "|".join(SUPPORTED_COLORS)
-    match = re.match(
-        rf"^(?P<verb>go to|reach|find|get to|head to|navigate to)\s+"
-        rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door)$",
-        normalized,
-    )
-    if not match:
-        return None
-    return {
-        "verb": match.group("verb"),
-        "color": _normalize_color(match.group("color")),
-        "object_type": match.group("object_type"),
-    }
+    return _DEFAULT_DOMAIN_HELPER.parse_exact_go_to_object_utterance(utterance)
 
 
 class OperatorStationSession:
@@ -370,6 +318,7 @@ class OperatorStationSession:
         use_cache: bool = True,
         verbose: bool = False,
         request_plan_reuse_cache: PlanReuseCache | None = None,
+        runtime_package: RuntimePackage | None = None,
     ) -> None:
         self.env_id = env_id
         self.seed = seed
@@ -381,11 +330,20 @@ class OperatorStationSession:
         self.max_loops = max_loops
         self.verbose = verbose
         self.last_result: dict[str, Any] | None = None
-        self.substrate: SubstrateAdapter = MiniGridSubstrateAdapter(
+        self.runtime_package = runtime_package or build_minigrid_runtime_package(
             env_id=self.env_id,
             render_mode=self.render_mode,
         )
-        self.capability_registry = self.substrate.capability_registry()
+        self.operational_context = self.runtime_package.operational_context
+        self.context_fingerprint = self.operational_context.fingerprint()
+        self.domain_helper = self.runtime_package.domain_helper
+        self.turn_orchestrator = TurnOrchestrator(
+            classify_utterance=classify_utterance,
+            normalize_utterance=_normalize_utterance,
+            looks_like_bare_label=_looks_like_bare_label,
+        )
+        self.substrate: SubstrateAdapter = self.runtime_package.substrate
+        self.capability_registry = self.runtime_package.resolve_capability_registry()
         # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
         self.knowledge_base = KnowledgeBase(
             storage_path=self.memory.memory_dir / "knowledge_base.json"
@@ -517,13 +475,13 @@ class OperatorStationSession:
         if isinstance(delivery_target, dict):
             color = delivery_target.get("color")
             object_type = delivery_target.get("object_type")
-            if color in SUPPORTED_COLORS and object_type == "door":
-                return f"go to the {_normalize_color(color)} door"
+            if color in self.domain_helper.supported_colors and object_type == "door":
+                return f"go to the {self.domain_helper.normalize_color(color)} door"
 
         target_color = self.memory.knowledge.get("target_color")
         target_type = self.memory.knowledge.get("target_type")
-        if target_color in SUPPORTED_COLORS and target_type == "door":
-            return f"go to the {_normalize_color(target_color)} door"
+        if target_color in self.domain_helper.supported_colors and target_type == "door":
+            return f"go to the {self.domain_helper.normalize_color(target_color)} door"
 
         return "go to the red door"
 
@@ -603,7 +561,7 @@ class OperatorStationSession:
         self.last_command_result = None
         previous_plan = self.last_request_plan
         previous_graph = self.last_readiness_graph
-        message = self._handle_utterance_text(utterance)
+        message = self.turn_orchestrator.handle_utterance_text(self, utterance)
         plan = self.last_request_plan if self.last_request_plan is not previous_plan else None
         graph = (
             self.last_readiness_graph
@@ -616,127 +574,6 @@ class OperatorStationSession:
             plan=plan,
             graph=graph,
         )
-
-    def _handle_utterance_text(self, utterance: str) -> str:
-        self.last_repair_events = []
-        self.last_operational_mismatches = []
-        command = classify_utterance(utterance)
-        if self.pending_synthesis_proposal is not None:
-            return self.handle_pending_synthesis_proposal(utterance, command)
-        if self.pending_clarification is not None:
-            pending_response = self.handle_pending_clarification(utterance, command)
-            if pending_response is not None:
-                return pending_response
-        if command.kind == "concept_teach":
-            return self.teach_concept(command.payload["name"], command.payload["utterance"])
-        if command.kind == "concept_forget":
-            return self.forget_concept(command.payload["name"])
-        if command.kind == "procedure_execute":
-            return self._run_procedure(command.payload["steps"], command.utterance)
-        if command.kind == "sequence_execute":
-            return self._run_sequence(command.payload["steps"], command.utterance)
-        if command.kind == "motor_execute":
-            return self._run_motor_command(
-                command.payload["action"], command.payload["count"], command.utterance
-            )
-        if command.kind == "motor_sequence_execute":
-            return self._run_motor_sequence_command(command.payload["sequence"], command.utterance)
-        if command.kind == "mission_execute":
-            return self._run_mission(command.payload["steps"], command.utterance)
-        if command.kind == "unresolved":
-            command = self._command_from_active_claim_text(utterance) or command
-            if command.kind == "unresolved":
-                concept_command = self._command_from_concept(utterance)
-                if concept_command is not None:
-                    command = concept_command
-            if command.kind == "unresolved" and _looks_like_bare_label(
-                _normalize_utterance(utterance.strip())
-            ):
-                label = _normalize_utterance(utterance.strip())
-                return (
-                    f"I don't recognise '{label}' as a command or a known concept.\n"
-                    f"To teach it as a shorthand, say:\n"
-                    f"  remember {label} means <full instruction>\n"
-                    f"Example: remember {label} means go to the red door"
-                )
-            if command.kind == "unresolved":
-                self.log("deterministic fast path unresolved; compiling operator intent")
-                command = self.command_from_llm_intent(utterance)
-        self.log(f"classified utterance as {command.kind}")
-        if command.kind == "quit":
-            self.pending_clarification = None
-            return "QUIT"
-        if command.kind == "cancel":
-            self.pending_clarification = None
-            return "CANCELLED: pending clarification cleared"
-        if command.kind == "reset":
-            return self.reset(clear_memory=bool(command.payload.get("clear_memory")))
-        if command.kind == "clarification":
-            return command.payload["message"]
-        if command.kind == "concept_teach":
-            return self.teach_concept(command.payload["name"], command.payload["utterance"])
-        if command.kind == "concept_forget":
-            return self.forget_concept(command.payload["name"])
-        if command.kind == "procedure_execute":
-            return self._run_procedure(command.payload["steps"], command.utterance)
-        if command.kind == "sequence_execute":
-            return self._run_sequence(command.payload["steps"], command.utterance)
-        if command.kind == "motor_execute":
-            return self._run_motor_command(
-                command.payload["action"], command.payload["count"], command.utterance
-            )
-        if command.kind == "motor_sequence_execute":
-            return self._run_motor_sequence_command(command.payload["sequence"], command.utterance)
-        if command.kind == "mission_execute":
-            return self._run_mission(command.payload["steps"], command.utterance)
-        if command.kind == "cache_query":
-            return self.cache_summary()
-        if command.kind == "status_query":
-            return self.status_summary(query=command.payload.get("query", "status"))
-        if command.kind == "ground_target_query":
-            return self.grounded_target_summary(command.payload)
-        if command.kind == "task_selector":
-            return self.task_selector_summary(command)
-        if command.kind == "knowledge_update":
-            return self._apply_knowledge_update_from_payload(
-                command.utterance,
-                command.payload,
-                source="operator",
-            )
-        if command.kind == "claim_reference":
-            return self.claim_reference_summary(command.payload.get("ref_type", ""))
-        if command.kind == "synthesis_proposal":
-            return command.payload["message"]
-        if command.kind in {"accept_proposal", "reject_proposal"}:
-            return self.status_summary(query="help")
-        if command.kind == "missing_skills":
-            return command.payload.get("message", "I do not have the required capabilities.")
-        if command.kind == "synthesizable":
-            return command.payload.get("message", "That capability is not yet implemented.")
-        if command.kind == "task_instruction":
-            instruction = self.resolve_task_instruction(command.utterance)
-            if instruction is None:
-                return self.missing_reference_summary(command.utterance)
-            if instruction != command.utterance:
-                self.log(f"resolved task instruction to: {instruction}")
-            result = self._run_task_from_instruction(
-                command.utterance,
-                instruction,
-                source="operator",
-                record_plan=True,
-            )
-            return self.result_summary(result)
-        if command.kind == "unsupported":
-            return command.payload.get(
-                "message",
-                "I cannot safely execute that capability yet.",
-            )
-        if command.kind == "ambiguous":
-            return command.payload.get(
-                "message",
-                "I could not safely resolve that instruction yet.",
-            )
-        return self.status_summary(query="help")
 
     def command_from_llm_intent(
         self,
@@ -1844,12 +1681,9 @@ class OperatorStationSession:
         if "manhattan" in normalized and plan.get("metric") != "manhattan":
             return "The utterance specifies Manhattan distance, but the plan does not."
 
-        color = self._color_reference_in_utterance(normalized)
+        color = self.domain_helper.color_reference_in_utterance(normalized)
         if color is None:
-            bare_color_pattern = "|".join(SUPPORTED_COLORS)
-            match = re.search(rf"\b(?P<color>{bare_color_pattern})\b", normalized)
-            if match:
-                color = _normalize_color(match.group("color"))
+            color = self.domain_helper.bare_color_reference(normalized)
         if color is not None and plan.get("color") not in {None, color}:
             return f"The utterance mentions {color}, but the plan targets {plan.get('color')}."
         return None
@@ -1891,7 +1725,7 @@ class OperatorStationSession:
             payload={
                 "message": (
                     "GROUNDING ANSWER\n"
-                    f"target={self._entry_label(entry)}\n"
+                    f"target={self.domain_helper.entry_label(entry)}\n"
                     "source=active_claims"
                 )
             },
@@ -1928,8 +1762,14 @@ class OperatorStationSession:
                 kind="clarification",
                 utterance=utterance,
                 payload={
-                    "message": self._format_ranked_doors_from_claims(
-                        claims,
+                    "message": self.domain_helper.format_ranked_doors_from_entries(
+                        claims.ranked_scene_doors,
+                        metric=str(
+                            claims.last_grounding_query.get("distance_metric")
+                            or self.domain_helper.metric_from_grounding_handle(
+                                str(claims.last_grounding_query.get("primitive", ""))
+                            )
+                        ),
                         include_navigation_hint=not wants_task,
                     )
                 },
@@ -2023,14 +1863,16 @@ class OperatorStationSession:
                     utterance=utterance,
                     payload={"message": f"No unique {color} door is visible. I did not execute."},
                 )
+            if matches:
+                self._set_last_grounded_claim(matches[0], claims)
             return ApprovedCommand(
                 kind="clarification",
                 utterance=utterance,
                 payload={
-                    "message": self._format_color_plan_answer(
-                        color,
-                        matches,
-                        answer_fields,
+                    "message": self.domain_helper.format_color_plan_answer(
+                        color=color,
+                        matches=matches,
+                        answer_fields=answer_fields,
                     )
                 },
                 capability_match=cap_match,
@@ -2615,7 +2457,7 @@ class OperatorStationSession:
                 message = (
                     "CLARIFY\n"
                     "That filtered selector lands inside a distance tie. Which one should I use?\n"
-                    f"Options: {_format_targets([self._entry_target_dict(e) for e in tied])}"
+                    f"Options: {_format_targets([self.domain_helper.entry_target_dict(e) for e in tied])}"
                 )
                 return self._candidate_clarification_for_entries(
                     utterance=utterance,
@@ -3040,8 +2882,14 @@ class OperatorStationSession:
                 kind="clarification",
                 utterance=utterance,
                 payload={
-                    "message": self._format_ranked_doors_from_claims(
-                        claims,
+                    "message": self.domain_helper.format_ranked_doors_from_entries(
+                        claims.ranked_scene_doors,
+                        metric=str(
+                            claims.last_grounding_query.get("distance_metric")
+                            or self.domain_helper.metric_from_grounding_handle(
+                                str(claims.last_grounding_query.get("primitive", ""))
+                            )
+                        ),
                         include_navigation_hint=not wants_task,
                     )
                 },
@@ -3137,7 +2985,7 @@ class OperatorStationSession:
             {
                 "object_type": "door",
                 "relation": "all",
-                "distance_metric": self._metric_from_grounding_handle(handle),
+                "distance_metric": self.domain_helper.metric_from_grounding_handle(handle),
                 "distance_reference": "agent",
                 "primitive": handle,
             },
@@ -3163,7 +3011,7 @@ class OperatorStationSession:
             return None
         if not self._utterance_requests_navigation(normalized):
             return None
-        color = self._color_reference_in_utterance(normalized)
+        color = self.domain_helper.color_reference_in_utterance(normalized)
         if color is None:
             return None
         claims = self._ensure_ranked_door_claims()
@@ -3191,23 +3039,10 @@ class OperatorStationSession:
             return None
         return int(match.group(1))
 
-    def _color_reference_in_utterance(self, normalized: str) -> str | None:
-        color_pattern = "|".join(SUPPORTED_COLORS)
-        match = re.search(rf"\b(?P<color>{color_pattern})\s+(?:one|door)\b", normalized)
-        if match:
-            return _normalize_color(match.group("color"))
-        return None
-
-    def _entry_target_dict(self, entry: GroundedDoorEntry) -> dict[str, Any]:
-        return {"type": "door", "color": entry.color, "x": entry.x, "y": entry.y}
-
-    def _entry_label(self, entry: GroundedDoorEntry) -> str:
-        return f"{entry.color} door@({entry.x},{entry.y}) distance={entry.distance}"
-
     def _task_command_for_entry(self, entry: GroundedDoorEntry, utterance: str) -> ApprovedCommand:
         return ApprovedCommand(
             kind="task_instruction",
-            utterance=f"go to the {entry.color} door",
+            utterance=self.domain_helper.task_utterance_for_entry(entry),
         )
 
     def _candidate_clarification_for_entries(
@@ -3227,7 +3062,7 @@ class OperatorStationSession:
             supported_values=sorted(
                 str(entry.color) for entry in entries if entry.color is not None
             ),
-            candidates=[self._entry_target_dict(entry) for entry in entries],
+            candidates=[self.domain_helper.entry_target_dict(entry) for entry in entries],
             **self._pending_clarification_trace(
                 utterance,
                 "target_selector_candidate_choice",
@@ -3262,7 +3097,7 @@ class OperatorStationSession:
             message = (
                 "CLARIFY\n"
                 f"Multiple doors have distance {distance}. Which one should I use?\n"
-                f"Options: {_format_targets([self._entry_target_dict(e) for e in matches])}"
+                f"Options: {_format_targets([self.domain_helper.entry_target_dict(e) for e in matches])}"
             )
             if wants_task:
                 return self._candidate_clarification_for_entries(
@@ -3282,7 +3117,7 @@ class OperatorStationSession:
                 "message": (
                     "GROUNDING ANSWER\n"
                     f"distance={distance}\n"
-                    f"target={self._entry_label(entry)}"
+                    f"target={self.domain_helper.entry_label(entry)}"
                 )
             },
         )
@@ -3330,7 +3165,7 @@ class OperatorStationSession:
                 "CLARIFY\n"
                 f"That ordinal falls inside a distance tie at distance {entry.distance}. "
                 "Which one should I use?\n"
-                f"Options: {_format_targets([self._entry_target_dict(e) for e in tied])}"
+                f"Options: {_format_targets([self.domain_helper.entry_target_dict(e) for e in tied])}"
             )
             if wants_task:
                 return self._candidate_clarification_for_entries(
@@ -3349,7 +3184,7 @@ class OperatorStationSession:
             payload={
                 "message": (
                     "GROUNDING ANSWER\n"
-                    f"{ordinal} {direction}={self._entry_label(entry)}"
+                    f"{ordinal} {direction}={self.domain_helper.entry_label(entry)}"
                 )
             },
         )
@@ -3380,7 +3215,7 @@ class OperatorStationSession:
                 "CLARIFY\n"
                 f"That ordinal falls inside a distance tie at distance {entry.distance}. "
                 "Which one should I use?\n"
-                f"Options: {_format_targets([self._entry_target_dict(e) for e in tied])}"
+                f"Options: {_format_targets([self.domain_helper.entry_target_dict(e) for e in tied])}"
             )
             if wants_task:
                 return self._candidate_clarification_for_entries(
@@ -3406,7 +3241,7 @@ class OperatorStationSession:
                     "GROUNDING ANSWER\n"
                     f"ordinal={ordinal}\n"
                     f"order={order}\n"
-                    f"{ordinal} {label}={self._entry_label(entry)}"
+                    f"{ordinal} {label}={self.domain_helper.entry_label(entry)}"
                 )
             },
         )
@@ -3426,7 +3261,7 @@ class OperatorStationSession:
             message = (
                 "CLARIFY\n"
                 f"That matched multiple {extreme} doors. Which one should I use?\n"
-                f"Options: {_format_targets([self._entry_target_dict(e) for e in tied])}"
+                f"Options: {_format_targets([self.domain_helper.entry_target_dict(e) for e in tied])}"
             )
             return self._candidate_clarification_for_entries(
                 utterance=utterance,
@@ -3461,21 +3296,21 @@ class OperatorStationSession:
         if include_closest:
             lines.append(
                 "closest="
-                + ", ".join(self._entry_label(entry) for entry in closest)
+                + ", ".join(self.domain_helper.entry_label(entry) for entry in closest)
             )
         if include_farthest:
             lines.append(
                 "farthest="
-                + ", ".join(self._entry_label(entry) for entry in farthest)
+                + ", ".join(self.domain_helper.entry_label(entry) for entry in farthest)
             )
         if len(lines) == 1:
-            lines.append(self._entry_label(closest[0]))
+            lines.append(self.domain_helper.entry_label(closest[0]))
         if include_closest and not include_farthest and len(closest) == 1:
             self._set_last_grounded_claim(closest[0], claims)
         if include_farthest and not include_closest and len(farthest) == 1:
             self._set_last_grounded_claim(farthest[0], claims)
         if len(farthest) > 1 and include_farthest:
-            lines.append("tie=" + ", ".join(self._entry_label(entry) for entry in farthest))
+            lines.append("tie=" + ", ".join(self.domain_helper.entry_label(entry) for entry in farthest))
         return "\n".join(lines)
 
     def _format_plan_extreme_answer(
@@ -3494,17 +3329,17 @@ class OperatorStationSession:
         if include_closest:
             lines.append(
                 "closest="
-                + ", ".join(self._entry_label(entry) for entry in closest)
+                + ", ".join(self.domain_helper.entry_label(entry) for entry in closest)
             )
         if include_farthest:
             lines.append(
                 "farthest="
-                + ", ".join(self._entry_label(entry) for entry in farthest)
+                + ", ".join(self.domain_helper.entry_label(entry) for entry in farthest)
             )
             if len(farthest) > 1:
                 lines.append(
                     "tie="
-                    + ", ".join(self._entry_label(entry) for entry in farthest)
+                    + ", ".join(self.domain_helper.entry_label(entry) for entry in farthest)
                 )
         if include_closest and not include_farthest and len(closest) == 1:
             self._set_last_grounded_claim(closest[0], claims)
@@ -3535,14 +3370,14 @@ class OperatorStationSession:
             tied = [entry for entry in ranked if entry.distance == distance]
             lines.append(
                 f"{label}="
-                + ", ".join(self._entry_label(entry) for entry in tied)
+                + ", ".join(self.domain_helper.entry_label(entry) for entry in tied)
             )
             if len(tied) == 1:
                 self._set_last_grounded_claim(tied[0], claims)
             elif label in {"closest", "farthest"}:
                 lines.append(
                     "tie="
-                    + ", ".join(self._entry_label(entry) for entry in tied)
+                    + ", ".join(self.domain_helper.entry_label(entry) for entry in tied)
                 )
 
         def append_ordinal(label: str, ranked: list[GroundedDoorEntry], ordinal: int) -> None:
@@ -3554,11 +3389,11 @@ class OperatorStationSession:
             if len(tied) > 1:
                 lines.append(
                     f"{label}=tie at distance {entry.distance}: "
-                    + ", ".join(self._entry_label(candidate) for candidate in tied)
+                    + ", ".join(self.domain_helper.entry_label(candidate) for candidate in tied)
                 )
                 return
             self._set_last_grounded_claim(entry, claims)
-            lines.append(f"{label}={self._entry_label(entry)}")
+            lines.append(f"{label}={self.domain_helper.entry_label(entry)}")
 
         if "closest" in answer_fields:
             append_extreme("closest", entries)
@@ -3575,48 +3410,6 @@ class OperatorStationSession:
 
         if len(lines) == 1:
             lines.append("No composed answer fields were available.")
-        return "\n".join(lines)
-
-    def _format_color_plan_answer(
-        self,
-        color: str,
-        matches: list[GroundedDoorEntry],
-        answer_fields: set[str],
-    ) -> str:
-        if not matches:
-            if "exists" in answer_fields:
-                return f"GROUNDING ANSWER\nexists=false\ncolor={color}\nobject_type=door"
-            return f"No matching {color} door found."
-        if self.active_claims is not None:
-            self._set_last_grounded_claim(matches[0], self.active_claims)
-        if "exists" in answer_fields and "distance" not in answer_fields:
-            return f"GROUNDING ANSWER\nexists=true\ntarget={self._entry_label(matches[0])}"
-        if "distance" in answer_fields:
-            lines = ["GROUNDING ANSWER"]
-            for entry in matches:
-                lines.append(f"target={self._entry_label(entry)}")
-            return "\n".join(lines)
-        return "GROUNDING ANSWER\n" + "\n".join(
-            f"target={self._entry_label(entry)}" for entry in matches
-        )
-
-    def _format_ranked_doors_from_claims(
-        self,
-        claims: StationActiveClaims,
-        *,
-        include_navigation_hint: bool = True,
-    ) -> str:
-        metric = str(
-            claims.last_grounding_query.get("distance_metric")
-            or self._metric_from_grounding_handle(
-                str(claims.last_grounding_query.get("primitive", ""))
-            )
-        )
-        lines = [f"DOORS RANKED BY {metric.upper()} DISTANCE FROM AGENT"]
-        for i, entry in enumerate(claims.ranked_scene_doors):
-            lines.append(f"  {i + 1}. {self._entry_label(entry)}")
-        if include_navigation_hint:
-            lines.append("\n(I can navigate to any specific door — tell me which color.)")
         return "\n".join(lines)
 
     def _question_override_command(self, utterance: str) -> ApprovedCommand | None:
@@ -3934,7 +3727,7 @@ class OperatorStationSession:
             {
                 str(candidate["color"])
                 for candidate in candidates
-                if candidate.get("color") in SUPPORTED_COLORS
+                if candidate.get("color") in self.domain_helper.supported_colors
             }
         )
         if not colors:
@@ -4001,134 +3794,8 @@ class OperatorStationSession:
             "but I did not execute the request yet."
         )
 
-    def handle_pending_clarification(
-        self,
-        utterance: str,
-        command: ApprovedCommand,
-    ) -> str | None:
-        normalized = _normalize_utterance(utterance)
-        if command.kind == "quit":
-            self.pending_clarification = None
-            return "QUIT"
-        if command.kind == "cancel":
-            self.pending_clarification = None
-            return "CANCELLED: pending clarification cleared"
-        if command.kind == "reset":
-            return self.reset(clear_memory=bool(command.payload.get("clear_memory")))
-        if command.kind == "cache_query":
-            return self.cache_summary()
-        if command.kind == "status_query":
-            return self.status_summary(query=command.payload.get("query", "status"))
-        pending = self.pending_clarification
-        if pending is not None and pending.clarification_type == "arbitrator_offer":
-            if self._is_acceptance(normalized):
-                self.pending_clarification = None
-                return self.resume_arbitration_offer(pending.resume_kind)
-        if pending is not None and pending.clarification_type == "semantic_query_missing_field":
-            if self._is_manhattan_answer(normalized):
-                self.pending_clarification = None
-                clarified = f"{pending.original_utterance} using manhattan distance"
-                self.log("resuming semantic query plan with distance_metric=manhattan")
-                resumed = self.command_from_llm_intent(clarified)
-                if resumed.kind == "clarification":
-                    return resumed.payload["message"]
-                return self.execute_command(resumed)
-            if self._is_euclidean_answer(normalized):
-                self.pending_clarification = None
-                return "I cannot use Euclidean distance yet. Supported: manhattan."
-        if self._is_manhattan_answer(normalized):
-            return self.resume_pending_clarification("manhattan")
-        if self._is_euclidean_answer(normalized):
-            self.pending_clarification = None
-            return "I cannot use Euclidean distance yet. Supported: manhattan."
-        color_answer = self._color_answer(normalized)
-        if color_answer is not None:
-            candidate_response = self.resume_candidate_clarification(color_answer)
-            if candidate_response is not None:
-                return candidate_response
-
-        if command.kind == "unresolved":
-            self.log("deterministic fast path unresolved; compiling operator intent")
-            command = self.command_from_llm_intent(utterance)
-        if command.kind in {
-            "task_instruction",
-            "task_selector",
-            "knowledge_update",
-            "ground_target_query",
-            "unsupported",
-            "ambiguous",
-        }:
-            self.pending_clarification = None
-            self.log("new operator intent cancelled pending clarification")
-            return self.execute_command(command)
-        # A synthesis proposal supersedes the old clarification.
-        if command.kind == "synthesis_proposal":
-            self.pending_clarification = None
-            return command.payload["message"]
-        # A new arbitration fired a clarification — _arbitrate_gap already replaced
-        # self.pending_clarification with the new pending. Return the new message directly.
-        if command.kind == "clarification":
-            return command.payload["message"]
-        # Arbitration refused or synthesized — no new pending was set, so clear the old one.
-        if command.kind in {"missing_skills", "synthesizable"}:
-            self.pending_clarification = None
-            return command.payload.get("message", "I cannot fulfil that request.")
-
-        pending = self.pending_clarification
-        if pending is None:
-            return None
-        return self.clarification_prompt(
-            pending.missing_field,
-            pending.supported_values,
-            candidates=pending.candidates,
-        )
-
     def execute_command(self, command: ApprovedCommand) -> str:
-        self.log(f"classified utterance as {command.kind}")
-        if command.kind == "clarification":
-            return command.payload.get("message", "")
-        if command.kind == "synthesis_proposal":
-            return command.payload["message"]
-        if command.kind == "missing_skills":
-            return command.payload.get("message", "I do not have the required capabilities.")
-        if command.kind == "synthesizable":
-            return command.payload.get("message", "That capability is not yet implemented.")
-        if command.kind == "knowledge_update":
-            return self._apply_knowledge_update_from_payload(
-                command.utterance,
-                command.payload,
-                source="operator",
-            )
-        if command.kind == "task_instruction":
-            instruction = self.resolve_task_instruction(command.utterance)
-            if instruction is None:
-                return self.missing_reference_summary(command.utterance)
-            if instruction != command.utterance:
-                self.log(f"resolved task instruction to: {instruction}")
-            result = self._run_task_from_instruction(
-                command.utterance,
-                instruction,
-                source="operator",
-                record_plan=True,
-            )
-            return self.result_summary(result)
-        if command.kind == "ground_target_query":
-            return self.grounded_target_summary(command.payload)
-        if command.kind == "claim_reference":
-            return self.claim_reference_summary(command.payload.get("ref_type", ""))
-        if command.kind == "task_selector":
-            return self.task_selector_summary(command)
-        if command.kind == "unsupported":
-            return command.payload.get(
-                "message",
-                "I cannot safely execute that capability yet.",
-            )
-        if command.kind == "ambiguous":
-            return command.payload.get(
-                "message",
-                "I could not safely resolve that instruction yet.",
-            )
-        return self.status_summary(query="help")
+        return self.turn_orchestrator.execute_command(self, command)
 
     def _intent_for_clarification_resume(
         self,
@@ -4350,24 +4017,6 @@ class OperatorStationSession:
         )
         return self.result_summary(result)
 
-    def _is_manhattan_answer(self, normalized: str) -> bool:
-        return normalized in {
-            "manhattan",
-            "use manhattan",
-            "manhattan distance",
-            "by manhattan distance",
-            "use manhattan distance",
-        }
-
-    def _is_euclidean_answer(self, normalized: str) -> bool:
-        return normalized in {
-            "euclidean",
-            "use euclidean",
-            "euclidean distance",
-            "by euclidean distance",
-            "use euclidean distance",
-        }
-
     def _is_acceptance(self, normalized: str) -> bool:
         return normalized in {
             "yes", "ok", "okay", "sure", "please", "go ahead", "do it",
@@ -4420,7 +4069,7 @@ class OperatorStationSession:
                     [(scene.manhattan_distance_from_agent(d), d) for d in doors],
                     key=lambda pair: (pair[0], pair[1].color or ""),
                 )
-            metric = self._metric_from_grounding_handle(handle)
+            metric = self.domain_helper.metric_from_grounding_handle(handle)
             self._write_ranked_claims(
                 ranked,
                 {
@@ -4431,19 +4080,20 @@ class OperatorStationSession:
                     "primitive": handle,
                 },
             )
-            lines = [f"DOORS RANKED BY {metric.upper()} DISTANCE FROM AGENT"]
-            for i, (dist, d) in enumerate(ranked):
-                lines.append(f"  {i + 1}. {d.color} door@({d.x},{d.y}) distance={dist}")
-            lines.append("\n(I can navigate to any specific door — tell me which color.)")
-            return "\n".join(lines)
+            return self.domain_helper.format_ranked_doors_from_entries(
+                [
+                    {
+                        "color": d.color,
+                        "object_type": d.object_type,
+                        "x": d.x,
+                        "y": d.y,
+                        "distance": dist,
+                    }
+                    for dist, d in ranked
+                ],
+                metric=metric,
+            )
         return f"No display handler implemented for grounding primitive: {handle}"
-
-    def _metric_from_grounding_handle(self, handle: str) -> str:
-        if ".euclidean." in handle:
-            return "euclidean"
-        if ".manhattan." in handle:
-            return "manhattan"
-        return "manhattan"
 
     def _execute_approved_substitute(
         self,
@@ -4535,16 +4185,6 @@ class OperatorStationSession:
             payload={"message": msg, "match": cap_match.compact()},
             capability_match=cap_match,
         )
-
-    def _color_answer(self, normalized: str) -> str | None:
-        color_pattern = "|".join(SUPPORTED_COLORS)
-        match = re.match(
-            rf"^(?:the )?(?P<color>{color_pattern})(?: one| door)?$",
-            normalized,
-        )
-        if not match:
-            return None
-        return _normalize_color(match.group("color"))
 
     def _ensure_scene_model(self) -> SceneModel | None:
         """Return the current SceneModel, building it via an idle sense pass if needed.

@@ -180,19 +180,37 @@
     claims, provenance, preconditions, postconditions, and failure modes. Do not
     build a macro system before repeated working decompositions exist.
 
-## Canonical Blocks
+19. OperationalContext frames the situation.
+    `SubstrateAdapter` is HOW: sensors, actions, planners, controllers, env/game
+    calls, reset, render, and validation hooks. `OperationalContext` is
+    WHERE/MEANING: objects, task families, references, grounding semantics, claim
+    rules, display rules, environment identity fields, and composition hints for
+    the current situation.
+
+    The LLM must not re-read or reason over the whole context every turn. At
+    startup, JEENOM loads the context, builds/filters the capability registry,
+    computes a context fingerprint, and prewarms/caches known procedures. During
+    a turn, Cortex and ReadinessGraph consult typed context data and pass only a
+    compact relevant context slice to an LLM when compilation, repair, or
+    synthesis actually needs it. Runtime execution never calls the LLM.
+
+## Canonical Blocks And Context
 
 Phase 9E freezes the simple block map. Do not add a new block unless an eval
 shows one of these cannot carry the responsibility.
 
-| Block | Owns | Must not own |
-|-------|------|--------------|
+Phase 10D adds `OperationalContext` as a typed message/manifest boundary, not as
+a free-running service with hidden behavior.
+
+| Boundary | Owns | Must not own |
+|----------|------|--------------|
 | `OperatorStation` | operator I/O, session state, pending clarification, result display | planning internals, sensing internals, execution internals, durable knowledge |
 | `Cortex` | intent preservation, RequestPlan, readiness arbitration, repair/synthesis decisions, steering questions | substrate HOW, durable storage mutation |
 | `ReadinessGraph` | executable/blocking verdicts from plans, contracts, authority, and knowledge snapshots | memory storage, execution |
 | `Sense` | evidence requests and observation claims | task planning, durable operator truth |
 | `Spine` | execution contracts and execution claims | intent planning, durable operator truth |
 | `KnowledgeBase` | claims, procedures, provenance, invalidation, snapshots | substrate sensing/action HOW |
+| `OperationalContext` | domain/situation meaning, vocabulary, task families, grounding semantics, claim rules, display rules, context fingerprint | sensing/action HOW, execution, mutable world state |
 | `SubstrateAdapter` | concrete sensors, actions, planners, controllers, env/game calls, validation hooks | JEENOM WHAT decisions |
 
 Every boundary between these blocks is a schema boundary. A block may carry local
@@ -207,6 +225,8 @@ Use existing messages first:
 - authority: `ExecutionTicket`, `RawMotorTicket`, `MemoryWriteTicket`
 - sense/execution: `EvidenceFrame`, `OperationalEvidence`, `ObservationClaim`,
   `ExecutionContract`, `ExecutionReport`, `ExecutionClaim`
+- context: `OperationalContext`, context fingerprint, compact context slices for
+  compile/repair/synthesis
 - procedure: `ProcedureRecipe`, cached sense/skill templates
 
 Only add one generic claim wrapper if the existing claim types cannot represent
@@ -245,6 +265,39 @@ than mutating those pockets directly.
 robot port must fill the same contract from its real controllers, sensors, frames, and
 safety preflight checks.
 
+## OperationalContext Flow
+
+`OperationalContext` is the standardized situation frame. It should be loaded
+once, fingerprinted, and used deterministically by the control plane.
+
+Startup:
+
+1. Load `SubstrateAdapter`.
+2. Load `OperationalContext`.
+3. Build or filter `CapabilityRegistry` from substrate contracts plus context
+   task families.
+4. Compute `context_fingerprint` from context id/version, substrate id/version,
+   task-family assumptions, frames/units, and safety policy.
+5. Prewarm/cache known procedures under the context fingerprint.
+
+Per operator turn:
+
+1. Wrap utterance in `CorticalEnvelope`.
+2. Cortex compiles/verifies intent using deterministic context vocabulary and,
+   only when needed, a compact context slice.
+3. Cortex builds `RequestPlan`.
+4. `ReadinessGraph` checks request plan against capability registry, knowledge
+   snapshot, authority, primitive contracts, and context fingerprint.
+5. Approved commands/tickets execute through Sense/Spine and SubstrateAdapter.
+6. Claims/results/provenance return to KnowledgeBase.
+
+LLM rule:
+
+- Never prompt with the entire OperationalContext by default.
+- Use compact context slices for LLM compile/repair/synthesis only.
+- Cache compiled plans/templates by semantic key plus context fingerprint.
+- Invalidate or separate reuse when the context fingerprint changes.
+
 ## WHY / WHAT / HOW Examples
 
 Robotics:
@@ -271,10 +324,10 @@ ARC-AGI3:
 - HOW: ARC game-state API, legal action API, state parser, replay/simulation
   tools, scoring/end-state feedback.
 
-## Current Repo Shape After Phase 9E
+## Current Repo Shape After Phase 10C
 
-The implementation now enforces the cortical control-plane objects and the first
-block/schema/knowledge boundary gates.
+The implementation now enforces the cortical control-plane objects, the first
+block/schema/knowledge boundary gates, and the first substrate HOW boundary.
 
 Current enforced gateways:
 
@@ -295,6 +348,10 @@ Current enforced gateways:
   memory mutation.
 - Mission children build child execution tickets instead of calling raw task
   strings as authority.
+- `CommandAuthority` owns command/result trace construction.
+- `SideEffectAuthority` owns side-effect ticket minting.
+- `SubstrateAdapter` exists as the HOW protocol.
+- `MiniGridSubstrateAdapter` owns the first MiniGrid env/runtime HOW paths.
 
 Current architectural debt:
 
@@ -310,10 +367,12 @@ Current architectural debt:
     Phase 10 extraction.
 - Substrate drift:
   - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest.
+  - `OperationalContext` is not implemented yet, so MiniGrid domain meaning is
+    still scattered through station helper code.
   - Request planning, primitive validation fixtures, and many station formatters
     still contain MiniGrid/door/grid assumptions.
   - Contract preflight is represented and gated, but not yet a general executable
     proof system for arbitrary robot stacks.
 
-The next architecture step is Phase 10 station extraction. Do not add harder
+The next architecture step is Phase 10D OperationalContext. Do not add harder
 domains first.

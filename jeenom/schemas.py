@@ -1749,6 +1749,190 @@ class EnvironmentIdentity:
 
 
 @dataclass
+class OperationalContext:
+    """Typed situation frame that gives domain meaning to substrate abilities."""
+
+    context_id: str
+    substrate_id: str
+    version: str = "1"
+    object_vocabulary: list[str] = field(default_factory=list)
+    attribute_vocabulary: list[str] = field(default_factory=list)
+    task_families: list[dict[str, Any]] = field(default_factory=list)
+    reference_semantics: dict[str, Any] = field(default_factory=dict)
+    grounding_semantics: dict[str, Any] = field(default_factory=dict)
+    claim_rules: dict[str, Any] = field(default_factory=dict)
+    display_rules: dict[str, Any] = field(default_factory=dict)
+    environment_identity_fields: list[str] = field(default_factory=list)
+    procedure_hints: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.context_id:
+            raise SchemaValidationError("OperationalContext requires context_id")
+        if not self.substrate_id:
+            raise SchemaValidationError("OperationalContext requires substrate_id")
+        if not self.version:
+            raise SchemaValidationError("OperationalContext requires version")
+        self.object_vocabulary = _ensure_str_list(
+            self.object_vocabulary,
+            "OperationalContext.object_vocabulary",
+        )
+        self.attribute_vocabulary = _ensure_str_list(
+            self.attribute_vocabulary,
+            "OperationalContext.attribute_vocabulary",
+        )
+        self.environment_identity_fields = _ensure_str_list(
+            self.environment_identity_fields,
+            "OperationalContext.environment_identity_fields",
+        )
+        raw_task_families = _ensure_list(
+            self.task_families,
+            "OperationalContext.task_families",
+        )
+        self.task_families = [
+            _ensure_dict(item, f"OperationalContext.task_families[{idx}]")
+            for idx, item in enumerate(raw_task_families)
+        ]
+        self.reference_semantics = _ensure_dict(
+            self.reference_semantics,
+            "OperationalContext.reference_semantics",
+        )
+        self.grounding_semantics = _ensure_dict(
+            self.grounding_semantics,
+            "OperationalContext.grounding_semantics",
+        )
+        self.claim_rules = _ensure_dict(
+            self.claim_rules,
+            "OperationalContext.claim_rules",
+        )
+        self.display_rules = _ensure_dict(
+            self.display_rules,
+            "OperationalContext.display_rules",
+        )
+        self.procedure_hints = _ensure_dict(
+            self.procedure_hints,
+            "OperationalContext.procedure_hints",
+        )
+        self.metadata = _ensure_dict(
+            self.metadata,
+            "OperationalContext.metadata",
+        )
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "OperationalContext":
+        mapping = _ensure_mapping(data, "OperationalContext")
+        return cls(
+            context_id=_ensure_str(mapping.get("context_id"), "OperationalContext.context_id"),
+            substrate_id=_ensure_str(mapping.get("substrate_id"), "OperationalContext.substrate_id"),
+            version=_ensure_str(mapping.get("version", "1"), "OperationalContext.version"),
+            object_vocabulary=_ensure_str_list(
+                mapping.get("object_vocabulary", []),
+                "OperationalContext.object_vocabulary",
+            ),
+            attribute_vocabulary=_ensure_str_list(
+                mapping.get("attribute_vocabulary", []),
+                "OperationalContext.attribute_vocabulary",
+            ),
+            task_families=[
+                _ensure_dict(item, f"OperationalContext.task_families[{idx}]")
+                for idx, item in enumerate(
+                    _ensure_list(
+                        mapping.get("task_families", []),
+                        "OperationalContext.task_families",
+                    )
+                )
+            ],
+            reference_semantics=_ensure_dict(
+                mapping.get("reference_semantics", {}),
+                "OperationalContext.reference_semantics",
+            ),
+            grounding_semantics=_ensure_dict(
+                mapping.get("grounding_semantics", {}),
+                "OperationalContext.grounding_semantics",
+            ),
+            claim_rules=_ensure_dict(
+                mapping.get("claim_rules", {}),
+                "OperationalContext.claim_rules",
+            ),
+            display_rules=_ensure_dict(
+                mapping.get("display_rules", {}),
+                "OperationalContext.display_rules",
+            ),
+            environment_identity_fields=_ensure_str_list(
+                mapping.get("environment_identity_fields", []),
+                "OperationalContext.environment_identity_fields",
+            ),
+            procedure_hints=_ensure_dict(
+                mapping.get("procedure_hints", {}),
+                "OperationalContext.procedure_hints",
+            ),
+            metadata=_ensure_dict(
+                mapping.get("metadata", {}),
+                "OperationalContext.metadata",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "context_id": self.context_id,
+            "substrate_id": self.substrate_id,
+            "version": self.version,
+            "object_vocabulary": list(self.object_vocabulary),
+            "attribute_vocabulary": list(self.attribute_vocabulary),
+            "task_families": [dict(item) for item in self.task_families],
+            "reference_semantics": dict(self.reference_semantics),
+            "grounding_semantics": dict(self.grounding_semantics),
+            "claim_rules": dict(self.claim_rules),
+            "display_rules": dict(self.display_rules),
+            "environment_identity_fields": list(self.environment_identity_fields),
+            "procedure_hints": dict(self.procedure_hints),
+            "metadata": dict(self.metadata),
+            "fingerprint": self.fingerprint(),
+        }
+
+    def fingerprint(self) -> str:
+        stable = {
+            "context_id": self.context_id,
+            "substrate_id": self.substrate_id,
+            "version": self.version,
+            "object_vocabulary": self.object_vocabulary,
+            "attribute_vocabulary": self.attribute_vocabulary,
+            "task_families": self.task_families,
+            "reference_semantics": self.reference_semantics,
+            "grounding_semantics": self.grounding_semantics,
+            "claim_rules": self.claim_rules,
+            "display_rules": self.display_rules,
+            "environment_identity_fields": self.environment_identity_fields,
+            "procedure_hints": self.procedure_hints,
+            "metadata": self.metadata,
+        }
+        payload = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def compact_slice(self, utterance: str | None = None) -> dict[str, Any]:
+        task_families = [
+            {
+                key: value
+                for key, value in task.items()
+                if key in {"task_type", "canonical_pattern", "object_types", "required_attributes"}
+            }
+            for task in self.task_families
+        ]
+        return {
+            "context_id": self.context_id,
+            "substrate_id": self.substrate_id,
+            "version": self.version,
+            "fingerprint": self.fingerprint(),
+            "utterance": utterance,
+            "object_vocabulary": list(self.object_vocabulary),
+            "attribute_vocabulary": list(self.attribute_vocabulary),
+            "task_families": task_families,
+            "reference_semantics": dict(self.reference_semantics),
+            "grounding_semantics": dict(self.grounding_semantics),
+        }
+
+
+@dataclass
 class StationActiveClaims:
     """Session-scoped claims produced by grounding queries.
 

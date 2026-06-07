@@ -4,17 +4,38 @@ config:
 ---
 flowchart TD
 
+  Runtime["Runtime package<br>SubstrateAdapter + OperationalContext"]
+  Context["OperationalContext<br>domain meaning schema"]
+  Substrate["SubstrateAdapter<br>concrete HOW"]
+  Registry["CapabilityRegistry<br>contracts filtered by context"]
+  Fingerprint["Context fingerprint<br>cache/reuse boundary"]
+  Cache["Plan/template cache<br>keyed by context fingerprint"]
+  Slice["Compact context slice<br>only when LLM needs it"]
+
   Start["Operator utterance"]
   Station["OperatorStation<br>wrap as CorticalEnvelope"]
   SchemaIn["Schema gate<br>validate typed input"]
   Intent["Cortex<br>compile + verify OperatorIntent"]
   Plan["Cortex<br>build RequestPlan"]
   Snapshot["KnowledgeBase<br>claim/procedure snapshot"]
-  Ready["ReadinessGraph<br>contracts + claims + authority"]
+  Ready["ReadinessGraph<br>context + contracts + claims + authority"]
   Gate["ApprovedCommand"]
 
+  Runtime --> Context
+  Runtime --> Substrate
+  Context --> Registry
+  Substrate --> Registry
+  Context --> Fingerprint
+  Substrate --> Fingerprint
+  Fingerprint --> Cache
+  Context --> Slice
+
   Start --> Station --> SchemaIn --> Intent --> Plan
+  Slice -. "compact LLM context if needed" .-> Intent
   Plan --> Ready
+  Registry --> Ready
+  Fingerprint --> Ready
+  Cache --> Ready
   Snapshot --> Ready
   Ready --> Gate
 
@@ -24,6 +45,7 @@ flowchart TD
   Gate -->|needs evidence| EvidenceMsg["EvidenceFrame"]
   EvidenceMsg --> Sense["Sense<br>architecture WHAT"]
   Sense --> SenseHow["SubstrateAdapter<br>sensing HOW"]
+  Substrate --> SenseHow
   SenseHow --> Observation["ObservationClaim<br>source + confidence + freshness"]
   Observation --> KnowledgeWrite["KnowledgeBase<br>record claim/provenance"]
   KnowledgeWrite --> Snapshot
@@ -35,6 +57,7 @@ flowchart TD
   Gate -->|task executable| ExecTicket["ExecutionTicket"]
   ExecTicket --> Spine["Spine<br>ExecutionContract"]
   Spine --> ActionHow["SubstrateAdapter<br>action/planner/controller HOW"]
+  Substrate --> ActionHow
   ActionHow --> ExecClaim["ExecutionClaim<br>result + provenance"]
   ExecClaim --> KnowledgeWrite
 

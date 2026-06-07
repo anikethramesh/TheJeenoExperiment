@@ -1,0 +1,24 @@
+from __future__ import annotations
+
+from .minigrid_domain_helper import MiniGridDomainHelper
+from .minigrid_operational_context import MiniGridOperationalContext
+from .minigrid_substrate_adapter import MiniGridSubstrateAdapter
+from .runtime_package import RuntimePackage
+
+
+def default_minigrid_domain_helper() -> MiniGridDomainHelper:
+    context = MiniGridOperationalContext.default()
+    return MiniGridDomainHelper(context)
+
+
+def build_minigrid_runtime_package(
+    *,
+    env_id: str,
+    render_mode: str,
+) -> RuntimePackage:
+    context = MiniGridOperationalContext.default(env_id=env_id)
+    return RuntimePackage(
+        substrate=MiniGridSubstrateAdapter(env_id=env_id, render_mode=render_mode),
+        operational_context=context,
+        domain_helper=MiniGridDomainHelper(context),
+    )

@@ -30,10 +30,21 @@ Elon-algorithm rule for this repo:
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
   surface now have eval-backed enforcement before Operator Station extraction.
+- Phase 10D has a first-cut `OperationalContext`: MiniGrid domain meaning is now
+  represented as a typed situation frame with a stable fingerprint and compact
+  prompt slice.
+- Phase 10E has a first-cut `MiniGridDomainHelper`: obvious MiniGrid
+  door/color/metric display and parsing helpers moved out of the station and now
+  consume `OperationalContext`.
+- Phase 10F has a first-cut `TurnOrchestrator`: top-level turn routing and
+  pending-clarification routing moved out of the station facade.
+- Phase 10G has a first-cut `RuntimePackage`: the station can be initialized
+  with an injected substrate/context/helper/registry package instead of birthing
+  MiniGrid pieces inline.
 - Current verification signal:
-  - `python evals/eval_master.py --suite cleanup`: 22/22 passing
-  - `python evals/eval_master.py`: 51/51 passing
-  - `python -m pytest -q tests`: 210 passed
+  - `python evals/eval_master.py --suite cleanup`: 26/26 passing
+  - `python evals/eval_master.py`: 55/55 passing
+  - `python -m pytest -q tests`: 223 passed
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -419,9 +430,9 @@ Numbering rule:
 
 Current Phase 10 baseline:
 
-- `python evals/eval_master.py --suite cleanup`: 22/22 passing
-- `python evals/eval_master.py`: 51/51 passing
-- `python -m pytest -q tests`: 210 passed
+- `python evals/eval_master.py --suite cleanup`: 26/26 passing
+- `python evals/eval_master.py`: 55/55 passing
+- `python -m pytest -q tests`: 223 passed
 
 ### Phase 10A - Command/Result Authority
 
@@ -495,14 +506,12 @@ Measured outcome:
 
 Remaining 10C debt:
 
-- There is no standardized `OperationalContext` schema yet, so situation/domain
-  meaning still leaks through station helper code.
 - The station still constructs the default MiniGrid substrate/context bundle
   instead of accepting an injected non-MiniGrid runtime package.
 
 ### Phase 10D - OperationalContext Schema
 
-Status: pending.
+Status: done, first cut.
 
 Purpose: standardize the situation frame that adapts JEENOM to a domain without
 hardcoding that domain into the station.
@@ -512,7 +521,7 @@ Core distinction:
 - `SubstrateAdapter`: HOW to sense, act, render, run, reset, and bind tools.
 - `OperationalContext`: WHAT the current domain/mission means.
 
-Target schema:
+Schema:
 
 - `context_id`
 - `substrate_id`
@@ -526,72 +535,204 @@ Target schema:
 - environment identity fields
 - known procedure/composition hints
 
-Implementation target:
+Implemented:
 
 - Add `OperationalContext` as a typed schema/message.
 - Add a MiniGrid operational context implementation/manifest.
-- `OperatorStationSession` receives or builds a substrate/context pair.
-- Station paths that currently assume doors/colors/grid coordinates begin
-  reading those assumptions from the context.
+- Add `evals/phase10_operational_context_probe.py`.
+- Add `tests/test_phase10_operational_context.py`.
+- Register the Phase 10D eval in `evals/manifest.py`.
+- `OperatorStationSession` now owns `operational_context` and
+  `context_fingerprint` beside the substrate adapter.
 
 Measured outcome:
 
 - JEENOM can say what domain it is operating in without embedding that meaning
   directly in the station.
-- MiniGrid context becomes data/schema plus narrow helper methods, not scattered
-  station behavior.
+- MiniGrid door/grid/color meaning now has a named typed home:
+  `MiniGridOperationalContext`.
+- The context has a stable content fingerprint.
+- The context can provide a compact slice for prompt/planning use without
+  dumping full display/procedure metadata each turn.
+
+Remaining 10D debt:
+
+- Station paths that currently assume doors/colors/grid coordinates still need
+  to read those assumptions from the context. That is the job of 10E.
 
 ### Phase 10E - Domain Helper Extraction
 
-Status: pending.
+Status: done, first cut.
 
 Purpose: move door/color/grid-specific parsing, presentation, and grounding
 helpers out of orchestration using the `OperationalContext` from 10D.
 
-Target:
+Implemented:
 
-- Door/color/grid display leaves `OperatorStationSession`.
-- Grounding answer formatting leaves `OperatorStationSession`.
-- Orchestration stops knowing MiniGrid vocabulary beyond typed substrate
-  and context messages.
+- Added `jeenom/minigrid_domain_helper.py`.
+- Added `evals/phase10_domain_helper_probe.py`.
+- Added `tests/test_phase10_domain_helper.py`.
+- Registered the Phase 10E eval in `evals/manifest.py`.
+- Added MiniGrid color values and aliases to `MiniGridOperationalContext`.
+- `OperatorStationSession` now owns a context-bound `domain_helper`.
+- Obvious station-owned helpers were extracted:
+  color normalization, color/object parsing, metric-answer parsing,
+  entry labels, task utterance labels, ranked-door display, and color answer
+  formatting.
+
+Measured outcome:
+
+- `OperatorStationSession` no longer defines `SUPPORTED_COLORS`,
+  `_normalize_color()`, `_color_reference_in_utterance()`, `_entry_label()`,
+  `_format_ranked_doors_from_claims()`, `_color_answer()`,
+  `_is_manhattan_answer()`, `_is_euclidean_answer()`, or
+  `_metric_from_grounding_handle()`.
+- The new Phase 10E eval fails if those obvious helpers drift back into the
+  station.
+- `operator_station.py` dropped from 5609 lines after 10D to 5483 lines.
+
+Remaining 10E debt:
+
+- Some deeper MiniGrid semantics still live in `OperatorStationSession`,
+  `llm_compiler.py`, `request_planner.py`, and `intent_verifier.py`.
+- 10F extracts top-level turn orchestration; the remaining station domain
+  branches should either move into helper modules or become context-driven
+  planning logic.
 
 ### Phase 10F - Turn Orchestrator Extraction
 
-Status: pending.
+Status: done, first cut.
 
 Purpose: isolate one operator turn through intent, plan, readiness, command,
 ticket, execution/answer, and result.
 
-Target:
+Implemented:
 
-- `OperatorStationSession` becomes public facade plus session state.
-- `TurnOrchestrator` owns the repeatable control flow.
-- Existing CLI behavior and `CommandResult` compatibility stay stable.
+- Added `jeenom/turn_orchestrator.py`.
+- Added `evals/phase10_turn_orchestrator_probe.py`.
+- Added `tests/test_phase10_turn_orchestrator.py`.
+- Registered the Phase 10F eval in `evals/manifest.py`.
+- `OperatorStationSession` now owns a `turn_orchestrator`.
+- `handle_utterance()` delegates top-level turn text routing to
+  `TurnOrchestrator.handle_utterance_text()`.
+- `execute_command()` remains as a compatibility shim, but delegates execution
+  routing to `TurnOrchestrator.execute_command()`.
+- Pending clarification routing moved to
+  `TurnOrchestrator.handle_pending_clarification()`.
 
-### Phase 10G - Mock Substrate And Context Smoke
+Measured outcome:
+
+- `OperatorStationSession` no longer defines `_handle_utterance_text()` or
+  `handle_pending_clarification()`.
+- The new Phase 10F eval fails if top-level turn methods drift back into the
+  station.
+- `operator_station.py` dropped from 5483 lines after 10E to 5242 lines.
+- `turn_orchestrator.py` is 214 lines and owns the top-level turn router.
+
+Remaining 10F debt:
+
+- `TurnOrchestrator` still delegates to many station-private implementation
+  methods. The station is cleaner, but not yet a pure substrate-independent
+  shell.
+- `command_from_operator_intent()` and deeper request/intent planning branches
+  still live in the station. Those are candidates for later extraction after
+  10G proves the facade can host a non-MiniGrid substrate/context pair.
+
+### Phase 10G - Runtime Package Injection
+
+Status: done, first cut.
+
+Purpose: make the station substrate-neutral at construction time.
+
+This is a definitive architecture fix, not a mock-only smoke. The station must
+be able to receive a runtime package instead of constructing MiniGrid pieces
+internally.
+
+Implemented:
+
+- Added `jeenom/runtime_package.py`.
+- Added `jeenom/minigrid_runtime_package.py`.
+- Added `evals/phase10_runtime_package_probe.py`.
+- Added `tests/test_phase10_runtime_package.py`.
+- Registered the Phase 10G eval in `evals/manifest.py`.
+- Added a typed runtime package/bundle containing:
+  - `SubstrateAdapter`
+  - `OperationalContext`
+  - domain helper
+  - capability registry
+- Added a MiniGrid runtime package factory as the default path.
+- `OperatorStationSession` accepts an injected `runtime_package`.
+- `OperatorStationSession` no longer directly births MiniGrid substrate/context
+  pieces except through the default MiniGrid runtime factory.
+- Add a tiny injected non-MiniGrid runtime fixture only as the eval vehicle, not
+  as the architectural achievement.
+
+Measured outcome:
+
+- Station can be initialized with an injected runtime package.
+- The default MiniGrid CLI path still works.
+- Substrate HOW is behind `SubstrateAdapter`.
+- Domain meaning is behind `OperationalContext` and domain helper.
+- `OperatorStationSession` construction no longer hardcodes
+  `MiniGridSubstrateAdapter`, `MiniGridOperationalContext`, and
+  `MiniGridDomainHelper` inline.
+- The new Phase 10G eval fails if inline MiniGrid runtime construction drifts
+  back into the station.
+- All side effects still require typed tickets.
+- All public turns still return `CommandResult`.
+- `operator_station.py` is 5246 lines after 10G. This slice prioritizes
+  substrate-neutral construction over line-count reduction.
+
+Remaining 10G debt:
+
+- `classify_utterance()` still uses a default MiniGrid domain helper for legacy
+  deterministic parsing. That is not construction coupling, but 10H should move
+  the planning/verifier boundary toward context-driven domain semantics.
+
+### Phase 10H - Context-Driven Planning Boundary
 
 Status: pending.
 
-Purpose: prove the extracted kernel is not MiniGrid-only and not MiniGrid-context
-only.
+Purpose: remove the blocking MiniGrid/domain assumptions from the planning and
+verification boundary before moving to Phase 11.
+
+This is the final Phase 10 cleanup step. It should not try to make the codebase
+beautiful or small. It should only remove domain coupling that blocks
+substrate-independent cognition.
 
 Target:
 
-- Add a minimal non-MiniGrid substrate adapter and operational context.
-- Run one no-render cognition loop against the pair.
-- Do not build a full robot or ARC port in this phase.
+- `request_planner.py` stops hardcoding the core meanings of door/color/distance
+  where those can be read from `OperationalContext` or the domain helper.
+- `intent_verifier.py` stops hardcoding the core MiniGrid signal vocabulary where
+  those can be read from `OperationalContext` or the domain helper.
+- Remaining station selector/grounding branches use context/domain helper for
+  core object, attribute, metric, and display semantics.
+- MiniGrid-specific LLM prompt examples may remain in the MiniGrid compiler
+  profile; that is not Phase 10 cleanup debt unless it leaks into the
+  architecture-neutral path.
 
 Acceptance criteria:
 
-- `OperatorStationSession` is a thin facade.
-- Orchestration has no direct MiniGrid imports.
-- Substrate HOW is behind `SubstrateAdapter`.
-- MiniGrid-specific formatting lives outside the kernel.
-- All side effects still require typed tickets.
-- All public turns still return `CommandResult`.
-- `python evals/eval_master.py --suite cleanup` passes.
-- `python evals/eval_master.py` passes.
-- `python -m pytest -q tests` passes.
+- Context/domain helper is passed into the planner/verifier boundary where
+  relevant.
+- The core MiniGrid meanings `door`, `color`, `manhattan`, and `euclidean` are
+  no longer duplicated as control-plane assumptions across station, planner, and
+  verifier.
+- Unsupported or non-MiniGrid contexts fail honestly instead of silently using
+  MiniGrid defaults.
+- All current evals and tests pass.
+- Add a Phase 10H eval that fails if the worst hardcoded domain assumptions
+  drift back into the planning boundary.
+
+Phase 10 stop rule:
+
+- After 10H, close Phase 10 and move to Phase 11.
+- Do not add a 10I for station slimming now.
+- `operator_station.py` may remain large if the blocking architecture boundaries
+  are enforced.
+- Repo/file-size minimization becomes a later cleanup phase after the prototype
+  proves more capability.
 
 ## Phase 11 - Minimal Representation And Evidence Planning
 

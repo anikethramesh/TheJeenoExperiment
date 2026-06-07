@@ -78,12 +78,15 @@ Current architectural debt:
 - Phase 10A moved command/result trace construction into `CommandAuthority`;
   Phase 10B moved execution, raw-motor, and memory-write ticket minting into
   `SideEffectAuthority`; Phase 10C introduced `SubstrateAdapter` and moved the
-  first MiniGrid env/runtime HOW paths into `MiniGridSubstrateAdapter`.
-- Phase 10D will standardize `OperationalContext` so MiniGrid door/grid/color
-  meaning is no longer scattered through the station.
+  first MiniGrid env/runtime HOW paths into `MiniGridSubstrateAdapter`; Phase
+  10D added the typed `OperationalContext` and `MiniGridOperationalContext`;
+  Phase 10E added a context-bound `MiniGridDomainHelper`; Phase 10F added
+  `TurnOrchestrator` for top-level turn routing; Phase 10G added
+  `RuntimePackage` injection.
 - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest.
-- Request planning, primitive validation fixtures, and many station formatters
-  still contain MiniGrid/door/grid assumptions.
+- Request planning, primitive validation fixtures, intent verification, and
+  deeper station branches still need to consume `OperationalContext` instead of
+  carrying direct MiniGrid/door/grid assumptions.
 - Contract preflight is represented and gated, but not yet a general executable
   proof system for arbitrary robot stacks.
 - Robotics-like and ARC-style substrate pressure remain future work.
@@ -183,16 +186,16 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Current baseline after Phase 10C:
+Current baseline after Phase 10G:
 
-- `python evals/eval_master.py --suite cleanup`: 22/22 passing.
-- `python evals/eval_master.py`: 51/51 passing.
-- `python -m pytest -q tests`: 210 passed.
+- `python evals/eval_master.py --suite cleanup`: 26/26 passing.
+- `python evals/eval_master.py`: 55/55 passing.
+- `python -m pytest -q tests`: 223 passed.
 
 Roadmap:
 
-- Phase 10: extract the operator station, substrate adapter, and operational
-  context boundaries.
+- Phase 10: finish operator station architecture boundaries with runtime package
+  injection and context-driven planning; do not chase repo slimming here.
 - Phase 11: add the minimal evidence-planning loop.
 - Phase 12: demonstrate the same cognition loop on MiniGrid and a robotics-like
   substrate.

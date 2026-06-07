@@ -59,6 +59,10 @@ EVAL_SPECS: list[dict[str, object]] = [
     {"file": "phase10_command_authority_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "phase10_side_effect_authority_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "phase10_substrate_adapter_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase10_operational_context_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase10_domain_helper_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase10_turn_orchestrator_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "phase10_runtime_package_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "request_plan_probe.py", "suites": ["architecture"]},
 ]
 
