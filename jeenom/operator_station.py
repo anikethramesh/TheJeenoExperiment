@@ -20,16 +20,15 @@ from .intent_verifier import IntentVerificationResult, IntentVerifier, default_v
 from .cortex import Cortex
 from .llm_compiler import CompilerBackend, SmokeTestCompiler, build_compiler, canonical_task_params
 from .memory import OperationalMemory
-from .minigrid_envs import ensure_custom_minigrid_envs_registered
-from .minigrid_adapter import MiniGridAdapter
+from .minigrid_substrate_adapter import MiniGridSubstrateAdapter
 from .plan_cache import PlanCache
 from .knowledge_base import KnowledgeBase, NamedConcept
 from .mismatch import MismatchDetector, OperationalMismatch, default_detector
 from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
-from .primitive_library import ACTION_PRIMITIVES, TASK_PRIMITIVES
 from .repair_loop import RepairEvent, RepairLoop
 from .representation import RepresentationStore
 from .side_effect_authority import SideEffectAuthority
+from .substrate_adapter import SubstrateAdapter
 from .schemas import (
     ApprovedCommand,
     ArbitrationTrace,
@@ -52,9 +51,6 @@ from .schemas import (
     TargetSelector,
     TaskRequest,
 )
-from . import run_demo
-from .sense import MiniGridSense
-from .spine import MiniGridSpine
 
 
 SUPPORTED_COLORS = ("red", "green", "blue", "yellow", "purple", "grey", "gray")
@@ -375,7 +371,6 @@ class OperatorStationSession:
         verbose: bool = False,
         request_plan_reuse_cache: PlanReuseCache | None = None,
     ) -> None:
-        ensure_custom_minigrid_envs_registered()
         self.env_id = env_id
         self.seed = seed
         self.compiler_name = compiler_name
@@ -386,7 +381,11 @@ class OperatorStationSession:
         self.max_loops = max_loops
         self.verbose = verbose
         self.last_result: dict[str, Any] | None = None
-        self.capability_registry = CapabilityRegistry.minigrid_default()
+        self.substrate: SubstrateAdapter = MiniGridSubstrateAdapter(
+            env_id=self.env_id,
+            render_mode=self.render_mode,
+        )
+        self.capability_registry = self.substrate.capability_registry()
         # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
         self.knowledge_base = KnowledgeBase(
             storage_path=self.memory.memory_dir / "knowledge_base.json"
@@ -398,28 +397,33 @@ class OperatorStationSession:
         self.command_authority = CommandAuthority(station_name="OperatorStationSession")
         self.side_effect_authority = SideEffectAuthority(source_name="OperatorStationSession")
         self.cortex = Cortex(self.memory, self.compiler, plan_cache=self.plan_cache)
-        self.sense = MiniGridSense(self.memory, self.compiler, plan_cache=self.plan_cache)
-        self.spine = MiniGridSpine(self.memory, None, self.compiler, plan_cache=self.plan_cache)
+        self.sense = self.substrate.create_sense(
+            self.memory,
+            self.compiler,
+            self.plan_cache,
+        )
+        self.spine = self.substrate.create_spine(
+            self.memory,
+            self.compiler,
+            self.plan_cache,
+        )
         self.prewarm_compiler = SmokeTestCompiler()
         self.prewarm_cortex = Cortex(
             self.memory,
             self.prewarm_compiler,
             plan_cache=self.plan_cache,
         )
-        self.prewarm_sense = MiniGridSense(
+        self.prewarm_sense = self.substrate.create_sense(
             self.memory,
             self.prewarm_compiler,
-            plan_cache=self.plan_cache,
+            self.plan_cache,
         )
-        self.prewarm_spine = MiniGridSpine(
+        self.prewarm_spine = self.substrate.create_spine(
             self.memory,
-            None,
             self.prewarm_compiler,
-            plan_cache=self.plan_cache,
+            self.plan_cache,
         )
         self.startup_prewarm_summary: dict[str, Any] | None = None
-        self.preview_adapter: MiniGridAdapter | None = None
-        self.task_adapter: MiniGridAdapter | None = None
         self.pending_clarification: PendingClarification | None = None
         self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
         self.last_execution_ticket: ExecutionTicket | None = None
@@ -455,6 +459,14 @@ class OperatorStationSession:
             return
         self.representation.set_active_claims(claims)
 
+    @property
+    def preview_adapter(self) -> Any:
+        return getattr(self.substrate, "preview_adapter", None)
+
+    @property
+    def task_adapter(self) -> Any:
+        return getattr(self.substrate, "task_adapter", None)
+
     def log(self, message: str) -> None:
         if self.verbose:
             print(f"[station] {message}", flush=True)
@@ -486,7 +498,7 @@ class OperatorStationSession:
         task = self.compose_known_task(instruction)
         procedure = self.compose_known_procedure(task)
         self.prewarm_cortex.onboard_task(task, procedure)
-        summary = run_demo.prewarm_jit_cache(
+        summary = self.substrate.prewarm_templates(
             task_request=task,
             procedure_recipe=procedure,
             cortex=self.prewarm_cortex,
@@ -4552,21 +4564,7 @@ class OperatorStationSession:
             self.active_claims = None
             self.representation.clear_scene_model()
             self.last_environment_invalidation_reason = "environment_identity_changed"
-        adapter = self.preview_adapter or self.task_adapter
-        close_after = False
-        if adapter is None:
-            env = run_demo.build_env(self.env_id, "none")
-            adapter = MiniGridAdapter(env)
-            adapter.reset(seed=self.seed)
-            close_after = True
-        try:
-            observation = adapter.observe()
-            self.sense.sense_idle_scene(
-                observation, env_id=self.env_id, seed=self.seed
-            )
-        finally:
-            if close_after:
-                adapter.close()
+        self.substrate.sense_idle_scene(self.sense, seed=self.seed)
         scene = self.memory.scene_model
         if scene is not None:
             self.current_environment_identity = self._build_environment_identity(scene)
@@ -4811,37 +4809,22 @@ class OperatorStationSession:
             self.log("render preview skipped because render mode is not human")
             return
         self.log("opening idle render preview")
-        self.close_preview()
-        env = run_demo.build_env(self.env_id, self.render_mode)
-        self.preview_adapter = MiniGridAdapter(env)
-        self.preview_adapter.reset(seed=self.seed)
-        try:
-            env.render()
-        except Exception:  # noqa: BLE001
-            pass
+        self.substrate.open_preview(seed=self.seed)
 
     def _pump_render_window(self) -> None:
-        adapter = self.preview_adapter or self.task_adapter
-        if adapter is None:
-            return
-        try:
-            adapter.env.render()
-        except Exception:  # noqa: BLE001
-            pass
+        self.substrate.pump_render_window()
 
     def close_preview(self) -> None:
-        if self.preview_adapter is None:
+        if not self.substrate.has_preview_window():
             return
         self.log("closing idle render preview")
-        self.preview_adapter.close()
-        self.preview_adapter = None
+        self.substrate.close_preview()
 
     def close_task_window(self) -> None:
-        if self.task_adapter is None:
+        if not self.substrate.has_task_window():
             return
         self.log("closing previous task render window")
-        self.task_adapter.close()
-        self.task_adapter = None
+        self.substrate.close_task_window()
 
     def _record_rejected_raw_execution_attempt(self, value: Any) -> None:
         if not isinstance(value, str):
@@ -4878,33 +4861,18 @@ class OperatorStationSession:
                 f"type={task_override.task_type} params={task_override.params}"
             )
             self.log(f"composed procedure steps={procedure_override.steps}")
-        render_adapter = self.preview_adapter
-        skip_reset = False
-        self.preview_adapter = None
-        if render_adapter is None:
-            self.close_task_window()
-        elif self.task_adapter is not None and self.task_adapter is not render_adapter:
-            self.close_task_window()
-        self.last_result = run_demo.run_episode(
+        self.last_result = self.substrate.run_task_episode(
             instruction=instruction,
             compiler_name=self.compiler_name,
             compiler=self.compiler,
-            env_id=self.env_id,
             seed=self.seed,
             max_loops=self.max_loops,
-            render_mode=self.render_mode,
             memory=self.memory,
             plan_cache=self.plan_cache,
-            use_cache=self.plan_cache.enabled,
-            prewarm=True,
-            keep_render_open=self.render_mode == "human",
-            render_adapter=render_adapter,
-            skip_reset=skip_reset,
             progress_callback=self._progress_callback,
             task_override=task_override,
             procedure_override=procedure_override,
         )
-        self.task_adapter = self.last_result.pop("_render_adapter", None)
         if self.last_result["final_state"]["task_complete"]:
             self.store_successful_task_memory(self.last_result)
         self.log(
@@ -5356,10 +5324,10 @@ class OperatorStationSession:
 
     def _run_motor_command(self, action_name: str, count: int, original_utterance: str) -> str:
         """Authorize and execute an explicit low-level motor primitive."""
-        if action_name not in ACTION_PRIMITIVES:
+        if not self.substrate.is_action_known(action_name):
             return (
                 f"ERROR: Unknown motor action '{action_name}'.\n"
-                f"Known actions: {sorted(ACTION_PRIMITIVES)}"
+                f"Known actions: {self.substrate.known_action_names()}"
             )
         ticket = self._raw_motor_ticket_for_command(
             original_utterance,
@@ -5375,41 +5343,14 @@ class OperatorStationSession:
         self.last_raw_motor_ticket = ticket
         action_name = ticket.action_name
         count = ticket.repeat_count
-        if action_name not in ACTION_PRIMITIVES:
+        if not self.substrate.is_action_known(action_name):
             return (
                 f"ERROR: Unknown motor action '{action_name}'.\n"
-                f"Known actions: {sorted(ACTION_PRIMITIVES)}"
+                f"Known actions: {self.substrate.known_action_names()}"
             )
         actions = [action_name] * count
         self.log(f"motor_execute: {action_name} × {count}")
-        if self.render_mode == "human":
-            # Act on the persistent session adapter; no reset, window stays open.
-            adapter = self.task_adapter or self.preview_adapter
-            if adapter is None:
-                env = run_demo.build_env(self.env_id, self.render_mode)
-                adapter = MiniGridAdapter(env)
-                adapter.reset(seed=self.seed)
-                self.task_adapter = adapter
-            executed: list[str] = []
-            for a in actions:
-                spec = ACTION_PRIMITIVES[a]
-                adapter.act(int(spec.runtime_value))
-                executed.append(a)
-            result: dict[str, Any] = {
-                "success": True,
-                "task_complete": True,
-                "actions_executed": executed,
-                "steps_taken": len(executed),
-                "final_state": {"task_complete": True},
-                "task": {"instruction": " ".join(actions), "task_type": "motor_command"},
-            }
-        else:
-            result = run_demo.run_motor_sequence(
-                env_id=self.env_id,
-                seed=self.seed,
-                render_mode=self.render_mode,
-                actions=actions,
-            )
+        result = self.substrate.run_motor_actions(seed=self.seed, actions=actions)
         self.last_result = result
         label = action_name.replace("_", " ")
         return f"MOTOR COMPLETE ({label} × {count}): {result.get('steps_taken', count)} steps executed."

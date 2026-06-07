@@ -31,9 +31,9 @@ Elon-algorithm rule for this repo:
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
   surface now have eval-backed enforcement before Operator Station extraction.
 - Current verification signal:
-  - `python evals/eval_master.py --suite cleanup`: 21/21 passing
-  - `python evals/eval_master.py`: 50/50 passing
-  - `python -m pytest -q tests`: 208 passed
+  - `python evals/eval_master.py --suite cleanup`: 22/22 passing
+  - `python evals/eval_master.py`: 51/51 passing
+  - `python -m pytest -q tests`: 210 passed
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -419,9 +419,9 @@ Numbering rule:
 
 Current Phase 10 baseline:
 
-- `python evals/eval_master.py --suite cleanup`: 21/21 passing
-- `python evals/eval_master.py`: 50/50 passing
-- `python -m pytest -q tests`: 208 passed
+- `python evals/eval_master.py --suite cleanup`: 22/22 passing
+- `python evals/eval_master.py`: 51/51 passing
+- `python -m pytest -q tests`: 210 passed
 
 ### Phase 10A - Command/Result Authority
 
@@ -468,32 +468,94 @@ Measured outcome:
 
 ### Phase 10C - Substrate Adapter Boundary
 
-Status: pending.
+Status: done, first cut.
 
 Purpose: move MiniGrid HOW out of the station facade.
 
-Target:
+Implemented:
 
-- MiniGrid env ownership leaves `OperatorStationSession`.
-- Scene construction, reset, raw motor execution, prewarm, and task runtime
-  become adapter responsibilities.
-- The extracted orchestration path must not import MiniGrid directly.
+- Added `jeenom/substrate_adapter.py` as the architecture-level HOW protocol.
+- Added `jeenom/minigrid_substrate_adapter.py` as the MiniGrid HOW binding.
+- Added `evals/phase10_substrate_adapter_probe.py`.
+- Added `tests/test_phase10_substrate_adapter.py`.
+- `OperatorStationSession` now gets sense, spine, capability registry, preview,
+  scene observation, JIT prewarm, task runtime, and raw motor execution through
+  `self.substrate`.
+- Compatibility properties expose `preview_adapter` and `task_adapter` for
+  older tests without moving ownership back into the station.
 
-### Phase 10D - MiniGrid Domain Helpers
+Measured outcome:
+
+- `OperatorStationSession` no longer imports `MiniGridAdapter`, `MiniGridSense`,
+  `MiniGridSpine`, or `ensure_custom_minigrid_envs_registered`.
+- `OperatorStationSession` no longer calls `run_demo.build_env`,
+  `run_demo.run_episode`, `run_demo.run_motor_sequence`, or
+  `run_demo.prewarm_jit_cache` directly.
+- `operator_station.py` dropped from roughly 5665 lines to 5606 lines.
+
+Remaining 10C debt:
+
+- There is no standardized `OperationalContext` schema yet, so situation/domain
+  meaning still leaks through station helper code.
+- The station still constructs the default MiniGrid substrate/context bundle
+  instead of accepting an injected non-MiniGrid runtime package.
+
+### Phase 10D - OperationalContext Schema
 
 Status: pending.
 
-Purpose: move door/color/grid-specific presentation and grounding helpers out of
-orchestration.
+Purpose: standardize the situation frame that adapts JEENOM to a domain without
+hardcoding that domain into the station.
+
+Core distinction:
+
+- `SubstrateAdapter`: HOW to sense, act, render, run, reset, and bind tools.
+- `OperationalContext`: WHAT the current domain/mission means.
+
+Target schema:
+
+- `context_id`
+- `substrate_id`
+- object vocabulary and attribute vocabulary
+- task families and canonical task mappings
+- reference semantics such as same, other, closest, farthest, delivery target
+- grounding semantics such as distance metrics, visibility model, ranking, and
+  tie policy
+- claim mapping rules and required provenance fields
+- operator-facing display rules
+- environment identity fields
+- known procedure/composition hints
+
+Implementation target:
+
+- Add `OperationalContext` as a typed schema/message.
+- Add a MiniGrid operational context implementation/manifest.
+- `OperatorStationSession` receives or builds a substrate/context pair.
+- Station paths that currently assume doors/colors/grid coordinates begin
+  reading those assumptions from the context.
+
+Measured outcome:
+
+- JEENOM can say what domain it is operating in without embedding that meaning
+  directly in the station.
+- MiniGrid context becomes data/schema plus narrow helper methods, not scattered
+  station behavior.
+
+### Phase 10E - Domain Helper Extraction
+
+Status: pending.
+
+Purpose: move door/color/grid-specific parsing, presentation, and grounding
+helpers out of orchestration using the `OperationalContext` from 10D.
 
 Target:
 
 - Door/color/grid display leaves `OperatorStationSession`.
 - Grounding answer formatting leaves `OperatorStationSession`.
 - Orchestration stops knowing MiniGrid vocabulary beyond typed substrate
-  messages.
+  and context messages.
 
-### Phase 10E - Turn Orchestrator Extraction
+### Phase 10F - Turn Orchestrator Extraction
 
 Status: pending.
 
@@ -506,16 +568,17 @@ Target:
 - `TurnOrchestrator` owns the repeatable control flow.
 - Existing CLI behavior and `CommandResult` compatibility stay stable.
 
-### Phase 10F - Mock Substrate Smoke
+### Phase 10G - Mock Substrate And Context Smoke
 
 Status: pending.
 
-Purpose: prove the extracted kernel is not MiniGrid-only.
+Purpose: prove the extracted kernel is not MiniGrid-only and not MiniGrid-context
+only.
 
 Target:
 
-- Add a minimal non-MiniGrid manifest/adapter.
-- Run one no-render cognition loop against it.
+- Add a minimal non-MiniGrid substrate adapter and operational context.
+- Run one no-render cognition loop against the pair.
 - Do not build a full robot or ARC port in this phase.
 
 Acceptance criteria:
@@ -528,7 +591,6 @@ Acceptance criteria:
 - All public turns still return `CommandResult`.
 - `python evals/eval_master.py --suite cleanup` passes.
 - `python evals/eval_master.py` passes.
-- `python -m pytest -q tests` passes.
 - `python -m pytest -q tests` passes.
 
 ## Phase 11 - Minimal Representation And Evidence Planning

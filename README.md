@@ -23,7 +23,7 @@ for three simple boundaries:
 
 The current architecture task is Phase 10 extraction: shrink
 `OperatorStationSession` into a substrate-independent orchestration facade plus
-session, substrate, and domain adapters.
+session, substrate, and operational-context adapters.
 
 The guiding split is:
 
@@ -31,11 +31,15 @@ The guiding split is:
   stopping rules.
 - **WHAT**: JEENOM's architecture-level intent, evidence needs, claims, plans,
   procedures, readiness, and execution authority.
+- **WHERE/MEANING**: `OperationalContext`, the typed situation frame describing
+  objects, task families, references, grounding semantics, claim rules, and
+  display rules for the current domain.
 - **HOW**: substrate/tool bindings such as camera frames, lidar scans, MiniGrid
   observations, ARC game states, path planners, controllers, `env.step`, and
   policies.
 
 Concrete HOW belongs behind substrate adapters.
+Domain meaning belongs behind `OperationalContext`.
 
 Implemented so far:
 
@@ -67,14 +71,16 @@ Current architectural debt:
 
 - `OperatorStationSession` still owns too many internals:
   conversation flow, deterministic fast paths, LLM intent routing, readiness
-  dispatch, MiniGrid adapter ownership, synthesis/repair, memory writes, and
-  runtime task execution.
+  dispatch, synthesis/repair, memory writes, and domain-specific formatting.
 - Phase 9E added a thin `RepresentationStore`, `ClaimRecord`, and
   `KnowledgeSnapshot`; deeper station extraction still needs to move more
   orchestration behind clean modules.
 - Phase 10A moved command/result trace construction into `CommandAuthority`;
   Phase 10B moved execution, raw-motor, and memory-write ticket minting into
-  `SideEffectAuthority`. Substrate HOW still needs extraction.
+  `SideEffectAuthority`; Phase 10C introduced `SubstrateAdapter` and moved the
+  first MiniGrid env/runtime HOW paths into `MiniGridSubstrateAdapter`.
+- Phase 10D will standardize `OperationalContext` so MiniGrid door/grid/color
+  meaning is no longer scattered through the station.
 - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest.
 - Request planning, primitive validation fixtures, and many station formatters
   still contain MiniGrid/door/grid assumptions.
@@ -177,15 +183,16 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Current baseline after Phase 10B:
+Current baseline after Phase 10C:
 
-- `python evals/eval_master.py --suite cleanup`: 21/21 passing.
-- `python evals/eval_master.py`: 50/50 passing.
-- `python -m pytest -q tests`: 208 passed.
+- `python evals/eval_master.py --suite cleanup`: 22/22 passing.
+- `python evals/eval_master.py`: 51/51 passing.
+- `python -m pytest -q tests`: 210 passed.
 
 Roadmap:
 
-- Phase 10: extract the operator station and substrate adapter boundary.
+- Phase 10: extract the operator station, substrate adapter, and operational
+  context boundaries.
 - Phase 11: add the minimal evidence-planning loop.
 - Phase 12: demonstrate the same cognition loop on MiniGrid and a robotics-like
   substrate.

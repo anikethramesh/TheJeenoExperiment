@@ -10,6 +10,7 @@ from .representation import RepresentationStore
 from .sense import MiniGridSense
 from .side_effect_authority import SideEffectAuthority
 from .spine import MiniGridSpine
+from .substrate_adapter import SubstrateAdapter
 
 __all__ = [
     "Cortex",
@@ -24,6 +25,7 @@ __all__ = [
     "RepresentationStore",
     "SideEffectAuthority",
     "SmokeTestCompiler",
+    "SubstrateAdapter",
     "build_compiler",
     "classify_utterance",
 ]
