@@ -594,6 +594,7 @@ class SmokeTestCompiler(CompilerBackend):
         _SUPERLATIVE_TERMS = frozenset([
             "farthest", "furthest", "most distant", "most far",
             "farthest away", "furthest away", "maximum distance",
+            "highest", "largest", "greatest", "maximum", "max distance",
         ])
         metric = (
             "euclidean" if "euclidean" in normalized

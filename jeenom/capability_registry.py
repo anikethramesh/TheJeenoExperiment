@@ -299,7 +299,19 @@ class CapabilityRegistry:
         """Return the validated callable for a synthesized primitive, or None."""
         return self._synthesized_callables.get(handle)
 
-    def register_dynamic(self, handle: str, description: str, fn: Any) -> bool:
+    def register_dynamic(
+        self,
+        handle: str,
+        description: str,
+        fn: Any,
+        *,
+        inputs: list[str] | None = None,
+        outputs: list[str] | None = None,
+        side_effects: list[str] | None = None,
+        safety_class: str = "query",
+        authority_level: str = "none",
+        validation_hooks: list[str] | None = None,
+    ) -> bool:
         """Register a brand-new synthesized primitive that was not pre-declared.
 
         Unlike register_synthesized, this creates the spec from scratch rather than
@@ -317,12 +329,15 @@ class CapabilityRegistry:
             primitive_type=layer,
             layer=layer,
             description=description + " [synthesized]",
-            inputs=["scene.door_candidates", "agent_pose"],
-            outputs=["grounded_target", "distance"],
-            side_effects=[],
+            inputs=inputs or ["scene.door_candidates", "agent_pose"],
+            outputs=outputs or ["grounded_target", "distance"],
+            side_effects=side_effects or [],
             implementation_status="implemented",
             safe_to_synthesize=False,
             runtime_binding={"kind": "python_synthesized", "value": handle},
+            safety_class=safety_class,
+            authority_level=authority_level,
+            validation_hooks=validation_hooks or [],
         )
         self._by_name[handle] = new_spec
         self.manifest.primitives.append(new_spec)

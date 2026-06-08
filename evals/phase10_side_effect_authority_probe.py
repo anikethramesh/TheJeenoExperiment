@@ -9,14 +9,10 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from harness import ROOT, emit_result, make_session
+from harness import ROOT, ast_function_call_names, ast_source, emit_result, make_session
 
 
 TICKET_CONSTRUCTORS = {"ExecutionTicket", "RawMotorTicket", "MemoryWriteTicket"}
-
-
-def _source(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
 
 
 def _call_hits(tree: ast.AST, names: set[str]) -> list[tuple[int, str]]:
@@ -32,22 +28,6 @@ def _call_hits(tree: ast.AST, names: set[str]) -> list[tuple[int, str]]:
         if called in names:
             hits.append((node.lineno, called))
     return hits
-
-
-def _function_call_names(tree: ast.AST, name: str) -> list[str]:
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef) or node.name != name:
-            continue
-        calls: list[str] = []
-        for child in ast.walk(node):
-            if not isinstance(child, ast.Call):
-                continue
-            if isinstance(child.func, ast.Name):
-                calls.append(child.func.id)
-            elif isinstance(child.func, ast.Attribute):
-                calls.append(child.func.attr)
-        return calls
-    return []
 
 
 def _sample_task_plan_and_graph():
@@ -95,21 +75,21 @@ def main() -> int:
     metrics["side_effect_authority_class_exists"] = authority_cls is not None
 
     if side_effect_authority is not None:
-        source = _source("jeenom/side_effect_authority.py")
+        source = ast_source("jeenom/side_effect_authority.py")
         metrics["side_effect_authority_has_no_operator_station_dependency"] = (
             "operator_station" not in source
         )
     else:
         metrics["side_effect_authority_has_no_operator_station_dependency"] = False
 
-    station_tree = ast.parse(_source("jeenom/operator_station.py"))
+    station_tree = ast.parse(ast_source("jeenom/operator_station.py"))
     constructor_hits = _call_hits(station_tree, TICKET_CONSTRUCTORS)
     details["station_direct_ticket_constructor_hits"] = constructor_hits
     metrics["station_does_not_construct_side_effect_tickets"] = not constructor_hits
 
-    execution_calls = _function_call_names(station_tree, "_execution_ticket_from_plan")
-    raw_motor_calls = _function_call_names(station_tree, "_raw_motor_ticket_from_plan")
-    memory_calls = _function_call_names(station_tree, "_memory_write_ticket_for_payload")
+    execution_calls = ast_function_call_names(station_tree, "_execution_ticket_from_plan")
+    raw_motor_calls = ast_function_call_names(station_tree, "_raw_motor_ticket_from_plan")
+    memory_calls = ast_function_call_names(station_tree, "_memory_write_ticket_for_payload")
     details["execution_ticket_from_plan_calls"] = sorted(set(execution_calls))
     details["raw_motor_ticket_from_plan_calls"] = sorted(set(raw_motor_calls))
     details["memory_write_ticket_for_payload_calls"] = sorted(set(memory_calls))

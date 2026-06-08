@@ -1,6 +1,7 @@
 """Shared helpers for JEENOM eval probes."""
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import tempfile
@@ -70,6 +71,63 @@ def has_meaningful_plan(session: Any) -> bool:
         and bool(getattr(plan, "steps", []))
         and getattr(graph, "graph_status", None) is not None
     )
+
+
+def make_grounding_plan(
+    *,
+    operation: str,
+    metric: str | None,
+    order: str | None = None,
+    ordinal: int | None = None,
+    distance_value: int | None = None,
+    comparison: str | None = None,
+    required_capabilities: list[str] | None = None,
+    answer_fields: list[str] | None = None,
+) -> dict:
+    primitive_handle = None
+    if metric is not None:
+        primitive_handle = f"grounding.all_doors.ranked.{metric}.agent"
+    return {
+        "object_type": "door",
+        "operation": operation,
+        "primitive_handle": primitive_handle,
+        "metric": metric,
+        "reference": "agent" if metric else None,
+        "order": order,
+        "ordinal": ordinal,
+        "color": None,
+        "exclude_colors": [],
+        "distance_value": distance_value,
+        "comparison": comparison,
+        "tie_policy": "clarify",
+        "answer_fields": answer_fields or [],
+        "required_capabilities": required_capabilities or (
+            [primitive_handle] if primitive_handle else []
+        ),
+        "preserved_constraints": [],
+    }
+
+
+def ast_source(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def ast_call_names(tree: ast.AST) -> list[str]:
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                names.append(node.func.attr)
+            elif isinstance(node.func, ast.Name):
+                names.append(node.func.id)
+    return names
+
+
+def ast_function_call_names(tree: ast.AST, name: str) -> list[str]:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast_call_names(node)
+    return []
 
 
 def emit_result(

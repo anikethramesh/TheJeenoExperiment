@@ -8,45 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from harness import make_grounding_plan
+
 from jeenom.capability_registry import CapabilityRegistry
 from jeenom.readiness_graph import evaluate_request_plan
 from jeenom.request_planner import build_request_plan
 from jeenom.schemas import OperatorIntent
 
-
-def _grounding_plan(
-    *,
-    operation: str,
-    metric: str | None,
-    order: str | None = None,
-    ordinal: int | None = None,
-    distance_value: int | None = None,
-    comparison: str | None = None,
-    required_capabilities: list[str] | None = None,
-    answer_fields: list[str] | None = None,
-) -> dict:
-    primitive_handle = None
-    if metric is not None:
-        primitive_handle = f"grounding.all_doors.ranked.{metric}.agent"
-    return {
-        "object_type": "door",
-        "operation": operation,
-        "primitive_handle": primitive_handle,
-        "metric": metric,
-        "reference": "agent" if metric else None,
-        "order": order,
-        "ordinal": ordinal,
-        "color": None,
-        "exclude_colors": [],
-        "distance_value": distance_value,
-        "comparison": comparison,
-        "tie_policy": "clarify",
-        "answer_fields": answer_fields or [],
-        "required_capabilities": required_capabilities or (
-            [primitive_handle] if primitive_handle else []
-        ),
-        "preserved_constraints": [],
-    }
+_grounding_plan = make_grounding_plan
 
 
 CASES = [

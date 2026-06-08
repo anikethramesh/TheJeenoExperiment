@@ -31,7 +31,8 @@ SIGNAL_DISTANCE_VALUE = "distance_value"  # object with distance N
 _SUPERLATIVE_TERMS: frozenset[str] = frozenset([
     "farthest", "furthest", "most distant", "most far",
     "farthest away", "furthest away", "longest way", "maximum distance",
-    "max distance", "least close", "least nearest",
+    "max distance", "highest", "largest", "greatest", "maximum",
+    "least close", "least nearest",
 ])
 
 _ORDINAL_PATTERN: re.Pattern[str] = re.compile(

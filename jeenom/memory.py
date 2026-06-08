@@ -50,6 +50,7 @@ class OperationalMemory:
             "delivery_target": None,
             "last_task_type": None,
             "last_instruction": None,
+            "primitive_definitions": {},
         }
         self.knowledge.update(self._load_knowledge())
         self._normalize_target_knowledge()
@@ -181,6 +182,7 @@ class OperationalMemory:
                 "delivery_target",
                 "last_task_type",
                 "last_instruction",
+                "primitive_definitions",
             ]
         ]
         self.knowledge_path.write_text("\n".join(lines) + "\n")

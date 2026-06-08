@@ -29,11 +29,22 @@ def main() -> int:
             and explicit.last_readiness_graph.graph_status == "executable"
         )
 
-        task_like = make_session()
-        task_like_response = task_like.handle_utterance("pick up the red key")
-        metrics["task_like_request_does_not_motor_execute"] = not is_motor_execution(task_like_response)
-        metrics["task_like_request_gets_no_raw_motor_ticket"] = getattr(task_like, "last_raw_motor_ticket", None) is None
-        details["task_like_response"] = first_line(task_like_response)
+        task_like_utterances = [
+            "pick up the red key",
+            "grab the key",
+            "toggle the blue door",
+        ]
+        last_tl_session = None
+        for utterance in task_like_utterances:
+            last_tl_session = make_session()
+            tl_response = last_tl_session.handle_utterance(utterance)
+            key = utterance.replace(" ", "_")
+            metrics[f"{key}_does_not_motor_execute"] = not is_motor_execution(tl_response)
+        metrics["task_like_request_gets_no_raw_motor_ticket"] = (
+            last_tl_session is not None
+            and getattr(last_tl_session, "last_raw_motor_ticket", None) is None
+        )
+        details["task_like_response"] = first_line(tl_response)
 
     metrics["raw_motor_ticket_gate_holds"] = all(metrics.values())
     return emit_result(metrics, details, pass_metric="raw_motor_ticket_gate_holds")

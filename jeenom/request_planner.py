@@ -26,6 +26,8 @@ def _objective_type(intent: OperatorIntent) -> str:
         return "knowledge_update"
     if intent.intent_type in {"status_query", "claim_reference", "cache_query"}:
         return "query"
+    if intent.intent_type == "primitive_definition":
+        return "primitive_definition"
     if intent.intent_type in {"reset", "quit", "accept_proposal", "reject_proposal"}:
         return "control"
     return "unsupported"
@@ -36,6 +38,8 @@ def _expected_response(intent: OperatorIntent) -> str:
         return "ask_clarification"
     if intent.capability_status == "synthesizable":
         return "propose_synthesis"
+    if intent.intent_type == "primitive_definition":
+        return "propose_definition"
     if intent.intent_type == "task_instruction":
         return "execute_task"
     if intent.intent_type == "motor_command":
@@ -242,6 +246,63 @@ def build_request_plan(
             steps=steps,
             preservation_signals=semantics.preservation_signals(utterance),
             expected_response=expected_response,
+        )
+
+    if objective_type == "primitive_definition":
+        definition = intent.primitive_definition
+        if definition is not None:
+            for idx, handle in enumerate(definition.dependency_handles):
+                metric = (
+                    definition.dependencies[idx]
+                    if idx < len(definition.dependencies)
+                    else handle
+                )
+                steps.append(
+                    RequestPlanStep(
+                        step_id=f"dependency_{idx + 1}",
+                        layer="grounding",
+                        operation="rank",
+                        required_handle=handle,
+                        inputs={"object_type": semantics.default_object_type},
+                        outputs=[ranked_claims_output],
+                        constraints={
+                            "metric": metric,
+                            "definition_dependency": True,
+                        },
+                        environment_assumption_ids=environment_assumption_ids,
+                    )
+                )
+            steps.append(
+                RequestPlanStep(
+                    step_id="propose_primitive_definition",
+                    layer="control",
+                    operation="answer",
+                    outputs=["operator_response"],
+                    depends_on=[step.step_id for step in steps],
+                    constraints={
+                        "definition_type": definition.definition_type,
+                        "proposed_handle": definition.proposed_handle,
+                        "safety_class": definition.safety_class,
+                    },
+                    environment_assumption_ids=environment_assumption_ids,
+                )
+            )
+        return RequestPlan(
+            request_id=request_id,
+            original_utterance=utterance,
+            objective_type=objective_type,
+            objective_summary=(
+                intent.reason
+                or (
+                    f"Define primitive {intent.primitive_definition.proposed_handle}"
+                    if intent.primitive_definition is not None
+                    else "Define primitive"
+                )
+            ),
+            steps=steps,
+            preservation_signals=semantics.preservation_signals(utterance),
+            expected_response=expected_response,
+            environment_assumptions=environment_assumptions,
         )
 
     if objective_type == "unsupported" and intent.required_capabilities:

@@ -73,6 +73,45 @@ def main() -> int:
             in {"answer_query", "propose_synthesis"}
         )
 
+        selection_cases = {
+            "highest": (
+                "go to the door with the highest manhattan distance",
+                "That matched multiple farthest doors",
+            ),
+            "second_highest": (
+                "go to the door with the second highest manhattan distance",
+                "That ordinal falls inside a distance tie",
+            ),
+        }
+        for label, (utterance, expected_text) in selection_cases.items():
+            selection_session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
+            selection_session.handle_utterance("whats the manhattan distance to all doors")
+            response = selection_session.handle_utterance(utterance)
+            details[f"{label}_followup_response"] = first_line(response)
+            details[f"{label}_followup_intent_type"] = (
+                selection_session.last_operator_intent.intent_type
+                if selection_session.last_operator_intent is not None
+                else None
+            )
+            details[f"{label}_followup_next_action"] = (
+                selection_session.last_readiness_graph.next_action
+                if selection_session.last_readiness_graph is not None
+                else None
+            )
+            metrics[f"{label}_followup_not_semantic_inversion"] = (
+                "Semantic inversion detected" not in response
+            )
+            metrics[f"{label}_followup_clarifies_tie"] = (
+                "CLARIFY" in response
+                and expected_text in response
+                and "red door@(10,7)" in response
+                and "blue door@(12,3)" in response
+            )
+            metrics[f"{label}_followup_no_execution"] = (
+                selection_session.last_result is None
+                and selection_session.pending_clarification is not None
+            )
+
         unsupported = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
         first = unsupported.handle_utterance(
             "synthesize a new distance metric named convenientDistance"
@@ -107,6 +146,12 @@ def main() -> int:
             "metric_followup_not_unresolved",
             "metric_followup_uses_previous_context",
             "metric_followup_routes_to_answer_or_synthesis",
+            "highest_followup_not_semantic_inversion",
+            "highest_followup_clarifies_tie",
+            "highest_followup_no_execution",
+            "second_highest_followup_not_semantic_inversion",
+            "second_highest_followup_clarifies_tie",
+            "second_highest_followup_no_execution",
             "unsupported_refuse_plan_not_cached",
             "unsupported_turn_not_marked_reused",
             "unsupported_remains_honest_non_execution",

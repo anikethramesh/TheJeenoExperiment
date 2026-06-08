@@ -19,6 +19,8 @@ class TurnOrchestrator:
         station.last_operational_mismatches = []
 
         command = self.classify_utterance(utterance)
+        if getattr(station, "pending_primitive_definition", None) is not None:
+            return station.handle_pending_primitive_definition(utterance, command)
         if station.pending_synthesis_proposal is not None:
             return station.handle_pending_synthesis_proposal(utterance, command)
         if station.pending_clarification is not None:
@@ -174,8 +176,12 @@ class TurnOrchestrator:
             return station.status_summary(query=command.payload.get("query", "status"))
         if command.kind == "ground_target_query":
             return station.grounded_target_summary(command.payload)
+        if command.kind == "metric_query":
+            return station.metric_query_summary(command)
         if command.kind == "task_selector":
             return station.task_selector_summary(command)
+        if command.kind == "primitive_definition":
+            return station.propose_primitive_definition(command.payload["definition"])
         if command.kind == "knowledge_update":
             return station._apply_knowledge_update_from_payload(
                 command.utterance,

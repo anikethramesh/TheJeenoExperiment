@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import ast
 import inspect
-from pathlib import Path
 from typing import Any
 
-from harness import ROOT, emit_result
+from harness import ROOT, ast_call_names, ast_function_call_names, ast_source, emit_result
 
 
 REQUIRED_SCHEMA_TYPES = [
@@ -23,28 +22,6 @@ REQUIRED_SCHEMA_TYPES = [
     "MissionExecutionPlan",
     "CommandResult",
 ]
-
-
-def _source(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
-
-
-def _call_names(tree: ast.AST) -> list[str]:
-    names: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Attribute):
-                names.append(node.func.attr)
-            elif isinstance(node.func, ast.Name):
-                names.append(node.func.id)
-    return names
-
-
-def _function_call_names(tree: ast.AST, name: str) -> list[str]:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return _call_names(node)
-    return []
 
 
 def main() -> int:
@@ -74,7 +51,7 @@ def main() -> int:
     metrics["memory_update_api_no_longer_accepts_payload_dict"] = "payload" not in apply_sig.parameters
     details["apply_knowledge_update_signature"] = str(apply_sig)
 
-    station_tree = ast.parse(_source("jeenom/operator_station.py"))
+    station_tree = ast.parse(ast_source("jeenom/operator_station.py"))
     direct_run_task_calls = [
         (node.lineno, ast.unparse(node.func))
         for node in ast.walk(station_tree)
@@ -86,16 +63,16 @@ def main() -> int:
     details["direct_run_task_calls"] = direct_run_task_calls
 
     resume_calls = (
-        _function_call_names(station_tree, "resume_pending_clarification")
-        + _function_call_names(station_tree, "resume_candidate_clarification")
+        ast_function_call_names(station_tree, "resume_pending_clarification")
+        + ast_function_call_names(station_tree, "resume_candidate_clarification")
     )
     metrics["clarification_resume_has_no_direct_execution_or_memory_write"] = not (
         "run_task" in resume_calls or "apply_knowledge_update" in resume_calls
     )
     details["clarification_resume_calls"] = sorted(set(resume_calls))
 
-    llm_prompt = _source("jeenom/llm_compiler.py")
-    schema_text = _source("jeenom/schemas.py")
+    llm_prompt = ast_source("jeenom/llm_compiler.py")
+    schema_text = ast_source("jeenom/schemas.py")
     metrics["motor_language_no_longer_describes_planning_bypass"] = (
         "bypass all task planning" not in llm_prompt
         and "bypasses task planning" not in schema_text

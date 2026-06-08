@@ -19,35 +19,18 @@ real pipeline against three failure modes:
 """
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import gymnasium as gym
-import minigrid  # noqa: F401
-from minigrid.wrappers import FullyObsWrapper
+from evals.harness import build_env as _build_env, make_session
 
 from jeenom.llm_compiler import LLMCompiler, SmokeTestCompiler
 from jeenom.operator_station import OperatorStationSession
 
 
-def _build_env(env_id: str, render_mode: str):
-    return FullyObsWrapper(gym.make(env_id))
-
-
 def _make_session(compiler, **kwargs) -> OperatorStationSession:
-    defaults = dict(
-        compiler=compiler,
-        compiler_name="test",
-        env_id="MiniGrid-GoToDoor-8x8-v0",
-        seed=42,
-        render_mode="none",
-        memory_root=Path(tempfile.mkdtemp()),
-    )
-    defaults.update(kwargs)
-    return OperatorStationSession(**defaults)
+    return make_session(compiler=compiler, compiler_name="test", **kwargs)
 
 
 def _utterance_from(payload: dict[str, Any]) -> str:

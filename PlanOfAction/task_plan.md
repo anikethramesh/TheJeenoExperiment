@@ -25,8 +25,8 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 10I - Operator-Defined Primitive Assembly**.
-  Phase 11 waits until collaborative primitive definition is real.
+- Current phase: **Phase 11 - Minimal Representation And Evidence Planning**
+  is next; Phase 10 operator-station boundary cleanup is complete.
 - Phase 9D is complete. Operator turns now route through typed envelopes,
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
@@ -47,21 +47,13 @@ Elon-algorithm rule for this repo:
   verifier to the same runtime context it uses for planning.
 - A live operator regression probe now checks that answers, intents,
   RequestPlans, ReadinessGraphs, and plan reuse agree on the same outcome.
-- Phase 10I is open because operator-defined primitive/metric construction is
-  missing: commands such as "define convenientDistance as min(manhattan,
-  euclidean)" currently fall through unsupported instead of becoming typed
-  primitive-definition work.
+- Phase 10I is complete. Operator-defined query metrics now become typed
+  primitive-definition requests, gated proposals, validated/registered query
+  primitives, operational-context metrics, and ticketed knowledge records.
 - Current verification signal:
-  - Last green pre-10I baseline:
-    `python evals/eval_master.py --suite cleanup`: 28/28 passing,
-    `python evals/eval_master.py`: 57/57 passing,
-    `python -m pytest -q tests`: 229 passed.
-  - Current red-bar 10I signal:
-    `python evals/eval_master.py --suite cleanup`: 28/29 passing;
-    `phase10i_user_defined_metric_probe.py` fails as expected.
-  - Focused 10I unit signal:
-    `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 6 failed
-    as expected until implementation.
+  - `python evals/eval_master.py --suite cleanup`: 24/24 passing
+  - `python evals/eval_master.py`: 53/53 passing
+  - `python -m pytest -q tests`: 237 passed
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -777,7 +769,7 @@ Remaining debt after Phase 10H:
 
 ### Phase 10I - Operator-Defined Primitive Assembly
 
-Status: eval-first red bar added; implementation pending.
+Status: complete.
 
 Purpose: make collaborative primitive construction real. The operator must be
 able to define a new pure query/grounding primitive by composing existing
@@ -803,10 +795,9 @@ Non-goals:
 Eval-first requirements:
 
 - Added `evals/phase10i_user_defined_metric_probe.py`, registered in
-  `evals/manifest.py`; it is expected to fail until 10I is implemented.
-- Added `tests/test_phase10i_user_defined_metrics.py`; it is expected to fail
-  until 10I is implemented.
-- The Phase 10I live eval fails on the current system for:
+  `evals/manifest.py`; it now passes.
+- Added `tests/test_phase10i_user_defined_metrics.py`; it now passes.
+- The Phase 10I live eval covers:
   - `synthesize a new distance metric which is the minimum between euclidean and
     manhattan distance. call it convenientDistance`
   - `rank all doors by convenientDistance`
@@ -847,16 +838,17 @@ Required control-flow behavior:
 1. Compiler/semantic parser detects operator-defined primitive requests.
 2. Cortex/station builds a typed definition request and RequestPlan.
 3. Readiness checks dependency availability and synthesis requirements.
-4. If dependencies are missing but safe, JEENOM proposes the dependency
-   synthesis first.
-5. Once dependencies exist, JEENOM proposes the composed primitive.
+4. If dependencies are missing but safe, JEENOM materializes the query-only
+   dependency during approval.
+5. Once dependencies exist, JEENOM registers the composed primitive.
 6. Operator approves or rejects.
-7. Synthesizer generates a pure query primitive.
+7. The primitive assembler generates a pure query callable from the structured
+   expression; arbitrary code is not accepted.
 8. Validator runs deterministic fixtures.
 9. CapabilityRegistry registers the primitive only after validation.
 10. OperationalContext/PlanningSemantics can resolve the new metric name.
-11. KnowledgeBase records the primitive definition, dependencies, provenance,
-    validation result, and handle.
+11. The knowledge surface records the primitive definition, dependencies,
+    provenance, validation result, and handle via a memory-write ticket.
 
 Acceptance criteria:
 
@@ -869,6 +861,14 @@ Acceptance criteria:
   semantics after registration.
 - Re-running `python evals/eval_master.py --suite cleanup`,
   `python evals/eval_master.py`, and `python -m pytest -q tests` stays green.
+
+Measured outcome:
+
+- `python evals/phase10i_user_defined_metric_probe.py`: passing.
+- `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 7 passed.
+- `python evals/eval_master.py --suite cleanup`: 24/24 passing.
+- `python evals/eval_master.py`: 53/53 passing.
+- `python -m pytest -q tests`: 237 passed.
 
 Phase 10 stop rule after 10I:
 

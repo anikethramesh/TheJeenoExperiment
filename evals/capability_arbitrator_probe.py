@@ -22,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
-from testing_utils import build_env as _build_env, make_session as _make_session
+from harness import build_env as _build_env, make_session as _make_session
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

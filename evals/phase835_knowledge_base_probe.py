@@ -26,7 +26,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
-from testing_utils import build_env as _build_env, make_session as _make_session
+from harness import build_env as _build_env, make_session as _make_session
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -51,7 +51,7 @@ def main() -> int:
         memory_root = Path(tempfile.mkdtemp())
 
         # ── Stage 1: Teach a concept ─────────────────────────────────────────
-        session1 = _make_session(memory_root)
+        session1 = _make_session(memory_root=memory_root)
         teach_resp = session1.handle_utterance("remember bingo means go to the red door")
 
         metrics["concept_stored_after_teach"] = (
@@ -93,10 +93,10 @@ def main() -> int:
 
         # ── Stage 5: Persistence across sessions ─────────────────────────────
         # Teach in session2, then reload in session3.
-        session2 = _make_session(memory_root)
+        session2 = _make_session(memory_root=memory_root)
         session2.handle_utterance("remember bingo means go to the red door")
 
-        session3 = _make_session(memory_root)
+        session3 = _make_session(memory_root=memory_root)
         reloaded = session3.knowledge_base.recall("bingo")
         metrics["concept_persisted_across_sessions"] = (
             reloaded is not None and reloaded.utterance == "go to the red door"
@@ -106,7 +106,7 @@ def main() -> int:
         )
 
         # ── Stage 6: Alternate teach syntax ─────────────────────────────────
-        session4 = _make_session(Path(tempfile.mkdtemp()))
+        session4 = _make_session(memory_root=Path(tempfile.mkdtemp()))
         define_resp = session4.handle_utterance("define alpha as go to the blue door")
         metrics["define_syntax_works"] = (
             "CONCEPT STORED" in define_resp
@@ -114,7 +114,7 @@ def main() -> int:
         )
 
         # ── Stage 7: Search ──────────────────────────────────────────────────
-        session5 = _make_session(Path(tempfile.mkdtemp()))
+        session5 = _make_session(memory_root=Path(tempfile.mkdtemp()))
         session5.handle_utterance("remember bingo means go to the red door")
         results = session5.knowledge_base.search("bing")
         metrics["search_finds_partial_match"] = (
@@ -122,7 +122,7 @@ def main() -> int:
         )
 
         # ── Stage 8: clear memory clears concepts ────────────────────────────
-        session6 = _make_session(Path(tempfile.mkdtemp()))
+        session6 = _make_session(memory_root=Path(tempfile.mkdtemp()))
         session6.handle_utterance("remember bingo means go to the red door")
         session6.reset(clear_memory=True)
         metrics["clear_memory_clears_concepts"] = (
@@ -130,7 +130,7 @@ def main() -> int:
         )
 
         # ── Stage 9: Golden path unaffected ─────────────────────────────────
-        golden = _make_session(Path(tempfile.mkdtemp()))
+        golden = _make_session(memory_root=Path(tempfile.mkdtemp()))
         golden_resp = golden.handle_utterance("go to the red door")
         metrics["golden_path_unaffected"] = (
             "RUN COMPLETE" in golden_resp and "task_complete=True" in golden_resp

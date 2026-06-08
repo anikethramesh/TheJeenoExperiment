@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from harness import ROOT, emit_result, make_session
+from harness import ROOT, ast_source, emit_result, make_session
 
 
 FORBIDDEN_STATION_CALLS = {
@@ -20,10 +20,6 @@ FORBIDDEN_STATION_IMPORT_NAMES = {
     "MiniGridSpine",
     "ensure_custom_minigrid_envs_registered",
 }
-
-
-def _source(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
 
 
 def _imports(tree: ast.AST) -> set[str]:
@@ -84,7 +80,7 @@ def main() -> int:
     metrics["minigrid_substrate_adapter_module_exists"] = minigrid_substrate_adapter is not None
     metrics["minigrid_substrate_adapter_type_exists"] = minigrid_cls is not None
 
-    station_tree = ast.parse(_source("jeenom/operator_station.py"))
+    station_tree = ast.parse(ast_source("jeenom/operator_station.py"))
     imports = _imports(station_tree)
     call_hits = _call_hits(station_tree, FORBIDDEN_STATION_CALLS)
     details["forbidden_station_imports"] = sorted(imports & FORBIDDEN_STATION_IMPORT_NAMES)

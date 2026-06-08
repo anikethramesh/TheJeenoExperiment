@@ -41,6 +41,34 @@ class TestPhase10LiveOperatorRegressions(unittest.TestCase):
             {"answer_query", "propose_synthesis"},
         )
 
+    def test_ranked_distance_task_followups_preserve_descending_selection(self):
+        cases = [
+            (
+                "go to the door with the highest manhattan distance",
+                "That matched multiple farthest doors",
+            ),
+            (
+                "go to the door with the second highest manhattan distance",
+                "That ordinal falls inside a distance tie",
+            ),
+        ]
+
+        for utterance, expected in cases:
+            with self.subTest(utterance=utterance):
+                session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
+                ranked = session.handle_utterance("whats the manhattan distance to all doors")
+                self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE", ranked)
+
+                response = session.handle_utterance(utterance)
+
+                self.assertNotIn("Semantic inversion detected", response)
+                self.assertIn("CLARIFY", response)
+                self.assertIn(expected, response)
+                self.assertIn("red door@(10,7)", response)
+                self.assertIn("blue door@(12,3)", response)
+                self.assertIsNone(session.last_result)
+                self.assertIsNotNone(session.pending_clarification)
+
     def test_unsupported_refuse_plan_is_not_cached_for_reuse(self):
         session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
 

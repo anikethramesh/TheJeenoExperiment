@@ -85,6 +85,36 @@ class TestPhase10IUserDefinedMetrics(unittest.TestCase):
         self.assertIn("CONVENIENT", ranked.upper())
         self.assertIn(expected_handle, _plan_handles(session))
 
+    def test_manclid_equals_shorthand_can_be_defined_approved_and_used(self):
+        session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
+
+        proposal = session.handle_utterance(
+            "create a new distance metric called manclid = max(manhattan distance, euclidean distance)"
+        )
+
+        self.assertNotIn("I didn't understand", proposal)
+        proposal_lower = proposal.lower()
+        self.assertIn("manclid", proposal_lower)
+        self.assertIn("max(", proposal_lower)
+        self.assertIn("manhattan", proposal_lower)
+        self.assertIn("euclidean", proposal_lower)
+        self.assertTrue(
+            hasattr(session, "pending_primitive_definition")
+            or session.pending_synthesis_proposal is not None,
+            "Equals-sign metric definitions must become pending typed definitions.",
+        )
+
+        session.handle_utterance("yes")
+
+        expected_handle = "grounding.all_doors.ranked.manclid.agent"
+        self.assertIn(expected_handle, _handles(session))
+        self.assertTrue(_metric_supported(session, "manclid"))
+
+        ranked = session.handle_utterance("whats the manclid distance to all the doors")
+        self.assertIn("DOORS RANKED", ranked.upper())
+        self.assertIn("MANCLID", ranked.upper())
+        self.assertIn(expected_handle, _plan_handles(session))
+
     def test_undefined_custom_metric_does_not_fallback_to_builtin_metric(self):
         session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
 

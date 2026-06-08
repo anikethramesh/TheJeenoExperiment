@@ -9,33 +9,10 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from harness import ROOT, emit_result, make_session
+from harness import ROOT, ast_call_names, ast_function_call_names, ast_source, emit_result, make_session
 
 
 TRACE_CONSTRUCTORS = {"CorticalEnvelope", "ApprovedCommand", "CommandResult"}
-
-
-def _source(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
-
-
-def _call_names(node: ast.AST) -> list[str]:
-    names: list[str] = []
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            names.append(child.func.id)
-        elif isinstance(child.func, ast.Attribute):
-            names.append(child.func.attr)
-    return names
-
-
-def _function_call_names(tree: ast.AST, name: str) -> list[str]:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return _call_names(node)
-    return []
 
 
 def _sample_plan_and_graph():
@@ -83,16 +60,16 @@ def main() -> int:
     metrics["command_authority_class_exists"] = command_authority_cls is not None
 
     if command_authority is not None:
-        source = _source("jeenom/command_authority.py")
+        source = ast_source("jeenom/command_authority.py")
         metrics["command_authority_has_no_operator_station_dependency"] = (
             "operator_station" not in source
         )
     else:
         metrics["command_authority_has_no_operator_station_dependency"] = False
 
-    station_tree = ast.parse(_source("jeenom/operator_station.py"))
-    record_calls = _function_call_names(station_tree, "_record_command_result")
-    pending_calls = _function_call_names(station_tree, "_pending_clarification_trace")
+    station_tree = ast.parse(ast_source("jeenom/operator_station.py"))
+    record_calls = ast_function_call_names(station_tree, "_record_command_result")
+    pending_calls = ast_function_call_names(station_tree, "_pending_clarification_trace")
     details["record_command_result_calls"] = sorted(set(record_calls))
     details["pending_clarification_trace_calls"] = sorted(set(pending_calls))
 

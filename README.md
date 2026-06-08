@@ -23,17 +23,16 @@ core architecture boundaries:
 - station-owned runtime context, substrate package, and context-driven
   planner/verifier semantics
 
-Phase 10 extraction is nearly complete. `OperatorStationSession` is still large,
-but the blocking boundaries are now explicit: runtime package injection,
+Phase 10 extraction is complete for now. `OperatorStationSession` is still large,
+but the blocking boundaries are explicit: runtime package injection,
 operational context, substrate adapter, domain helper, turn orchestrator,
 side-effect authority, command authority, and context-driven planning semantics.
 The baseline now includes a live operator regression probe because structural
 boundary checks alone were not enough to prove user-visible progress.
-The current architecture task is Phase 10I: operator-defined primitive assembly,
-so commands like defining `convenientDistance = min(manhattan, euclidean)` can
-become typed, validated, reusable query primitives instead of unsupported text.
-Phase 10I is currently in red-bar mode: the evals/tests for this behavior have
-been added and are expected to fail until the implementation lands.
+Phase 10I added operator-defined primitive assembly, so commands like defining
+`convenientDistance = min(manhattan, euclidean)` become typed, validated,
+reusable query primitives instead of unsupported text. The next architecture
+task is Phase 11: minimal representation and evidence planning.
 
 The guiding split is:
 
@@ -74,6 +73,9 @@ Implemented so far:
   runtime execution should not make LLM calls.
 - Safe synthesis scaffolding for pure grounding/query primitives, with validation
   before registration.
+- Operator-defined query metric assembly for pure ranked-door grounding
+  primitives, with approval, validation, registry/context update, and ticketed
+  provenance recording.
 - Explicit 5-level abstraction hierarchy: primitive, command, procedure, task,
   and goal/mission.
 
@@ -196,23 +198,16 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Last green baseline after Phase 10H live regression repair:
+Current baseline after Phase 10I:
 
-- `python evals/eval_master.py --suite cleanup`: 28/28 passing.
-- `python evals/eval_master.py`: 57/57 passing.
-- `python -m pytest -q tests`: 229 passed.
-
-Current Phase 10I red-bar signal:
-
-- `python evals/eval_master.py --suite cleanup`: 28/29 passing;
-  `phase10i_user_defined_metric_probe.py` fails as expected.
-- `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 6 failed
-  as expected until operator-defined primitive assembly is implemented.
+- `python evals/eval_master.py --suite cleanup`: 24/24 passing.
+- `python evals/eval_master.py`: 53/53 passing.
+- `python -m pytest -q tests`: 237 passed.
 
 Roadmap:
 
-- Phase 10I: add operator-defined primitive assembly for pure query/grounding
-  primitives.
+- Phase 10: complete for now. Operator-station boundary cleanup and
+  operator-defined query primitive assembly are done.
 - Phase 11: add the minimal evidence-planning loop.
 - Phase 12: demonstrate the same cognition loop on MiniGrid and a robotics-like
   substrate.

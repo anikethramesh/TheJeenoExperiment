@@ -51,6 +51,26 @@ class CommandAuthority:
         first_line = message.splitlines()[0] if message else ""
         return first_line.split(" ", 1)[0].lower() if first_line else "response"
 
+    def _make_envelope(
+        self,
+        prefix: str,
+        utterance: str,
+        intent: OperatorIntent | None,
+        plan: RequestPlan | None,
+        graph: ReadinessGraph | None,
+        compiler_name: str,
+        pending_context: dict[str, Any],
+    ) -> CorticalEnvelope:
+        return CorticalEnvelope(
+            envelope_id=f"{prefix}:{uuid.uuid4().hex}",
+            utterance=utterance,
+            intent=intent,
+            request_plan=plan,
+            readiness_graph=graph,
+            provenance={"station": self.station_name, "compiler": compiler_name},
+            pending_context=pending_context,
+        )
+
     def record_result(
         self,
         utterance: str,
@@ -64,17 +84,8 @@ class CommandAuthority:
         pending_context: dict[str, Any] | None = None,
         last_result: dict[str, Any] | None = None,
     ) -> CommandResult:
-        envelope = CorticalEnvelope(
-            envelope_id=f"envelope:{uuid.uuid4().hex}",
-            utterance=utterance,
-            intent=intent,
-            request_plan=plan,
-            readiness_graph=graph,
-            provenance={
-                "station": self.station_name,
-                "compiler": compiler_name,
-            },
-            pending_context=dict(pending_context or {}),
+        envelope = self._make_envelope(
+            "envelope", utterance, intent, plan, graph, compiler_name, dict(pending_context or {})
         )
         request_id = (
             graph.request_id
@@ -114,17 +125,9 @@ class CommandAuthority:
         graph: ReadinessGraph | None,
         compiler_name: str,
     ) -> dict[str, Any]:
-        envelope = CorticalEnvelope(
-            envelope_id=f"pending:{uuid.uuid4().hex}",
-            utterance=utterance,
-            intent=intent,
-            request_plan=plan,
-            readiness_graph=graph,
-            provenance={
-                "station": self.station_name,
-                "compiler": compiler_name,
-            },
-            pending_context={"clarification": clarification_type},
+        envelope = self._make_envelope(
+            "pending", utterance, intent, plan, graph, compiler_name,
+            {"clarification": clarification_type},
         )
         return {
             "request_plan": plan,

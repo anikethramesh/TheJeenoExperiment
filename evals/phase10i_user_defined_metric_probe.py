@@ -162,6 +162,50 @@ def _run_convenient_definition(metrics: dict[str, bool], details: dict[str, Any]
     metrics["convenient_query_uses_custom_handle"] = expected_handle in _plan_handles(session)
 
 
+def _run_manclid_equals_definition(metrics: dict[str, bool], details: dict[str, Any]) -> None:
+    session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
+    expected_handle = "grounding.all_doors.ranked.manclid.agent"
+
+    proposal = session.handle_utterance(
+        "create a new distance metric called manclid = max(manhattan distance, euclidean distance)"
+    )
+    details["manclid_proposal"] = first_line(proposal)
+    details["manclid_pending_type"] = type(_pending_definition(session)).__name__
+    lower = proposal.lower()
+
+    metrics["manclid_equals_request_creates_definition_proposal"] = (
+        not _is_unresolved(proposal)
+        and _looks_like_definition_proposal(proposal)
+        and _pending_definition(session) is not None
+    )
+    metrics["manclid_proposal_preserves_equals_formula"] = (
+        "manclid" in lower
+        and "max(" in lower
+        and "manhattan" in lower
+        and "euclidean" in lower
+    )
+
+    approval = session.handle_utterance("yes")
+    details["manclid_approval"] = first_line(approval)
+    details["manclid_handles_after_approval"] = sorted(
+        handle for handle in _handles(session) if "manclid" in handle
+    )
+    metrics["manclid_approval_registers_handle"] = expected_handle in _handles(session)
+    metrics["manclid_metric_supported_after_approval"] = _metric_supported(
+        session,
+        "manclid",
+    )
+
+    ranked = session.handle_utterance("whats the manclid distance to all the doors")
+    details["manclid_ranked"] = first_line(ranked)
+    details["manclid_plan_handles_after_rank"] = sorted(_plan_handles(session))
+    metrics["manclid_registered_metric_can_be_used_with_whats"] = (
+        "DOORS RANKED" in ranked.upper()
+        and "MANCLID" in ranked.upper()
+    )
+    metrics["manclid_query_uses_custom_handle"] = expected_handle in _plan_handles(session)
+
+
 def _run_negative_controls(metrics: dict[str, bool], details: dict[str, Any]) -> None:
     undefined = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
     undefined_response = undefined.handle_utterance("rank all doors by ramesian")
@@ -186,6 +230,7 @@ def _run_negative_controls(metrics: dict[str, bool], details: dict[str, Any]) ->
     reject_proposal = rejected.handle_utterance(
         "make a distance metric called nopeDistance as manhattan plus 99"
     )
+    reject_had_pending = _pending_definition(rejected) is not None
     reject = rejected.handle_utterance("no")
     details["reject_proposal"] = first_line(reject_proposal)
     details["reject_response"] = first_line(reject)
@@ -194,7 +239,7 @@ def _run_negative_controls(metrics: dict[str, bool], details: dict[str, Any]) ->
     )
     metrics["rejected_metric_was_actually_proposed"] = (
         _looks_like_definition_proposal(reject_proposal)
-        and _pending_definition(rejected) is not None
+        and reject_had_pending
     )
     metrics["rejected_metric_registers_nothing"] = (
         "grounding.all_doors.ranked.nope_distance.agent" not in _handles(rejected)
@@ -232,6 +277,7 @@ def main() -> int:
     try:
         _run_ramesian_definition(metrics, details)
         _run_convenient_definition(metrics, details)
+        _run_manclid_equals_definition(metrics, details)
         _run_negative_controls(metrics, details)
     except Exception as exc:  # pragma: no cover - emitted as eval detail
         details["error"] = f"{type(exc).__name__}: {exc}"
@@ -249,6 +295,12 @@ def main() -> int:
             "convenient_metric_supported_after_approval",
             "convenient_registered_metric_can_be_used",
             "convenient_query_uses_custom_handle",
+            "manclid_equals_request_creates_definition_proposal",
+            "manclid_proposal_preserves_equals_formula",
+            "manclid_approval_registers_handle",
+            "manclid_metric_supported_after_approval",
+            "manclid_registered_metric_can_be_used_with_whats",
+            "manclid_query_uses_custom_handle",
             "undefined_metric_does_not_fallback_to_builtin",
             "undefined_metric_reports_missing_definition",
             "rejected_metric_was_actually_proposed",

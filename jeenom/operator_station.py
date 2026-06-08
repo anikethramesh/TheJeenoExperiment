@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import math
 import re
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -32,6 +33,7 @@ from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .repair_loop import RepairEvent, RepairLoop
 from .representation import RepresentationStore
 from .runtime_package import RuntimePackage
+from .semantic_normalizer import infer_direction_from_utterance, normalize_distance_ordinal
 from .side_effect_authority import SideEffectAuthority
 from .substrate_adapter import SubstrateAdapter
 from .turn_orchestrator import TurnOrchestrator
@@ -46,9 +48,11 @@ from .schemas import (
     MemoryUpdate,
     MemoryWriteTicket,
     OperatorIntent,
+    PrimitiveDefinitionRequest,
     ProcedureRecipe,
     RawMotorTicket,
     ReadinessGraph,
+    RequestPlanStep,
     RequestPlan,
     SceneModel,
     SceneObject,
@@ -85,6 +89,35 @@ class PendingSynthesisProposal:
     similar_handles: list[str]
     proposed_description: str | None = None
     proposed_condition: dict[str, Any] | None = None
+
+
+@dataclass
+class PendingPrimitiveDefinition:
+    request: PrimitiveDefinitionRequest
+    request_plan: RequestPlan
+    readiness_graph: ReadinessGraph
+
+
+_ACTION_LEAK_TERMS = (
+    "move",
+    "moves",
+    "moving",
+    "turn",
+    "turns",
+    "pickup",
+    "pick up",
+    "grab",
+    "toggle",
+    "open",
+    "unlock",
+    "navigate",
+    "go forward",
+    "env step",
+    "env.step",
+    "controller",
+    "motor",
+    "actuate",
+)
 
 
 def _scene_object_to_dict(obj: SceneObject) -> dict[str, Any]:
@@ -128,6 +161,173 @@ def _looks_like_bare_label(normalized: str) -> bool:
     )
 
 
+def _normalize_metric_name(name: str) -> str:
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name.strip())
+    text = re.sub(r"[^A-Za-z0-9_]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_").lower()
+    return text
+
+
+def _metric_dependency_handle(metric: str) -> str:
+    return f"grounding.all_doors.ranked.{metric}.agent"
+
+
+def _metric_dependencies(formula: str) -> list[str]:
+    normalized = _normalize_utterance(formula)
+    dependencies: list[str] = []
+    for metric in ("euclidean", "manhattan"):
+        if re.search(rf"\b{metric}\b", normalized) and metric not in dependencies:
+            dependencies.append(metric)
+    return dependencies
+
+
+def _parse_metric_expression(formula: str) -> dict[str, Any] | None:
+    normalized = _normalize_utterance(formula)
+    dependencies = _metric_dependencies(formula)
+    if any(term in normalized for term in _ACTION_LEAK_TERMS):
+        return {
+            "op": "unsafe",
+            "reason": "Metric definitions must be query-only and cannot include actuation.",
+            "metrics": dependencies,
+        }
+    if not dependencies:
+        return None
+
+    number_match = re.search(r"\b(\d+(?:\.\d+)?)\b", normalized)
+    constant = float(number_match.group(1)) if number_match else None
+
+    if "minimum" in normalized or "min(" in normalized or "min of" in normalized:
+        return {"op": "min", "metrics": dependencies}
+    if "maximum" in normalized or "max(" in normalized or "max of" in normalized:
+        return {"op": "max", "metrics": dependencies}
+    if "mod" in normalized or "modulo" in normalized:
+        if constant is None:
+            return None
+        return {"op": "mod", "metric": dependencies[0], "constant": constant}
+    if "abs" in normalized and "-" in formula and len(dependencies) >= 2:
+        expression: dict[str, Any] = {
+            "op": "abs_diff",
+            "metrics": dependencies[:2],
+        }
+        if constant is not None and ("+" in formula or " plus " in normalized):
+            expression["op"] = "abs_diff_plus"
+            expression["constant"] = constant
+        return expression
+    if " plus " in normalized or "+" in formula:
+        if constant is None:
+            return None
+        return {"op": "add", "metric": dependencies[0], "constant": constant}
+    if " minus " in normalized or "-" in formula:
+        if constant is None:
+            return None
+        return {"op": "subtract", "metric": dependencies[0], "constant": constant}
+    if len(dependencies) == 1:
+        return {"op": "alias", "metric": dependencies[0]}
+    return None
+
+
+def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest | str | None:
+    patterns = [
+        re.compile(
+            r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
+            r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
+            r"(?:(?:called|named)\s+)?(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*=\s*"
+            r"(?P<formula>.+)$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
+            r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
+            r"(?:called|named)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\s+"
+            r"(?:as|to be|which is|that is|that)\s+(?P<formula>.+)$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
+            r"(?:a\s+|an\s+)?(?:new\s+)?distance\s+metric\s+"
+            r"(?:which is|that is|as)\s+(?P<formula>.+?)\s+"
+            r"(?:and\s+)?call\s+it\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)$",
+            re.IGNORECASE,
+        ),
+    ]
+    for pattern in patterns:
+        match = pattern.match(text.strip())
+        if not match:
+            continue
+        name = match.group("name")
+        formula = match.group("formula").strip()
+        normalized_name = _normalize_metric_name(name)
+        expression = _parse_metric_expression(formula)
+        if expression is None:
+            return (
+                "I could not parse that metric formula. Use a query-only formula "
+                "such as min(euclidean, manhattan), euclidean mod 5, or manhattan plus 3."
+            )
+        if expression.get("op") == "unsafe":
+            return (
+                "REFUSE\n"
+                "Metric definitions must be query-only. I will not build a metric "
+                "that contains actuation, movement, controller, or motor side effects."
+            )
+        dependencies = list(dict.fromkeys(_metric_dependencies(formula)))
+        dependency_handles = [_metric_dependency_handle(metric) for metric in dependencies]
+        return PrimitiveDefinitionRequest(
+            definition_type="distance_metric",
+            name=name,
+            normalized_name=normalized_name,
+            expression=expression,
+            dependencies=dependencies,
+            dependency_handles=dependency_handles,
+            proposed_handle=_metric_dependency_handle(normalized_name),
+            safety_class="query",
+            authority_level="operator",
+            provenance={
+                "operator_utterance": text,
+                "formula": formula,
+            },
+        )
+    return None
+
+
+def _parse_metric_query(text: str) -> str | None:
+    raw = text.strip()
+    patterns = [
+        re.compile(
+            r"\b(?:rank|list|show)\s+(?:all\s+)?(?:the\s+)?doors\s+by\s+"
+            r"(?P<metric>[A-Za-z][A-Za-z0-9_]*)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:what\s+is|whats|what's|show|list)\s+(?:the\s+)?"
+            r"(?P<metric>[A-Za-z][A-Za-z0-9_]*)\s+"
+            r"(?:distance\s+)?(?:to|for|of)\s+all\s+(?:the\s+)?doors\b",
+            re.IGNORECASE,
+        ),
+    ]
+    stopwords = {
+        "distance",
+        "distances",
+        "closest",
+        "farthest",
+        "furthest",
+        "door",
+        "doors",
+        "all",
+        "the",
+        "manhattan",
+        "euclidean",
+    }
+    for pattern in patterns:
+        match = pattern.search(raw)
+        if not match:
+            continue
+        metric = match.group("metric")
+        normalized = _normalize_metric_name(metric)
+        if normalized and normalized not in stopwords:
+            return normalized
+    return None
+
+
 def _looks_like_question(normalized_utterance: str) -> bool:
     return (
         normalized_utterance.endswith("?")
@@ -146,6 +346,17 @@ def _looks_like_question(normalized_utterance: str) -> bool:
             )
         )
     )
+
+
+def _approved(
+    command_type: str,
+    utterance: str = "",
+    message: str | None = None,
+    payload: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> ApprovedCommand:
+    p = payload if payload is not None else ({"message": message} if message is not None else {})
+    return ApprovedCommand(command_type=command_type, utterance=utterance, payload=p, **kwargs)
 
 
 def classify_utterance(utterance: str) -> ApprovedCommand:
@@ -229,6 +440,20 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
     ):
         return ApprovedCommand(command_type="task_instruction", utterance=text)
 
+    primitive_definition = _parse_primitive_definition_request(text)
+    if isinstance(primitive_definition, PrimitiveDefinitionRequest):
+        return _approved(
+            "primitive_definition",
+            text,
+            payload={"definition": primitive_definition.as_dict()},
+        )
+    if isinstance(primitive_definition, str):
+        return _approved("unsupported", text, primitive_definition)
+
+    custom_metric = _parse_metric_query(text)
+    if custom_metric is not None:
+        return _approved("metric_query", text, payload={"metric": custom_metric})
+
     # Concept teach — explicit syntax: "remember X means Y" / "define X as Y"
     _concept_teach_m = re.match(
         r"^(?:remember|teach|define)\s+(.+?)\s+(?:means|as|is shorthand for)\s+(.+)$",
@@ -248,11 +473,8 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
             if _raw_m is not None
             else _concept_teach_m.group(2).strip().strip("'\"")
         )
-        return ApprovedCommand(
-            kind="concept_teach",
-            utterance=text,
-            payload={"name": cname, "utterance": cutterance},
-        )
+        return _approved("concept_teach", text, payload={"name": cname, "utterance": cutterance})
+
 
     # Natural-language concept teach patterns ("when I say X, Y" / "X means Y") are
     # intentionally omitted here — they route through the LLM / SmokeTestCompiler which
@@ -262,11 +484,8 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
     _concept_forget_m = re.match(r"^forget(?:\s+concept)?\s+(.+)$", normalized)
     if _concept_forget_m:
         cname = _concept_forget_m.group(1).strip().strip("'\"")
-        return ApprovedCommand(
-            kind="concept_forget",
-            utterance=text,
-            payload={"name": cname},
-        )
+        return _approved("concept_forget", text, payload={"name": cname})
+
 
     # Concept list
     if normalized in {
@@ -387,6 +606,7 @@ class OperatorStationSession:
         self.startup_prewarm_summary: dict[str, Any] | None = None
         self.pending_clarification: PendingClarification | None = None
         self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
+        self.pending_primitive_definition: PendingPrimitiveDefinition | None = None
         self.last_execution_ticket: ExecutionTicket | None = None
         self.last_memory_write_ticket: MemoryWriteTicket | None = None
         self.last_raw_motor_ticket: RawMotorTicket | None = None
@@ -488,27 +708,6 @@ class OperatorStationSession:
 
         return "go to the red door"
 
-    def _ticket_for_trace(
-        self,
-        request_id: str | None,
-    ) -> ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None:
-        return self.command_authority.ticket_for_trace(
-            request_id,
-            (
-                self.last_execution_ticket,
-                self.last_memory_write_ticket,
-                self.last_raw_motor_ticket,
-            ),
-        )
-
-    def _trace_command_type(
-        self,
-        message: str,
-        graph: ReadinessGraph | None,
-        plan: RequestPlan | None,
-    ) -> str:
-        return self.command_authority.trace_command_type(message, graph=graph, plan=plan)
-
     def _record_command_result(
         self,
         utterance: str,
@@ -536,6 +735,11 @@ class OperatorStationSession:
                 "synthesis": self.pending_synthesis_proposal.handle
                 if self.pending_synthesis_proposal is not None
                 else None,
+                "primitive_definition": (
+                    self.pending_primitive_definition.request.proposed_handle
+                    if self.pending_primitive_definition is not None
+                    else None
+                ),
             },
             last_result=self.last_result,
         )
@@ -632,15 +836,12 @@ class OperatorStationSession:
             self.log(f"intent verifier injected: {verif_result.summary()}")
         if verif_result.inversion_detected:
             self.log(f"intent verifier blocked inversion: {verif_result.inversion_reason}")
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": (
+            return _approved("ambiguous", utterance, (
                     "Semantic inversion detected in compiled plan: "
                     f"{verif_result.inversion_reason} "
                     "Please rephrase."
-                )},
-            )
+                ))
+
 
         request_plan_recorded = False
         if intent.grounding_query_plan is not None:
@@ -702,25 +903,16 @@ class OperatorStationSession:
             name = (intent.concept_name or "").strip()
             expansion = (intent.concept_utterance or "").strip()
             if not name or not expansion:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": "Please specify both a name and an instruction for the concept."},
-                )
-            return ApprovedCommand(
-                kind="concept_teach",
-                utterance=utterance,
-                payload={"name": name, "utterance": expansion},
-            )
+                return _approved("clarification", utterance, "Please specify both a name and an instruction for the concept.")
+
+            return _approved("concept_teach", utterance, payload={"name": name, "utterance": expansion})
+
 
         if intent.intent_type == "concept_recall":
             name = (intent.concept_name or "").strip()
             if not name:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": "Please specify the concept name to recall."},
-                )
+                return _approved("clarification", utterance, "Please specify the concept name to recall.")
+
             concept = self.knowledge_base.recall(name)
             if concept is None:
                 return ApprovedCommand(
@@ -735,11 +927,8 @@ class OperatorStationSession:
                 )
             # Procedure-type concepts route to _run_procedure, not task_instruction
             if concept.concept_type == "procedure":
-                return ApprovedCommand(
-                    kind="procedure_execute",
-                    utterance=utterance,
-                    payload={"steps": list(concept.steps)},
-                )
+                return _approved("procedure_execute", utterance, payload={"steps": list(concept.steps)})
+
             expanded = concept.utterance
             self.log(f"concept_recall: '{name}' → '{expanded}'")
             return ApprovedCommand(command_type="task_instruction", utterance=expanded)
@@ -747,48 +936,30 @@ class OperatorStationSession:
         if intent.intent_type == "procedure_recall":
             steps = list(intent.concept_steps or [])
             if not steps:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": "Please specify the concept names to execute in sequence."},
-                )
+                return _approved("clarification", utterance, "Please specify the concept names to execute in sequence.")
+
             self.log(f"procedure_recall: steps={steps}")
-            return ApprovedCommand(
-                kind="procedure_execute",
-                utterance=utterance,
-                payload={"steps": steps},
-            )
+            return _approved("procedure_execute", utterance, payload={"steps": steps})
+
 
         if intent.intent_type == "sequence_instruction":
             usteps = list(intent.utterance_steps or [])
             if not usteps:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": "Please specify the task steps to execute in sequence."},
-                )
+                return _approved("clarification", utterance, "Please specify the task steps to execute in sequence.")
+
             self.log(f"sequence_instruction: steps={usteps}")
-            return ApprovedCommand(
-                kind="sequence_execute",
-                utterance=utterance,
-                payload={"steps": usteps},
-            )
+            return _approved("sequence_execute", utterance, payload={"steps": usteps})
+
 
         if intent.intent_type == "motor_command":
             action = (intent.action_name or "").strip()
             count = max(1, intent.repeat_count or 1)
             if not action:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": "Please specify which motor action to perform."},
-                )
+                return _approved("clarification", utterance, "Please specify which motor action to perform.")
+
             self.log(f"motor_command: action={action} count={count}")
-            return ApprovedCommand(
-                kind="motor_execute",
-                utterance=utterance,
-                payload={"action": action, "count": count},
-            )
+            return _approved("motor_execute", utterance, payload={"action": action, "count": count})
+
 
         if intent.intent_type == "motor_sequence":
             sequence: list[dict[str, Any]] = []
@@ -803,32 +974,20 @@ class OperatorStationSession:
                     continue
                 sequence.append({"action": action_name, "count": action_count})
             if len(sequence) < 2:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": "Could not parse motor sequence steps."},
-                )
+                return _approved("clarification", utterance, "Could not parse motor sequence steps.")
+
             self.log(f"motor_sequence: {len(sequence)} actions")
-            return ApprovedCommand(
-                kind="motor_sequence_execute",
-                utterance=utterance,
-                payload={"sequence": sequence},
-            )
+            return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
+
 
         if intent.intent_type == "mission_contract":
             steps = list(intent.mission_steps or [])
             if len(steps) < 2:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": "A mission requires at least 2 task steps."},
-                )
+                return _approved("clarification", utterance, "A mission requires at least 2 task steps.")
+
             self.log(f"mission_contract: {len(steps)} steps")
-            return ApprovedCommand(
-                kind="mission_execute",
-                utterance=utterance,
-                payload={"steps": steps},
-            )
+            return _approved("mission_execute", utterance, payload={"steps": steps})
+
 
         if intent.intent_type == "claim_reference":
             if intent.claim_reference == "threshold_filter":
@@ -838,11 +997,8 @@ class OperatorStationSession:
                     return self._arbitrate_gap(utterance, intent, cap_match)
                 # Already registered — execute directly.
                 return self._dispatch_claims_filter(utterance, intent, cap_match)
-            return ApprovedCommand(
-                kind="claim_reference",
-                utterance=utterance,
-                payload={"ref_type": intent.claim_reference or ""},
-            )
+            return _approved("claim_reference", utterance, payload={"ref_type": intent.claim_reference or ""})
+
 
         if intent.intent_type in {"unsupported", "ambiguous"}:
             # Pure semantic/schema failure (no declared capabilities) → plain error.
@@ -862,11 +1018,8 @@ class OperatorStationSession:
                         },
                     )
                 reason = intent.reason or "I could not understand that request."
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={"message": f"I didn't understand that: {reason}"},
-                )
+                return _approved("clarification", utterance, f"I didn't understand that: {reason}")
+
             # Route through the arbitrator — it has access to the full capability manifest
             # and SceneModel API surface, so it can recognise synthesisable spatial
             # computations (e.g. threshold filtering) that the LLM compiler missed.
@@ -876,27 +1029,18 @@ class OperatorStationSession:
             return ApprovedCommand(command_type="quit", utterance=utterance)
 
         if intent.intent_type == "reset":
-            return ApprovedCommand(
-                kind="reset",
-                utterance=utterance,
-                payload={"clear_memory": bool(intent.clear_memory)},
-            )
+            return _approved("reset", utterance, payload={"clear_memory": bool(intent.clear_memory)})
+
 
         if intent.intent_type == "cache_query":
             return ApprovedCommand(command_type="cache_query", utterance=utterance)
 
         if intent.intent_type == "status_query":
             if intent.status_query == "ground_target" and intent.target_selector is not None:
-                return ApprovedCommand(
-                    kind="ground_target_query",
-                    utterance=utterance,
-                    payload={"target_selector": intent.target_selector},
-                )
-            return ApprovedCommand(
-                kind="status_query",
-                utterance=utterance,
-                payload={"query": intent.status_query or "status"},
-            )
+                return _approved("ground_target_query", utterance, payload={"target_selector": intent.target_selector})
+
+            return _approved("status_query", utterance, payload={"query": intent.status_query or "status"})
+
 
         if intent.intent_type == "knowledge_update":
             question_command = self._question_override_command(utterance)
@@ -921,11 +1065,8 @@ class OperatorStationSession:
                     )
                     if clarification is not None:
                         return clarification
-                    return ApprovedCommand(
-                        kind="ambiguous",
-                        utterance=utterance,
-                        payload={"message": grounded["message"]},
-                    )
+                    return _approved("ambiguous", utterance, grounded["message"])
+
                 target = grounded["target"]
                 return ApprovedCommand(
                     kind="knowledge_update",
@@ -997,11 +1138,8 @@ class OperatorStationSession:
                     )
                     if clarification is not None:
                         return clarification
-                    return ApprovedCommand(
-                        kind="ambiguous",
-                        utterance=utterance,
-                        payload={"message": grounded["message"]},
-                    )
+                    return _approved("ambiguous", utterance, grounded["message"])
+
                 target = grounded["target"]
                 instruction = f"go to the {target['color']} {target['type']}"
             elif isinstance(intent.target, dict):
@@ -1391,7 +1529,12 @@ class OperatorStationSession:
 
     def _memory_writes_from_payload(self, payload: dict[str, Any]) -> list[MemoryUpdate]:
         writes: list[MemoryUpdate] = []
-        for key in ("target_color", "target_type", "delivery_target"):
+        for key in (
+            "target_color",
+            "target_type",
+            "delivery_target",
+            "primitive_definitions",
+        ):
             if key in payload:
                 writes.append(
                     MemoryUpdate(
@@ -1483,6 +1626,455 @@ class OperatorStationSession:
             types = [m.mismatch_type for m in mismatches]
             self.log(f"mismatch detection: {len(mismatches)} mismatch(es): {types}")
 
+    def _primitive_definition_plan(
+        self,
+        utterance: str,
+        request: PrimitiveDefinitionRequest,
+    ) -> RequestPlan:
+        dependency_steps: list[RequestPlanStep] = []
+        for idx, handle in enumerate(request.dependency_handles):
+            metric = request.dependencies[idx] if idx < len(request.dependencies) else handle
+            dependency_steps.append(
+                RequestPlanStep(
+                    step_id=f"dependency_{idx + 1}",
+                    layer="grounding",
+                    operation="rank",
+                    required_handle=handle,
+                    inputs={"object_type": "door"},
+                    outputs=["ranked_door_list", "distances"],
+                    constraints={
+                        "metric": metric,
+                        "definition_dependency": True,
+                    },
+                )
+            )
+        dependency_ids = [step.step_id for step in dependency_steps]
+        steps = [
+            *dependency_steps,
+            RequestPlanStep(
+                step_id="propose_primitive_definition",
+                layer="control",
+                operation="answer",
+                outputs=["operator_response"],
+                depends_on=dependency_ids,
+                constraints={
+                    "definition_type": request.definition_type,
+                    "proposed_handle": request.proposed_handle,
+                    "safety_class": request.safety_class,
+                },
+            ),
+        ]
+        return RequestPlan(
+            request_id=(
+                "primitive_definition:"
+                f"{abs(hash((utterance, request.proposed_handle))) % 1_000_000}"
+            ),
+            original_utterance=utterance,
+            objective_type="primitive_definition",
+            objective_summary=(
+                f"Define {request.definition_type} {request.normalized_name}"
+            ),
+            steps=steps,
+            preservation_signals=[
+                "primitive_definition",
+                f"metric.{request.normalized_name}",
+                *[f"dependency.{metric}" for metric in request.dependencies],
+            ],
+            expected_response="propose_definition",
+        )
+
+    def propose_primitive_definition(self, definition: dict[str, Any]) -> str:
+        request = PrimitiveDefinitionRequest.from_dict(definition)
+        existing = self.capability_registry.lookup(request.proposed_handle)
+        if existing is not None and existing.implementation_status == "implemented":
+            return (
+                "PRIMITIVE DEFINITION NOT STORED\n"
+                f"handle={request.proposed_handle}\n"
+                "reason=already_implemented"
+            )
+        plan = self._primitive_definition_plan(
+            request.provenance.get("operator_utterance", request.name),
+            request,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=self._claims_valid_for_current_environment(),
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = plan
+        self.last_readiness_graph = graph
+        self.pending_primitive_definition = PendingPrimitiveDefinition(
+            request=request,
+            request_plan=plan,
+            readiness_graph=graph,
+        )
+        dependency_lines = []
+        for metric, handle in zip(request.dependencies, request.dependency_handles):
+            spec = self.capability_registry.lookup(handle)
+            status = spec.implementation_status if spec is not None else "missing"
+            dependency_lines.append(f"  - {metric}: {handle} ({status})")
+        expression = request.expression
+        formula = request.provenance.get("formula")
+        return (
+            "PRIMITIVE DEFINITION PROPOSAL\n"
+            f"name={request.name}\n"
+            f"normalized_name={request.normalized_name}\n"
+            f"handle={request.proposed_handle}\n"
+            f"definition_type={request.definition_type}\n"
+            f"safety_class={request.safety_class}\n"
+            f"formula={formula}\n"
+            f"expression={expression}\n"
+            "dependencies:\n"
+            + ("\n".join(dependency_lines) if dependency_lines else "  - none")
+            + "\nShould I build it now? (yes / no)"
+        )
+
+    def handle_pending_primitive_definition(
+        self,
+        utterance: str,
+        command: ApprovedCommand,
+    ) -> str:
+        pending = self.pending_primitive_definition
+        if pending is None:
+            return "No primitive definition is pending."
+        normalized = _normalize_utterance(utterance)
+        if command.kind == "quit":
+            self.pending_primitive_definition = None
+            return "QUIT"
+        if command.kind == "cancel":
+            self.pending_primitive_definition = None
+            return "CANCELLED: primitive definition proposal cleared"
+        if command.kind == "reset":
+            self.pending_primitive_definition = None
+            return self.reset(clear_memory=bool(command.payload.get("clear_memory")))
+        if normalized in {"no", "nope", "nah", "do not", "don't", "reject", "cancel it"}:
+            self.pending_primitive_definition = None
+            return (
+                "PRIMITIVE DEFINITION REJECTED\n"
+                f"handle={pending.request.proposed_handle}\n"
+                "registered=false"
+            )
+        if self._is_acceptance(normalized):
+            self.pending_primitive_definition = None
+            return self._approve_primitive_definition(pending.request, utterance)
+        return (
+            "CLARIFY\n"
+            f"Primitive definition pending: {pending.request.proposed_handle}\n"
+            "Please answer yes or no."
+        )
+
+    def _approve_primitive_definition(
+        self,
+        request: PrimitiveDefinitionRequest,
+        approval_utterance: str,
+    ) -> str:
+        if request.safety_class != "query":
+            return (
+                "PRIMITIVE DEFINITION FAILED\n"
+                "reason=non_query_safety_class\n"
+                "registered=false"
+            )
+        for metric in request.dependencies:
+            ok, message = self._ensure_metric_dependency(metric)
+            if not ok:
+                return (
+                    "PRIMITIVE DEFINITION FAILED\n"
+                    f"handle={request.proposed_handle}\n"
+                    f"dependency={metric}\n"
+                    f"reason={message}\n"
+                    "registered=false"
+                )
+
+        fn = self._ranker_for_metric_expression(request.expression)
+        validation_error = self._validate_metric_ranker(fn)
+        if validation_error is not None:
+            return (
+                "PRIMITIVE DEFINITION FAILED\n"
+                f"handle={request.proposed_handle}\n"
+                f"reason=validation_failed:{validation_error}\n"
+                "registered=false"
+            )
+
+        description = (
+            f"Operator-defined ranked-door distance metric '{request.normalized_name}' "
+            f"from expression {request.expression}."
+        )
+        registered = self.capability_registry.register_dynamic(
+            request.proposed_handle,
+            description,
+            fn,
+            inputs=["scene.door_candidates", "agent_pose"],
+            outputs=["ranked_door_list", "distances"],
+            side_effects=[],
+            safety_class="query",
+            authority_level="operator",
+            validation_hooks=["operator_metric_fixture_validation"],
+        )
+        if not registered:
+            return (
+                "PRIMITIVE DEFINITION FAILED\n"
+                f"handle={request.proposed_handle}\n"
+                "reason=registration_conflict\n"
+                "registered=false"
+            )
+        self._install_metric_semantics(request.normalized_name)
+        self._record_primitive_definition(request, approval_utterance)
+        return (
+            "PRIMITIVE DEFINITION REGISTERED\n"
+            f"name={request.name}\n"
+            f"normalized_name={request.normalized_name}\n"
+            f"handle={request.proposed_handle}\n"
+            "safety_class=query\n"
+            "registered=true"
+        )
+
+    def _ensure_metric_dependency(self, metric: str) -> tuple[bool, str]:
+        handle = _metric_dependency_handle(metric)
+        spec = self.capability_registry.lookup(handle)
+        if spec is None:
+            return False, f"dependency handle {handle} is missing"
+        if spec.implementation_status == "implemented":
+            return True, "implemented"
+        if not (spec.implementation_status == "synthesizable" or spec.safe_to_synthesize):
+            return False, f"dependency handle {handle} is not safe to synthesize"
+        fn = self._ranker_for_metric_expression({"op": "alias", "metric": metric})
+        validation_error = self._validate_metric_ranker(fn)
+        if validation_error is not None:
+            return False, f"dependency validation failed: {validation_error}"
+        if not self.capability_registry.register_synthesized(handle, fn):
+            return False, f"dependency handle {handle} could not be registered"
+        return True, "synthesized"
+
+    def _install_metric_semantics(self, metric: str) -> None:
+        metrics = self.operational_context.grounding_semantics.setdefault(
+            "distance_metrics",
+            [],
+        )
+        if not isinstance(metrics, list):
+            metrics = []
+            self.operational_context.grounding_semantics["distance_metrics"] = metrics
+        if metric not in metrics:
+            metrics.append(metric)
+
+    def _record_primitive_definition(
+        self,
+        request: PrimitiveDefinitionRequest,
+        approval_utterance: str,
+    ) -> None:
+        definitions = self.memory.knowledge.get("primitive_definitions")
+        if not isinstance(definitions, dict):
+            definitions = {}
+        record = request.as_dict()
+        record["provenance"] = {
+            **record.get("provenance", {}),
+            "approval_utterance": approval_utterance,
+            "registered_handle": request.proposed_handle,
+        }
+        definitions[request.normalized_name] = record
+        ticket = self._memory_write_ticket_for_payload(
+            request.provenance.get("operator_utterance", request.name),
+            {"primitive_definitions": definitions},
+            source="operator_primitive_definition",
+        )
+        self.apply_knowledge_update(ticket)
+
+    def _base_metric_distance(
+        self,
+        scene: SceneModel,
+        obj: SceneObject,
+        metric: str,
+    ) -> float:
+        if metric == "manhattan":
+            return float(scene.manhattan_distance_from_agent(obj))
+        if metric == "euclidean":
+            return math.sqrt((obj.x - scene.agent_x) ** 2 + (obj.y - scene.agent_y) ** 2)
+        fn = self.capability_registry.get_synthesized_callable(_metric_dependency_handle(metric))
+        if fn is not None:
+            ranked = fn(scene, {"object_type": "door", "color": None, "exclude_colors": []})
+            for dist, candidate in ranked:
+                if candidate is obj or (
+                    candidate.x == obj.x
+                    and candidate.y == obj.y
+                    and candidate.color == obj.color
+                    and candidate.object_type == obj.object_type
+                ):
+                    return float(dist)
+        raise ValueError(f"Unknown metric dependency: {metric}")
+
+    def _evaluate_metric_expression(
+        self,
+        expression: dict[str, Any],
+        scene: SceneModel,
+        obj: SceneObject,
+    ) -> float:
+        op = expression.get("op")
+        if op == "alias":
+            return self._base_metric_distance(scene, obj, str(expression.get("metric")))
+        if op == "min":
+            values = [
+                self._base_metric_distance(scene, obj, str(metric))
+                for metric in expression.get("metrics", [])
+            ]
+            return min(values)
+        if op == "max":
+            values = [
+                self._base_metric_distance(scene, obj, str(metric))
+                for metric in expression.get("metrics", [])
+            ]
+            return max(values)
+        if op == "mod":
+            base = self._base_metric_distance(scene, obj, str(expression.get("metric")))
+            constant = float(expression.get("constant"))
+            if constant == 0:
+                raise ValueError("mod constant must be non-zero")
+            return base % constant
+        if op == "add":
+            return self._base_metric_distance(
+                scene,
+                obj,
+                str(expression.get("metric")),
+            ) + float(expression.get("constant"))
+        if op == "subtract":
+            return self._base_metric_distance(
+                scene,
+                obj,
+                str(expression.get("metric")),
+            ) - float(expression.get("constant"))
+        if op in {"abs_diff", "abs_diff_plus"}:
+            metrics = list(expression.get("metrics", []))
+            if len(metrics) < 2:
+                raise ValueError("abs_diff requires two metrics")
+            value = abs(
+                self._base_metric_distance(scene, obj, str(metrics[0]))
+                - self._base_metric_distance(scene, obj, str(metrics[1]))
+            )
+            if op == "abs_diff_plus":
+                value += float(expression.get("constant"))
+            return value
+        raise ValueError(f"Unsupported metric expression op: {op}")
+
+    def _ranker_for_metric_expression(self, expression: dict[str, Any]) -> Any:
+        def _rank(scene: SceneModel, selector: dict[str, Any]) -> list[tuple[float, SceneObject]]:
+            doors = scene.find(
+                object_type=selector.get("object_type", "door"),
+                color=selector.get("color"),
+                exclude_colors=selector.get("exclude_colors") or [],
+            )
+            ranked = [
+                (self._evaluate_metric_expression(expression, scene, door), door)
+                for door in doors
+            ]
+            return sorted(
+                ranked,
+                key=lambda pair: (pair[0], pair[1].color or "", pair[1].x, pair[1].y),
+            )
+
+        return _rank
+
+    def _validate_metric_ranker(self, fn: Any) -> str | None:
+        scene = SceneModel(
+            agent_x=1,
+            agent_y=1,
+            agent_dir=0,
+            grid_width=6,
+            grid_height=6,
+            objects=[
+                SceneObject("door", "red", 1, 4),
+                SceneObject("door", "blue", 5, 1),
+                SceneObject("door", "green", 4, 5),
+            ],
+            source="fixture",
+        )
+        try:
+            ranked = fn(scene, {"object_type": "door", "color": None, "exclude_colors": []})
+        except Exception as exc:  # noqa: BLE001
+            return f"{type(exc).__name__}: {exc}"
+        if not ranked:
+            return "ranker returned no candidates"
+        distances = [float(item[0]) for item in ranked]
+        if distances != sorted(distances):
+            return "ranker output was not sorted ascending"
+        if any(not math.isfinite(distance) for distance in distances):
+            return "ranker returned a non-finite distance"
+        return None
+
+    def _resolve_metric_name(self, metric: str) -> str | None:
+        candidate = _normalize_metric_name(metric)
+        compact = candidate.replace("_", "")
+        for known in self.planning_semantics.metrics:
+            known_compact = known.replace("_", "")
+            if candidate == known or compact == known_compact:
+                return known
+        return None
+
+    def metric_query_summary(self, command: ApprovedCommand) -> str:
+        raw_metric = str(command.payload.get("metric") or "")
+        metric = self._resolve_metric_name(raw_metric)
+        if metric is None:
+            proposed = _metric_dependency_handle(_normalize_metric_name(raw_metric))
+            self.last_request_plan = RequestPlan(
+                request_id=f"metric_query:{abs(hash((command.utterance, raw_metric))) % 1_000_000}",
+                original_utterance=command.utterance,
+                objective_type="query",
+                objective_summary=f"Rank doors by undefined metric {raw_metric}",
+                steps=[
+                    RequestPlanStep(
+                        step_id="rank_scene_doors",
+                        layer="grounding",
+                        operation="rank",
+                        required_handle=proposed,
+                        inputs={"object_type": "door"},
+                        outputs=["active_claims.ranked_scene_doors"],
+                        constraints={"metric": raw_metric, "reference": "agent"},
+                    )
+                ],
+                expected_response="answer_query",
+            )
+            self.last_readiness_graph = evaluate_request_plan(
+                self.last_request_plan,
+                registry=self.capability_registry,
+                active_claims=self.active_claims,
+                claims_valid=self._claims_valid_for_current_environment(),
+                environment_identity=self.current_environment_identity,
+            )
+            return (
+                "CUSTOM METRIC MISSING\n"
+                f"metric={raw_metric}\n"
+                f"handle={proposed}\n"
+                "I do not have that metric defined yet. Define it first, then approve it."
+            )
+
+        handle = _metric_dependency_handle(metric)
+        intent = OperatorIntent(
+            intent_type="status_query",
+            status_query="ground_target",
+            grounding_query_plan={
+                "object_type": "door",
+                "operation": "rank",
+                "primitive_handle": handle,
+                "metric": metric,
+                "reference": "agent",
+                "order": "ascending",
+                "ordinal": None,
+                "color": None,
+                "exclude_colors": [],
+                "distance_value": None,
+                "comparison": None,
+                "tie_policy": "display",
+                "answer_fields": ["ranked_doors", "distance"],
+                "required_capabilities": [handle],
+                "preserved_constraints": ["rank", "door", metric],
+            },
+            capability_status="executable",
+            required_capabilities=[handle],
+            confidence=1.0,
+            reason=f"Operator requested ranked doors by custom metric {metric}.",
+        )
+        result = self.command_from_operator_intent(intent, command.utterance)
+        return self.execute_command(result)
+
     def _command_from_grounding_query_plan(
         self,
         utterance: str,
@@ -1537,12 +2129,8 @@ class OperatorStationSession:
         if handle:
             spec = self.capability_registry.lookup(handle)
             if spec is None:
-                return ApprovedCommand(
-                    kind="missing_skills",
-                    utterance=utterance,
-                    payload={"message": f"Missing primitive: {handle}"},
-                    capability_match=cap_match,
-                )
+                return _approved("missing_skills", utterance, f"Missing primitive: {handle}", capability_match=cap_match)
+
             if spec.implementation_status != "implemented":
                 plan_intent = replace(
                     intent,
@@ -1699,20 +2287,19 @@ class OperatorStationSession:
                     )
         else:
             # Vocabulary-based fallback (SmokeTestCompiler, legacy LLM output).
-            has_farthest = any(
-                term in normalized
-                for term in ("farthest", "furthest", "most distant", "least close")
-            )
-            has_closest = any(
-                term in normalized
-                for term in ("closest", "nearest", "shortest")
-            )
-            if has_farthest:
+            expected_order = infer_direction_from_utterance(normalized)
+            if expected_order == "descending":
                 if not (order == "descending" or "farthest" in answer_fields):
-                    return "The utterance asks for farthest, but the plan does not preserve descending/farthest semantics."
-            if has_closest:
+                    return (
+                        "The utterance asks for maximum-distance selection, but "
+                        "the plan does not preserve descending/farthest semantics."
+                    )
+            if expected_order == "ascending":
                 if not (order == "ascending" or "closest" in answer_fields or operation == "rank"):
-                    return "The utterance asks for closest, but the plan does not preserve ascending/closest semantics."
+                    return (
+                        "The utterance asks for minimum-distance selection, but "
+                        "the plan does not preserve ascending/closest semantics."
+                    )
 
         if "euclidean" in normalized and plan.get("metric") != "euclidean":
             return "The utterance specifies Euclidean distance, but the plan does not."
@@ -1733,24 +2320,15 @@ class OperatorStationSession:
     ) -> ApprovedCommand:
         scene = self.memory.scene_model
         if scene is None:
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "No scene data available for that reference."},
-            )
+            return _approved("ambiguous", utterance, "No scene data available for that reference.")
+
         if self.active_claims is None:
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "No active grounded target for that reference."},
-            )
+            return _approved("ambiguous", utterance, "No active grounded target for that reference.")
+
         if not self._claims_valid_for_current_environment(scene):
             self.active_claims = None
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "Scene has changed since that grounding. Please re-ground."},
-            )
+            return _approved("ambiguous", utterance, "Scene has changed since that grounding. Please re-ground.")
+
         entry = self.active_claims.last_grounded_target
         wants_task = intent.intent_type == "task_instruction" or self._utterance_requests_navigation(
             _normalize_utterance(utterance)
@@ -1781,12 +2359,8 @@ class OperatorStationSession:
         )
         claims = self._ensure_ranked_door_claims(plan.get("primitive_handle"))
         if isinstance(claims, str):
-            return ApprovedCommand(
-                kind="missing_skills",
-                utterance=utterance,
-                payload={"message": claims, "match": cap_match.compact()},
-                capability_match=cap_match,
-            )
+            return _approved("missing_skills", utterance, payload={"message": claims, "match": cap_match.compact()}, capability_match=cap_match)
+
 
         operation = plan.get("operation")
         answer_fields = {str(f).lower() for f in plan.get("answer_fields", [])}
@@ -1896,11 +2470,8 @@ class OperatorStationSession:
             if wants_task:
                 if len(matches) == 1:
                     return self._task_command_for_entry(matches[0], utterance)
-                return ApprovedCommand(
-                    kind="ambiguous",
-                    utterance=utterance,
-                    payload={"message": f"No unique {color} door is visible. I did not execute."},
-                )
+                return _approved("ambiguous", utterance, f"No unique {color} door is visible. I did not execute.")
+
             if matches:
                 self._set_last_grounded_claim(matches[0], claims)
             return ApprovedCommand(
@@ -1916,11 +2487,8 @@ class OperatorStationSession:
                 capability_match=cap_match,
             )
 
-        return ApprovedCommand(
-            kind="ambiguous",
-            utterance=utterance,
-            payload={"message": "I could not compose a result from the semantic query plan."},
-        )
+        return _approved("ambiguous", utterance, "I could not compose a result from the semantic query plan.")
+
 
     def _arbitrate_gap(
         self,
@@ -2045,12 +2613,8 @@ class OperatorStationSession:
                     "arbitrator_offer",
                 ),
             )
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": decision.clarification_prompt},
-                capability_match=cap_match,
-            )
+            return _approved("clarification", utterance, decision.clarification_prompt, capability_match=cap_match)
+
 
         if decision.decision_type == "substitute" and decision.suggested_handle:
             if not decision.safe_to_execute:
@@ -2058,12 +2622,8 @@ class OperatorStationSession:
                     f"Suggested substitute: {decision.suggested_handle}, "
                     "but marked not safe to execute."
                 )
-                return ApprovedCommand(
-                    kind="missing_skills",
-                    utterance=utterance,
-                    payload={"message": msg, "match": cap_match.compact()},
-                    capability_match=cap_match,
-                )
+                return _approved("missing_skills", utterance, payload={"message": msg, "match": cap_match.compact()}, capability_match=cap_match)
+
             self.log(f"arbitration substitute approved: {decision.suggested_handle}")
             return self._execute_approved_substitute(
                 decision.suggested_handle, utterance, intent, cap_match, decision
@@ -2220,11 +2780,8 @@ class OperatorStationSession:
 
         scene = self._ensure_scene_model()
         if scene is None:
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "No scene data available yet. I did not execute."},
-            )
+            return _approved("ambiguous", utterance, "No scene data available yet. I did not execute.")
+
 
         selector = dict(intent.target_selector or {})
         doors_in_scene = [o for o in scene.objects if o.object_type == "door"]
@@ -2249,11 +2806,8 @@ class OperatorStationSession:
             )
 
         if not ranked:
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "No matching doors found. I did not execute."},
-            )
+            return _approved("ambiguous", utterance, "No matching doors found. I did not execute.")
+
 
         self._write_ranked_claims(ranked, {**selector, "primitive": handle})
         distance, target_obj = ranked[0]
@@ -2277,12 +2831,8 @@ class OperatorStationSession:
                 f" @({obj.x},{obj.y}) dist={dist:.2f}"
             )
         lines.append("\n(I can navigate to any specific door — tell me which color.)")
-        return ApprovedCommand(
-            kind="clarification",
-            utterance=utterance,
-            payload={"message": "\n".join(lines)},
-            capability_match=cap_match,
-        )
+        return _approved("clarification", utterance, "\n".join(lines), capability_match=cap_match)
+
 
     # ── Claims-filter synthesis path ──────────────────────────────────────────
 
@@ -2302,12 +2852,8 @@ class OperatorStationSession:
 
         fn = self.capability_registry.get_synthesized_callable(handle)
         if fn is None:
-            return ApprovedCommand(
-                kind="missing_skills",
-                utterance=utterance,
-                payload={"message": f"Claims-filter primitive '{handle}' is not registered."},
-                capability_match=cap_match,
-            )
+            return _approved("missing_skills", utterance, f"Claims-filter primitive '{handle}' is not registered.", capability_match=cap_match)
+
         return self._execute_synthesized_claims_filter(handle, fn, utterance, intent, cap_match)
 
     def _try_synthesize_claims_filter(
@@ -2443,12 +2989,8 @@ class OperatorStationSession:
             )
 
         if not isinstance(filtered, list):
-            return ApprovedCommand(
-                kind="synthesizable",
-                utterance=utterance,
-                payload={"message": f"Claims-filter '{handle}' returned {type(filtered).__name__}, expected list."},
-                capability_match=cap_match,
-            )
+            return _approved("synthesizable", utterance, f"Claims-filter '{handle}' returned {type(filtered).__name__}, expected list.", capability_match=cap_match)
+
 
         metric_label = condition.get("metric") or "distance"
         comparison = condition["comparison"]
@@ -2513,10 +3055,8 @@ class OperatorStationSession:
                 0,
             )
             if intent.intent_type == "task_instruction":
-                return ApprovedCommand(
-                    kind="task_instruction",
-                    utterance=f"go to the {selected.color} {selected.object_type}",
-                )
+                return _approved("task_instruction", f"go to the {selected.color} {selected.object_type}")
+
             lines = [
                 f"GROUNDED TARGET (claims filter: {handle})",
                 f"target={selected.color} {selected.object_type}@({selected.x},{selected.y})",
@@ -2524,12 +3064,8 @@ class OperatorStationSession:
                 f"filter={comparison} {threshold}",
                 "source=active_claims",
             ]
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": "\n".join(lines)},
-                capability_match=cap_match,
-            )
+            return _approved("clarification", utterance, "\n".join(lines), capability_match=cap_match)
+
 
         if len(filtered) == 1:
             entry = filtered[0]
@@ -2547,12 +3083,8 @@ class OperatorStationSession:
                 f"filter={comparison} {threshold}",
                 "source=active_claims",
             ]
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": "\n".join(lines)},
-                capability_match=cap_match,
-            )
+            return _approved("clarification", utterance, "\n".join(lines), capability_match=cap_match)
+
 
         # Multiple matches — display ranked list and let operator choose
         header = (
@@ -3009,18 +3541,11 @@ class OperatorStationSession:
                 return None
         claims = self._ensure_ranked_door_claims(ranked_handle)
         if isinstance(claims, str):
-            return ApprovedCommand(
-                kind="missing_skills",
-                utterance=utterance,
-                payload={"message": claims, "match": cap_match.compact()},
-                capability_match=cap_match,
-            )
+            return _approved("missing_skills", utterance, payload={"message": claims, "match": cap_match.compact()}, capability_match=cap_match)
+
         if not claims.ranked_scene_doors:
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "No visible doors are available to compose from."},
-            )
+            return _approved("ambiguous", utterance, "No visible doors are available to compose from.")
+
 
         wants_task = self._utterance_requests_navigation(normalized) or (
             intent.intent_type == "task_instruction"
@@ -3072,12 +3597,8 @@ class OperatorStationSession:
                     extreme="farthest",
                     cap_match=cap_match,
                 )
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": self._format_extreme_answer(claims, normalized)},
-                capability_match=cap_match,
-            )
+            return _approved("clarification", utterance, self._format_extreme_answer(claims, normalized), capability_match=cap_match)
+
 
         if "closest" in normalized or "nearest" in normalized:
             if wants_task:
@@ -3087,12 +3608,8 @@ class OperatorStationSession:
                     extreme="closest",
                     cap_match=cap_match,
                 )
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": self._format_extreme_answer(claims, normalized)},
-                capability_match=cap_match,
-            )
+            return _approved("clarification", utterance, self._format_extreme_answer(claims, normalized), capability_match=cap_match)
+
 
         return None
 
@@ -3188,10 +3705,8 @@ class OperatorStationSession:
         matches = [entry for entry in claims.ranked_scene_doors if entry.color == color]
         if len(matches) != 1:
             return None
-        return ApprovedCommand(
-            kind="task_instruction",
-            utterance=f"go to the {matches[0].color} door",
-        )
+        return _approved("task_instruction", f"go to the {matches[0].color} door")
+
 
     def _command_from_grounding_followup(self, utterance: str) -> ApprovedCommand | None:
         normalized = _normalize_utterance(utterance)
@@ -3200,6 +3715,12 @@ class OperatorStationSession:
         if not self._claims_valid_for_current_environment():
             return None
         if "distance" not in normalized:
+            return None
+        if self._utterance_requests_navigation(normalized):
+            return None
+        if normalize_distance_ordinal(normalized) is not None:
+            return None
+        if infer_direction_from_utterance(normalized) is not None:
             return None
 
         metric = next(
@@ -3271,10 +3792,8 @@ class OperatorStationSession:
         return int(match.group(1))
 
     def _task_command_for_entry(self, entry: GroundedDoorEntry, utterance: str) -> ApprovedCommand:
-        return ApprovedCommand(
-            kind="task_instruction",
-            utterance=self.domain_helper.task_utterance_for_entry(entry),
-        )
+        return _approved("task_instruction", self.domain_helper.task_utterance_for_entry(entry))
+
 
     def _candidate_clarification_for_entries(
         self,
@@ -3299,11 +3818,8 @@ class OperatorStationSession:
                 "target_selector_candidate_choice",
             ),
         )
-        return ApprovedCommand(
-            kind="clarification",
-            utterance=utterance,
-            payload={"message": message},
-        )
+        return _approved("clarification", utterance, message)
+
 
     def _compose_distance_reference(
         self,
@@ -3384,11 +3900,8 @@ class OperatorStationSession:
         if direction in {"farthest", "furthest"}:
             ranked = list(reversed(ranked))
         if rank >= len(ranked):
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "There are not enough visible doors for that ordinal request."},
-            )
+            return _approved("ambiguous", utterance, "There are not enough visible doors for that ordinal request.")
+
         entry = ranked[rank]
         tied = [item for item in ranked if item.distance == entry.distance]
         if len(tied) > 1:
@@ -3434,11 +3947,8 @@ class OperatorStationSession:
             ranked = list(reversed(ranked))
         rank = ordinal - 1
         if rank >= len(ranked):
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": "There are not enough visible doors for that ordinal request."},
-            )
+            return _approved("ambiguous", utterance, "There are not enough visible doors for that ordinal request.")
+
         entry = ranked[rank]
         tied = [item for item in ranked if item.distance == entry.distance]
         if len(tied) > 1:
@@ -3455,11 +3965,8 @@ class OperatorStationSession:
                     resume_kind="task_instruction",
                     message=message,
                 )
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": message},
-            )
+            return _approved("clarification", utterance, message)
+
         self._set_last_grounded_claim(entry, claims)
         if wants_task:
             return self._task_command_for_entry(entry, utterance)
@@ -3656,11 +4163,8 @@ class OperatorStationSession:
         if not _looks_like_question(normalized):
             return None
         if "delivery target" in normalized or "target" in normalized:
-            return ApprovedCommand(
-                kind="status_query",
-                utterance=utterance,
-                payload={"query": "delivery_target"},
-            )
+            return _approved("status_query", utterance, payload={"query": "delivery_target"})
+
         return None
 
     def grounded_target_summary(self, payload: dict[str, Any]) -> str:
@@ -3884,11 +4388,8 @@ class OperatorStationSession:
         try:
             readiness = self.capability_registry.readiness_for_selector(selector)
         except SchemaValidationError as exc:
-            return ApprovedCommand(
-                kind="ambiguous",
-                utterance=utterance,
-                payload={"message": f"Invalid target selector: {exc}. I did not execute."},
-            )
+            return _approved("ambiguous", utterance, f"Invalid target selector: {exc}. I did not execute.")
+
         status = readiness["status"]
         if status == "executable":
             return None
@@ -3951,11 +4452,8 @@ class OperatorStationSession:
                     "target_selector_missing_field",
                 ),
             )
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": grounded["message"]},
-            )
+            return _approved("clarification", utterance, grounded["message"])
+
 
         if grounded.get("status") != "ambiguous":
             return None
@@ -4379,17 +4877,12 @@ class OperatorStationSession:
             })
             grounded = self.ground_target_selector(base_selector)
             if not grounded["ok"]:
-                return ApprovedCommand(
-                    kind="ambiguous",
-                    utterance=utterance,
-                    payload={"message": grounded["message"]},
-                )
+                return _approved("ambiguous", utterance, grounded["message"])
+
             target = grounded["target"]
             if intent.intent_type == "task_instruction":
-                return ApprovedCommand(
-                    kind="task_instruction",
-                    utterance=f"go to the {target['color']} {target['type']}",
-                )
+                return _approved("task_instruction", f"go to the {target['color']} {target['type']}")
+
             lines = [
                 "GROUNDED TARGET (substitute)",
                 f"substitute={handle}",
@@ -4398,34 +4891,22 @@ class OperatorStationSession:
             ]
             if grounded.get("distance") is not None:
                 lines.append(f"distance={grounded['distance']}")
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": "\n".join(lines)},
-                capability_match=cap_match,
-            )
+            return _approved("clarification", utterance, "\n".join(lines), capability_match=cap_match)
+
 
         # Display-grounding substitute (e.g., all_doors.ranked for a ranked query).
         if "all_doors.ranked" in handle:
             result_text = self._execute_grounding_display(handle)
-            return ApprovedCommand(
-                kind="clarification",
-                utterance=utterance,
-                payload={"message": result_text},
-                capability_match=cap_match,
-            )
+            return _approved("clarification", utterance, result_text, capability_match=cap_match)
+
 
         # Unknown primitive type — refuse clearly rather than silently doing nothing.
         msg = decision.operator_message or (
             f"Substitute '{handle}' was approved but no execution path exists for "
             f"primitive type '{spec.layer}'. I did not execute."
         )
-        return ApprovedCommand(
-            kind="missing_skills",
-            utterance=utterance,
-            payload={"message": msg, "match": cap_match.compact()},
-            capability_match=cap_match,
-        )
+        return _approved("missing_skills", utterance, payload={"message": msg, "match": cap_match.compact()}, capability_match=cap_match)
+
 
     def _ensure_scene_model(self) -> SceneModel | None:
         """Return the current SceneModel, building it via an idle sense pass if needed.
@@ -4988,11 +5469,8 @@ class OperatorStationSession:
         seq = self.knowledge_base._is_sequence(utterance.strip())
         if seq is not None:
             self.log(f"anonymous procedure detected: {seq}")
-            return ApprovedCommand(
-                kind="procedure_execute",
-                utterance=utterance,
-                payload={"steps": seq},
-            )
+            return _approved("procedure_execute", utterance, payload={"steps": seq})
+
 
         # Check for natural-language "X then Y" / "X followed by Y" sequences
         nat_cmd = self._try_natural_sequence(utterance)
@@ -5013,11 +5491,8 @@ class OperatorStationSession:
 
         # Procedure-type concept — unpack its steps
         if concept.concept_type == "procedure":
-            return ApprovedCommand(
-                kind="procedure_execute",
-                utterance=utterance,
-                payload={"steps": list(concept.steps)},
-            )
+            return _approved("procedure_execute", utterance, payload={"steps": list(concept.steps)})
+
 
         # Atomic concept — expand and dispatch
         expanded = concept.utterance

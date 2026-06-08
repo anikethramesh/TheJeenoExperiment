@@ -254,6 +254,8 @@ def _next_action(
             return "update_memory"
         if plan.expected_response == "answer_query":
             return "answer_query"
+        if plan.expected_response == "propose_definition":
+            return "propose_definition"
         if plan.expected_response == "refuse":
             return "refuse"
         return "answer_query"

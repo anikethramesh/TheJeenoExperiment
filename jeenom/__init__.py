@@ -12,6 +12,7 @@ from .operator_station import OperatorStationSession, classify_utterance
 from .planning_semantics import PlanningSemantics
 from .representation import RepresentationStore
 from .runtime_package import RuntimePackage
+from .schemas import PrimitiveDefinitionRequest
 from .sense import MiniGridSense
 from .side_effect_authority import SideEffectAuthority
 from .spine import MiniGridSpine
@@ -30,6 +31,7 @@ __all__ = [
     "OperatorStationSession",
     "OperationalMemory",
     "PlanningSemantics",
+    "PrimitiveDefinitionRequest",
     "Readiness",
     "RepresentationStore",
     "RuntimePackage",

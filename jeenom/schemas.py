@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
@@ -46,6 +47,7 @@ OPERATOR_INTENT_TYPES = (
     "task_instruction",
     "knowledge_update",
     "status_query",
+    "primitive_definition",
     "claim_reference",
     "cache_query",
     "concept_teach",
@@ -125,6 +127,7 @@ OPERATOR_CAPABILITY_STATUSES = (
 REQUEST_OBJECTIVE_TYPES = (
     "task",
     "query",
+    "primitive_definition",
     "knowledge_update",
     "motor_control",
     "control",
@@ -157,6 +160,7 @@ REQUEST_EXPECTED_RESPONSES = (
     "execute_motor",
     "answer_query",
     "ask_clarification",
+    "propose_definition",
     "propose_synthesis",
     "update_memory",
     "refuse",
@@ -262,20 +266,19 @@ def _ensure_dict(value: Any, label: str) -> dict[str, Any]:
     return dict(mapping)
 
 
+def _check_keys(d: dict, required: tuple, label: str, optional: tuple = ()) -> None:
+    missing = [key for key in required if key not in d]
+    if missing:
+        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
+    extra = sorted(set(d) - set(required) - set(optional))
+    if extra:
+        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+
+
 def _ensure_compiler_params(value: Any, label: str) -> dict[str, Any]:
     params = _ensure_dict(value, label)
     required_keys = ("color", "object_type", "target_location")
-    missing_keys = [key for key in required_keys if key not in params]
-    if missing_keys:
-        raise SchemaValidationError(
-            f"{label} missing required keys: {', '.join(missing_keys)}"
-        )
-
-    extra_keys = sorted(set(params) - set(required_keys))
-    if extra_keys:
-        raise SchemaValidationError(
-            f"{label} has unsupported keys: {', '.join(extra_keys)}"
-        )
+    _check_keys(params, required_keys, label)
 
     for key in ("color", "object_type"):
         field_value = params.get(key)
@@ -323,6 +326,17 @@ def _ensure_optional_str_enum(
     return string_value
 
 
+def _ensure_optional_metric_name(value: Any, label: str) -> str | None:
+    if value is None:
+        return None
+    metric = _ensure_str(value, label)
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", metric):
+        raise SchemaValidationError(
+            f"{label} must be a metric identifier string or null"
+        )
+    return metric
+
+
 def _ensure_optional_int(value: Any, label: str) -> int | None:
     if value is None:
         return None
@@ -335,13 +349,7 @@ def _ensure_operator_target(value: Any, label: str) -> dict[str, Any] | None:
     if value is None:
         return None
     target = _ensure_dict(value, label)
-    required_keys = ("color", "object_type")
-    missing = [key for key in required_keys if key not in target]
-    if missing:
-        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    extra = sorted(set(target) - set(required_keys))
-    if extra:
-        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    _check_keys(target, ("color", "object_type"), label)
     return {
         "color": _ensure_optional_str_enum(target.get("color"), OPERATOR_COLORS, f"{label}.color"),
         "object_type": _ensure_optional_str_enum(
@@ -356,13 +364,7 @@ def _ensure_operator_knowledge_update(value: Any, label: str) -> dict[str, Any] 
     if value is None:
         return None
     update = _ensure_dict(value, label)
-    required_keys = ("delivery_target",)
-    missing = [key for key in required_keys if key not in update]
-    if missing:
-        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    extra = sorted(set(update) - set(required_keys))
-    if extra:
-        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    _check_keys(update, ("delivery_target",), label)
     raw_delivery_target = update.get("delivery_target")
     if raw_delivery_target is None:
         return {"delivery_target": None}
@@ -400,13 +402,7 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
         "validation_hooks",
         "substrate_fingerprint",
     )
-    missing = [key for key in required_keys if key not in spec]
-    if missing:
-        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    allowed_keys = set(required_keys) | set(optional_keys)
-    extra = sorted(set(spec) - allowed_keys)
-    if extra:
-        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    _check_keys(spec, required_keys, label, optional_keys)
     primitive_type = _ensure_str(spec["primitive_type"], f"{label}.primitive_type")
     if primitive_type not in PRIMITIVE_SPEC_TYPES:
         raise SchemaValidationError(
@@ -495,12 +491,7 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
 def _ensure_primitive_manifest(value: Any, label: str) -> dict[str, Any]:
     manifest = _ensure_dict(value, label)
     required_keys = ("name", "primitives")
-    missing = [key for key in required_keys if key not in manifest]
-    if missing:
-        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    extra = sorted(set(manifest) - set(required_keys))
-    if extra:
-        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    _check_keys(manifest, required_keys, label)
     primitives = _ensure_list(manifest["primitives"], f"{label}.primitives")
     return {
         "name": _ensure_str(manifest["name"], f"{label}.name"),
@@ -536,12 +527,7 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
         "distance_metric",
         "distance_reference",
     )
-    missing = [key for key in required_keys if key not in selector]
-    if missing:
-        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    extra = sorted(set(selector) - set(required_keys))
-    if extra:
-        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    _check_keys(selector, required_keys, label)
 
     raw_exclude = selector.get("exclude_colors") or []
     if not isinstance(raw_exclude, list):
@@ -569,9 +555,8 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
             OPERATOR_SELECTOR_RELATIONS,
             f"{label}.relation",
         ),
-        "distance_metric": _ensure_optional_str_enum(
+        "distance_metric": _ensure_optional_metric_name(
             selector.get("distance_metric"),
-            OPERATOR_DISTANCE_METRICS,
             f"{label}.distance_metric",
         ),
         "distance_reference": _ensure_optional_str_enum(
@@ -606,12 +591,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
         "preserved_constraints",
     )
     optional_keys = ("comparison",)
-    missing = [key for key in required_keys if key not in plan]
-    if missing:
-        raise SchemaValidationError(f"{label} missing required keys: {', '.join(missing)}")
-    extra = sorted(set(plan) - set(required_keys) - set(optional_keys))
-    if extra:
-        raise SchemaValidationError(f"{label} has unsupported keys: {', '.join(extra)}")
+    _check_keys(plan, required_keys, label, optional_keys)
 
     raw_exclude = plan.get("exclude_colors") or []
     if not isinstance(raw_exclude, list):
@@ -642,9 +622,8 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
             f"{label}.operation",
         ),
         "primitive_handle": primitive_handle,
-        "metric": _ensure_optional_str_enum(
+        "metric": _ensure_optional_metric_name(
             plan.get("metric"),
-            OPERATOR_DISTANCE_METRICS,
             f"{label}.metric",
         ),
         "reference": _ensure_optional_str_enum(
@@ -742,7 +721,6 @@ class TaskRequest:
         )
 
 
-TaskContract = TaskRequest  # L3 task — hierarchy alias
 
 
 @dataclass
@@ -1207,9 +1185,8 @@ class SelectionObjective:
             attribute=_ensure_str(d.get("attribute"), "SelectionObjective.attribute"),
             direction=direction,
             ordinal=raw_ordinal,
-            metric=_ensure_optional_str_enum(
+            metric=_ensure_optional_metric_name(
                 d.get("metric"),
-                OPERATOR_DISTANCE_METRICS,
                 "SelectionObjective.metric",
             ),
         )
@@ -1220,6 +1197,100 @@ class SelectionObjective:
             "direction": self.direction,
             "ordinal": self.ordinal,
             "metric": self.metric,
+        }
+
+
+@dataclass
+class PrimitiveDefinitionRequest:
+    """Typed operator request to define a query-only primitive."""
+
+    definition_type: str
+    name: str
+    normalized_name: str
+    expression: dict[str, Any]
+    dependencies: list[str]
+    dependency_handles: list[str]
+    proposed_handle: str
+    safety_class: str = "query"
+    authority_level: str = "operator"
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "PrimitiveDefinitionRequest":
+        mapping = _ensure_mapping(data, "PrimitiveDefinitionRequest")
+        definition_type = _ensure_str(
+            mapping.get("definition_type"),
+            "PrimitiveDefinitionRequest.definition_type",
+        )
+        if definition_type not in {"distance_metric"}:
+            raise SchemaValidationError(
+                "PrimitiveDefinitionRequest.definition_type must be distance_metric"
+            )
+        normalized_name = _ensure_str(
+            mapping.get("normalized_name"),
+            "PrimitiveDefinitionRequest.normalized_name",
+        )
+        if not re.match(r"^[a-z][a-z0-9_]*$", normalized_name):
+            raise SchemaValidationError(
+                "PrimitiveDefinitionRequest.normalized_name must be registry-safe"
+            )
+        safety_class = _ensure_str(
+            mapping.get("safety_class", "query"),
+            "PrimitiveDefinitionRequest.safety_class",
+        )
+        if safety_class != "query":
+            raise SchemaValidationError(
+                "PrimitiveDefinitionRequest.safety_class must be query"
+            )
+        authority_level = _ensure_str(
+            mapping.get("authority_level", "operator"),
+            "PrimitiveDefinitionRequest.authority_level",
+        )
+        if authority_level != "operator":
+            raise SchemaValidationError(
+                "PrimitiveDefinitionRequest.authority_level must be operator"
+            )
+        proposed_handle = _ensure_str(
+            mapping.get("proposed_handle"),
+            "PrimitiveDefinitionRequest.proposed_handle",
+        )
+        return cls(
+            definition_type=definition_type,
+            name=_ensure_str(mapping.get("name"), "PrimitiveDefinitionRequest.name"),
+            normalized_name=normalized_name,
+            expression=_ensure_dict(
+                mapping.get("expression"),
+                "PrimitiveDefinitionRequest.expression",
+            ),
+            dependencies=_ensure_str_list(
+                mapping.get("dependencies", []),
+                "PrimitiveDefinitionRequest.dependencies",
+            ),
+            dependency_handles=_ensure_str_list(
+                mapping.get("dependency_handles", []),
+                "PrimitiveDefinitionRequest.dependency_handles",
+            ),
+            proposed_handle=proposed_handle,
+            safety_class=safety_class,
+            authority_level=authority_level,
+            provenance=_ensure_dict(
+                mapping.get("provenance", {}),
+                "PrimitiveDefinitionRequest.provenance",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "definition_type": self.definition_type,
+            "name": self.name,
+            "normalized_name": self.normalized_name,
+            "expression": dict(self.expression),
+            "dependencies": list(self.dependencies),
+            "dependency_handles": list(self.dependency_handles),
+            "proposed_handle": self.proposed_handle,
+            "safety_class": self.safety_class,
+            "authority_level": self.authority_level,
+            "provenance": dict(self.provenance),
         }
 
 
@@ -1236,6 +1307,7 @@ class OperatorIntent:
     control: str | None = None
     target_selector: dict[str, Any] | None = None
     grounding_query_plan: dict[str, Any] | None = None
+    primitive_definition: PrimitiveDefinitionRequest | None = None
     capability_status: str = "executable"
     required_capabilities: list[str] = field(default_factory=list)
     clear_memory: bool = False
@@ -1308,6 +1380,11 @@ class OperatorIntent:
         grounding_query_plan = _ensure_grounding_query_plan(
             mapping.get("grounding_query_plan"),
             "OperatorIntent.grounding_query_plan",
+        )
+        primitive_definition = (
+            PrimitiveDefinitionRequest.from_dict(mapping.get("primitive_definition"))
+            if mapping.get("primitive_definition") is not None
+            else None
         )
 
         canonical_instruction = mapping.get("canonical_instruction")
@@ -1383,6 +1460,7 @@ class OperatorIntent:
             control=control,
             target_selector=target_selector,
             grounding_query_plan=grounding_query_plan,
+            primitive_definition=primitive_definition,
             capability_status=capability_status or "executable",
             required_capabilities=required_capabilities,
             clear_memory=_ensure_bool(
@@ -1435,6 +1513,11 @@ class OperatorIntent:
         elif self.intent_type == "status_query":
             if self.status_query is None:
                 raise SchemaValidationError("status_query requires status_query")
+        elif self.intent_type == "primitive_definition":
+            if self.primitive_definition is None:
+                raise SchemaValidationError(
+                    "primitive_definition requires primitive_definition payload"
+                )
         elif self.intent_type == "cache_query":
             if self.status_query not in {None, "cache"}:
                 raise SchemaValidationError("cache_query status_query must be cache or null")
@@ -1499,7 +1582,6 @@ class ProcedureRecipe:
         )
 
 
-ProcedureContract = ProcedureRecipe  # L2 procedure — hierarchy alias
 
 
 @dataclass
@@ -1548,7 +1630,6 @@ class SensePlanTemplate:
         )
 
 
-SensoryCommandTemplate = SensePlanTemplate  # L1 sensory command — hierarchy alias
 
 
 @dataclass
@@ -2685,7 +2766,10 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "description": "Colors to exclude. Use [] when no exclusion. Supports multiple: ['purple', 'yellow'].",
             },
             "relation": {"type": ["string", "null"], "enum": [*OPERATOR_SELECTOR_RELATIONS, None]},
-            "distance_metric": {"type": ["string", "null"], "enum": [*OPERATOR_DISTANCE_METRICS, None]},
+            "distance_metric": {
+                "type": ["string", "null"],
+                "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+            },
             "distance_reference": {
                 "type": ["string", "null"],
                 "enum": [*OPERATOR_DISTANCE_REFERENCES, None],
@@ -2707,7 +2791,10 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "object_type": {"type": ["string", "null"], "enum": [*OPERATOR_OBJECT_TYPES, None]},
             "operation": {"type": ["string", "null"], "enum": [*GROUNDING_QUERY_OPERATIONS, None]},
             "primitive_handle": {"type": ["string", "null"]},
-            "metric": {"type": ["string", "null"], "enum": [*OPERATOR_DISTANCE_METRICS, None]},
+            "metric": {
+                "type": ["string", "null"],
+                "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+            },
             "reference": {"type": ["string", "null"], "enum": [*OPERATOR_DISTANCE_REFERENCES, None]},
             "order": {"type": ["string", "null"], "enum": [*GROUNDING_QUERY_ORDERS, None]},
             "ordinal": {"type": ["integer", "null"]},
@@ -2784,6 +2871,46 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "control": {"type": ["string", "null"], "enum": [*OPERATOR_CONTROLS, None]},
             "target_selector": target_selector_schema,
             "grounding_query_plan": grounding_query_plan_schema,
+            "primitive_definition": {
+                "type": ["object", "null"],
+                "properties": {
+                    "definition_type": {
+                        "type": "string",
+                        "enum": ["distance_metric"],
+                    },
+                    "name": {"type": "string"},
+                    "normalized_name": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_]*$",
+                    },
+                    "expression": {"type": "object"},
+                    "dependencies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "dependency_handles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "proposed_handle": {"type": "string"},
+                    "safety_class": {"type": "string", "enum": ["query"]},
+                    "authority_level": {"type": "string", "enum": ["operator"]},
+                    "provenance": {"type": "object"},
+                },
+                "required": [
+                    "definition_type",
+                    "name",
+                    "normalized_name",
+                    "expression",
+                    "dependencies",
+                    "dependency_handles",
+                    "proposed_handle",
+                    "safety_class",
+                    "authority_level",
+                    "provenance",
+                ],
+                "additionalProperties": False,
+            },
             "capability_status": {
                 "type": "string",
                 "enum": list(OPERATOR_CAPABILITY_STATUSES),
@@ -2823,7 +2950,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
                     },
                     "metric": {
                         "type": ["string", "null"],
-                        "enum": [*OPERATOR_DISTANCE_METRICS, None],
+                        "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
                     },
                 },
                 "required": ["attribute", "direction", "ordinal", "metric"],
@@ -2911,6 +3038,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "control",
             "target_selector",
             "grounding_query_plan",
+            "primitive_definition",
             "capability_status",
             "required_capabilities",
             "clear_memory",
