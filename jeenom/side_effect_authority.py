@@ -25,6 +25,9 @@ class SideEffectAuthority:
         request_plan: RequestPlan,
         readiness_graph: ReadinessGraph,
         source: str | None = None,
+        mission_id: str | None = None,
+        parent_request_id: str | None = None,
+        provenance: dict | None = None,
     ) -> ExecutionTicket:
         return ExecutionTicket(
             request_id=request_plan.request_id,
@@ -34,6 +37,9 @@ class SideEffectAuthority:
             request_plan=request_plan,
             readiness_graph=readiness_graph,
             source=source or self.source_name,
+            mission_id=mission_id,
+            parent_request_id=parent_request_id,
+            provenance=dict(provenance or {}),
         )
 
     def issue_raw_motor_ticket(

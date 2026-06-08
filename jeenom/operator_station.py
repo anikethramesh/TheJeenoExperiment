@@ -21,6 +21,11 @@ from .intent_verifier import IntentVerificationResult, IntentVerifier
 from .cortex import Cortex
 from .llm_compiler import CompilerBackend, SmokeTestCompiler, build_compiler, canonical_task_params
 from .memory import OperationalMemory
+from .mission_cortex import (
+    InlineMetricMissionRequest,
+    MissionCortex,
+    parse_inline_metric_request,
+)
 from .minigrid_runtime_package import (
     build_minigrid_runtime_package,
     default_minigrid_domain_helper,
@@ -47,6 +52,7 @@ from .schemas import (
     GroundedDoorEntry,
     MemoryUpdate,
     MemoryWriteTicket,
+    MissionExecutionPlan,
     OperatorIntent,
     PrimitiveDefinitionRequest,
     ProcedureRecipe,
@@ -57,7 +63,6 @@ from .schemas import (
     SceneModel,
     SceneObject,
     SchemaValidationError,
-    SelectionObjective,
     StationActiveClaims,
     TargetSelector,
     TaskRequest,
@@ -97,7 +102,7 @@ class PendingPrimitiveDefinition:
     request: PrimitiveDefinitionRequest
     request_plan: RequestPlan
     readiness_graph: ReadinessGraph
-    resume_payload: dict[str, Any] | None = None
+    mission_plan: MissionExecutionPlan | None = None
 
 
 _ACTION_LEAK_TERMS = (
@@ -327,102 +332,6 @@ def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest
     return None
 
 
-def _inline_metric_resume_payload(
-    text: str,
-    expression: dict[str, Any],
-) -> dict[str, Any] | str | None:
-    normalized = _normalize_utterance(text)
-    wants_task = bool(
-        re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
-    )
-    ordinal_semantics = normalize_distance_ordinal(normalized)
-    direction = (
-        ordinal_semantics.order
-        if ordinal_semantics is not None
-        else infer_direction_from_utterance(normalized)
-    )
-    ordinal = ordinal_semantics.ordinal if ordinal_semantics is not None else None
-    if direction is not None and ordinal is None:
-        ordinal = 1
-    is_rank_query = bool(
-        re.search(r"\b(rank|list|show)\b", normalized)
-        or re.search(r"\b(all|every|each)\b.{0,30}\bdoors?\b", normalized)
-    )
-    if wants_task and direction is None:
-        return (
-            "I can derive that metric, but the task does not say how to select "
-            "a target from it. Use wording like 'third farthest' or 'closest'."
-        )
-    operation = "select" if wants_task else "rank" if is_rank_query and direction is None else "answer"
-    return {
-        "utterance": text,
-        "wants_task": wants_task,
-        "operation": operation,
-        "order": direction,
-        "ordinal": ordinal,
-        "object_type": "door",
-        "expression": dict(expression),
-    }
-
-
-def _parse_inline_metric_request(
-    text: str,
-) -> tuple[PrimitiveDefinitionRequest, dict[str, Any]] | str | None:
-    normalized = _normalize_utterance(text)
-    if "door" not in normalized or "distance" not in normalized:
-        return None
-    if not (
-        re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
-        or re.search(r"\b(rank|list|show|what|which|find)\b", normalized)
-    ):
-        return None
-
-    formula_match = re.search(
-        r"\b(?:based on|according to|using|by)\s+(?:the\s+)?(?P<formula>.+)$",
-        text.strip(),
-        re.IGNORECASE,
-    )
-    if formula_match is None:
-        return None
-    formula = formula_match.group("formula").strip()
-    expression = _parse_metric_expression(formula)
-    if expression is None:
-        return None
-    if expression.get("op") == "alias":
-        return None
-    if expression.get("op") == "unsafe":
-        return (
-            "REFUSE\n"
-            "Metric definitions must be query-only. I will not build a metric "
-            "that contains actuation, movement, controller, or motor side effects."
-        )
-    resume_payload = _inline_metric_resume_payload(text, expression)
-    if isinstance(resume_payload, str):
-        return resume_payload
-    if resume_payload is None:
-        return None
-
-    dependencies = list(dict.fromkeys(_metric_dependencies(formula)))
-    normalized_name = _metric_expression_name(expression)
-    request = PrimitiveDefinitionRequest(
-        definition_type="distance_metric",
-        name=normalized_name,
-        normalized_name=normalized_name,
-        expression=expression,
-        dependencies=dependencies,
-        dependency_handles=[_metric_dependency_handle(metric) for metric in dependencies],
-        proposed_handle=_metric_dependency_handle(normalized_name),
-        safety_class="query",
-        authority_level="operator",
-        provenance={
-            "operator_utterance": text,
-            "formula": formula,
-            "inline_request": True,
-        },
-    )
-    return request, resume_payload
-
-
 def _parse_metric_query(text: str) -> str | None:
     raw = text.strip()
     patterns = [
@@ -584,15 +493,14 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
     if isinstance(primitive_definition, str):
         return _approved("unsupported", text, primitive_definition)
 
-    inline_metric = _parse_inline_metric_request(text)
-    if isinstance(inline_metric, tuple):
-        request, resume_payload = inline_metric
+    inline_metric = parse_inline_metric_request(text)
+    if isinstance(inline_metric, InlineMetricMissionRequest):
         return _approved(
             "primitive_definition",
             text,
             payload={
-                "definition": request.as_dict(),
-                "resume_payload": resume_payload,
+                "definition": inline_metric.primitive_definition.as_dict(),
+                "mission_request": inline_metric,
             },
         )
     if isinstance(inline_metric, str):
@@ -714,6 +622,10 @@ class OperatorStationSession:
         )
         self.substrate: SubstrateAdapter = self.runtime_package.substrate
         self.capability_registry = self.runtime_package.resolve_capability_registry()
+        self.mission_cortex = MissionCortex(
+            planning_semantics=self.planning_semantics,
+            registry=self.capability_registry,
+        )
         # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
         self.knowledge_base = KnowledgeBase(
             storage_path=self.memory.memory_dir / "knowledge_base.json"
@@ -755,6 +667,7 @@ class OperatorStationSession:
         self.pending_clarification: PendingClarification | None = None
         self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
         self.pending_primitive_definition: PendingPrimitiveDefinition | None = None
+        self.last_mission_execution_plan: MissionExecutionPlan | None = None
         self.last_execution_ticket: ExecutionTicket | None = None
         self.last_memory_write_ticket: MemoryWriteTicket | None = None
         self.last_raw_motor_ticket: RawMotorTicket | None = None
@@ -1545,8 +1458,29 @@ class OperatorStationSession:
         graph: ReadinessGraph,
         *,
         source: str,
+        mission_plan: MissionExecutionPlan | None = None,
     ) -> ExecutionTicket:
         task = self.compose_known_task(instruction)
+        provenance: dict[str, Any] = {}
+        parent_request_id = None
+        mission_id = None
+        if mission_plan is not None:
+            mission_id = mission_plan.mission_id
+            parent_request_id = mission_plan.request_plan.request_id
+            provenance = {
+                "mission_id": mission_plan.mission_id,
+                "parent_request_id": mission_plan.request_plan.request_id,
+                "original_utterance": mission_plan.provenance.get(
+                    "original_utterance",
+                    mission_plan.description,
+                ),
+                "primitive_handle": (
+                    mission_plan.primitive_definition.proposed_handle
+                    if mission_plan.primitive_definition is not None
+                    else None
+                ),
+                "mission_description": mission_plan.description,
+            }
         return self.side_effect_authority.issue_execution_ticket(
             instruction=instruction,
             task_type=task.task_type,
@@ -1554,6 +1488,9 @@ class OperatorStationSession:
             request_plan=plan,
             readiness_graph=graph,
             source=source,
+            mission_id=mission_id,
+            parent_request_id=parent_request_id,
+            provenance=provenance,
         )
 
     def _execution_ticket_for_instruction(
@@ -1781,74 +1718,23 @@ class OperatorStationSession:
             types = [m.mismatch_type for m in mismatches]
             self.log(f"mismatch detection: {len(mismatches)} mismatch(es): {types}")
 
-    def _primitive_definition_plan(
-        self,
-        utterance: str,
-        request: PrimitiveDefinitionRequest,
-    ) -> RequestPlan:
-        dependency_steps: list[RequestPlanStep] = []
-        for idx, handle in enumerate(request.dependency_handles):
-            metric = request.dependencies[idx] if idx < len(request.dependencies) else handle
-            dependency_steps.append(
-                RequestPlanStep(
-                    step_id=f"dependency_{idx + 1}",
-                    layer="grounding",
-                    operation="rank",
-                    required_handle=handle,
-                    inputs={"object_type": "door"},
-                    outputs=["ranked_door_list", "distances"],
-                    constraints={
-                        "metric": metric,
-                        "definition_dependency": True,
-                    },
-                )
-            )
-        dependency_ids = [step.step_id for step in dependency_steps]
-        steps = [
-            *dependency_steps,
-            RequestPlanStep(
-                step_id="propose_primitive_definition",
-                layer="control",
-                operation="answer",
-                outputs=["operator_response"],
-                depends_on=dependency_ids,
-                constraints={
-                    "definition_type": request.definition_type,
-                    "proposed_handle": request.proposed_handle,
-                    "safety_class": request.safety_class,
-                },
-            ),
-        ]
-        return RequestPlan(
-            request_id=(
-                "primitive_definition:"
-                f"{abs(hash((utterance, request.proposed_handle))) % 1_000_000}"
-            ),
-            original_utterance=utterance,
-            objective_type="primitive_definition",
-            objective_summary=(
-                f"Define {request.definition_type} {request.normalized_name}"
-            ),
-            steps=steps,
-            preservation_signals=[
-                "primitive_definition",
-                f"metric.{request.normalized_name}",
-                *[f"dependency.{metric}" for metric in request.dependencies],
-            ],
-            expected_response="propose_definition",
-        )
-
     def propose_primitive_definition(
         self,
         definition: dict[str, Any],
         *,
-        resume_payload: dict[str, Any] | None = None,
+        mission_request: InlineMetricMissionRequest | None = None,
     ) -> str:
         request = PrimitiveDefinitionRequest.from_dict(definition)
         existing = self.capability_registry.lookup(request.proposed_handle)
         if existing is not None and existing.implementation_status == "implemented":
-            if resume_payload is not None:
-                resumed = self._resume_inline_metric_request(request, resume_payload)
+            if mission_request is not None:
+                mission_plan = self.mission_cortex.plan_inline_metric_request(
+                    mission_request,
+                    active_claims=self.active_claims,
+                    claims_valid=self._claims_valid_for_current_environment(),
+                    environment_identity=self.current_environment_identity,
+                )
+                resumed = self._execute_approved_mission_plan(mission_plan)
                 return (
                     "PRIMITIVE DEFINITION ALREADY REGISTERED\n"
                     f"handle={request.proposed_handle}\n\n"
@@ -1860,24 +1746,31 @@ class OperatorStationSession:
                 f"handle={request.proposed_handle}\n"
                 "reason=already_implemented"
             )
-        plan = self._primitive_definition_plan(
-            request.provenance.get("operator_utterance", request.name),
-            request,
-        )
-        graph = evaluate_request_plan(
-            plan,
-            registry=self.capability_registry,
-            active_claims=self.active_claims,
-            claims_valid=self._claims_valid_for_current_environment(),
-            environment_identity=self.current_environment_identity,
-        )
+        mission_plan = None
+        if mission_request is not None:
+            mission_plan = self.mission_cortex.plan_inline_metric_request(
+                mission_request,
+                active_claims=self.active_claims,
+                claims_valid=self._claims_valid_for_current_environment(),
+                environment_identity=self.current_environment_identity,
+            )
+            plan = mission_plan.request_plan
+            graph = mission_plan.readiness_graph
+        else:
+            plan, graph = self.mission_cortex.plan_primitive_definition(
+                request,
+                utterance=request.provenance.get("operator_utterance", request.name),
+                active_claims=self.active_claims,
+                claims_valid=self._claims_valid_for_current_environment(),
+                environment_identity=self.current_environment_identity,
+            )
         self.last_request_plan = plan
         self.last_readiness_graph = graph
         self.pending_primitive_definition = PendingPrimitiveDefinition(
             request=request,
             request_plan=plan,
             readiness_graph=graph,
-            resume_payload=resume_payload,
+            mission_plan=mission_plan,
         )
         dependency_lines = []
         for metric, handle in zip(request.dependencies, request.dependency_handles):
@@ -1899,7 +1792,7 @@ class OperatorStationSession:
             + ("\n".join(dependency_lines) if dependency_lines else "  - none")
             + (
                 "\nAfter registration I will resume the original request."
-                if resume_payload is not None
+                if mission_plan is not None
                 else ""
             )
             + "\nShould I build it now? (yes / no)"
@@ -1933,11 +1826,8 @@ class OperatorStationSession:
         if self._is_acceptance(normalized):
             self.pending_primitive_definition = None
             result = self._approve_primitive_definition(pending.request, utterance)
-            if pending.resume_payload is not None and "registered=true" in result:
-                resumed = self._resume_inline_metric_request(
-                    pending.request,
-                    pending.resume_payload,
-                )
+            if pending.mission_plan is not None and "registered=true" in result:
+                resumed = self._execute_approved_mission_plan(pending.mission_plan)
                 return f"{result}\n\nRESUMING ORIGINAL REQUEST\n{resumed}"
             return result
         return (
@@ -1946,70 +1836,20 @@ class OperatorStationSession:
             "Please answer yes or no."
         )
 
-    def _resume_inline_metric_request(
+    def _execute_approved_mission_plan(
         self,
-        request: PrimitiveDefinitionRequest,
-        resume_payload: dict[str, Any],
+        mission_plan: MissionExecutionPlan,
     ) -> str:
-        utterance = str(resume_payload.get("utterance") or request.provenance.get("operator_utterance") or request.name)
-        wants_task = bool(resume_payload.get("wants_task"))
-        operation = str(resume_payload.get("operation") or ("select" if wants_task else "rank"))
-        order = resume_payload.get("order")
-        ordinal = resume_payload.get("ordinal")
-        object_type = str(resume_payload.get("object_type") or "door")
-        required = [request.proposed_handle]
-        if wants_task:
-            required.append("task.go_to_object.door")
-        answer_fields = (
-            ["ranked_doors", "distance"]
-            if operation in {"rank", "list"}
-            else ["target", "distance"]
+        mission_plan = self.mission_cortex.resume_after_approval(
+            mission_plan,
+            active_claims=self.active_claims,
+            claims_valid=self._claims_valid_for_current_environment(),
+            environment_identity=self.current_environment_identity,
         )
-        selection_objective = None
-        if order in {"ascending", "descending"} and ordinal is not None:
-            selection_objective = SelectionObjective(
-                attribute="distance",
-                direction="maximum" if order == "descending" else "minimum",
-                ordinal=int(ordinal),
-                metric=request.normalized_name,
-            )
-        intent = OperatorIntent(
-            intent_type="task_instruction" if wants_task else "status_query",
-            status_query=None if wants_task else "ground_target",
-            task_type="go_to_object" if wants_task else None,
-            grounding_query_plan={
-                "object_type": object_type,
-                "operation": operation,
-                "primitive_handle": request.proposed_handle,
-                "metric": request.normalized_name,
-                "reference": "agent",
-                "order": order,
-                "ordinal": ordinal,
-                "color": None,
-                "exclude_colors": [],
-                "distance_value": None,
-                "comparison": None,
-                "tie_policy": "clarify" if wants_task else "display",
-                "answer_fields": answer_fields,
-                "required_capabilities": required,
-                "preserved_constraints": [
-                    "inline_metric",
-                    request.normalized_name,
-                    *request.dependencies,
-                ],
-                "metric_dependencies": list(request.dependencies),
-                "derived_metric": True,
-            },
-            primitive_definition=request,
-            capability_status="executable",
-            required_capabilities=required,
-            selection_objective=selection_objective,
-            confidence=1.0,
-            reason=(
-                "Resuming operator request after approved inline derived metric "
-                f"{request.normalized_name}."
-            ),
-        )
+        if mission_plan.continuation_intent is None:
+            raise RuntimeError("Approved mission plan requires continuation_intent")
+        utterance = mission_plan.provenance.get("original_utterance", mission_plan.description)
+        intent = mission_plan.continuation_intent
         command = self.command_from_operator_intent(intent, utterance)
         if command.kind == "task_instruction":
             instruction = self.resolve_task_instruction(command.utterance)
@@ -2018,13 +1858,18 @@ class OperatorStationSession:
             plan = self.last_request_plan
             graph = self.last_readiness_graph
             if plan is None or graph is None:
-                raise RuntimeError("Inline metric resume requires a recorded RequestPlan")
+                raise RuntimeError("Approved mission execution requires a recorded RequestPlan")
+            mission_plan.continuation_request_plan = plan
+            mission_plan.continuation_readiness_graph = graph
             ticket = self._execution_ticket_from_plan(
                 instruction,
                 plan,
                 graph,
-                source="operator_inline_metric",
+                source="operator_mission_flow",
+                mission_plan=mission_plan,
             )
+            mission_plan.child_tickets.append(ticket)
+            self.last_mission_execution_plan = mission_plan
             run_result = self._run_task_with_ticket(ticket)
             result = self.result_summary(run_result)
             if self.last_result is not None:
@@ -2034,6 +1879,7 @@ class OperatorStationSession:
             return result
 
         result = self.execute_command(command)
+        self.last_mission_execution_plan = mission_plan
         if self.last_result is not None:
             instruction = self.last_result.get("task", {}).get("instruction")
             if instruction:

@@ -183,7 +183,7 @@ class TurnOrchestrator:
         if command.kind == "primitive_definition":
             return station.propose_primitive_definition(
                 command.payload["definition"],
-                resume_payload=command.payload.get("resume_payload"),
+                mission_request=command.payload.get("mission_request"),
             )
         if command.kind == "knowledge_update":
             return station._apply_knowledge_update_from_payload(

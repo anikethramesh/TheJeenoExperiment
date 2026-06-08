@@ -25,9 +25,9 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 11 - Architecture Fix - Mission Flow** is next;
-  Phase 10 operator-station boundary cleanup is complete, but the compound
-  mission path still leaks through the station.
+- Current phase: **Phase 11 - Architecture Fix - Mission Flow** continues.
+  Phase 11A is complete; Phase 11B adds the hostile primitive/missions eval
+  ladder before any more architecture fixes.
 - Phase 9D is complete. Operator turns now route through typed envelopes,
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
@@ -52,10 +52,25 @@ Elon-algorithm rule for this repo:
   primitive-definition requests, gated proposals, validated/registered query
   primitives, operational-context metrics, ticketed knowledge records, and
   inline derived metrics embedded inside task requests.
+- Phase 11A is complete. Inline compound missions now route through
+  `MissionCortex`, typed `MissionExecutionPlan`, mission-linked
+  `ExecutionTicket` provenance, and hostile mission-flow eval coverage.
+- Phase 11B is the current red-bar work. It will make the eval suite hostile to
+  paraphrase brittleness, false success, unsafe conditional motor leakage,
+  lossy motor/procedure lineage, and mission flattening.
 - Current verification signal:
-  - `python evals/eval_master.py --suite cleanup`: 24/24 passing
-  - `python evals/eval_master.py`: 53/53 passing
-  - `python -m pytest -q tests`: 239 passed
+  - `python evals/eval_master.py --suite cleanup`: 25/25 passing
+  - `python evals/eval_master.py`: 54/54 passing
+  - `python -m pytest -q tests`: 244 passed
+- Phase 11B hostile evals have now been added and are intentionally red:
+  - `python evals/phase11b_primitive_ladder_probe.py`: failing with named
+    violated invariants
+  - `python -m pytest -q tests/test_phase11b_primitive_ladder.py`: 13 failed,
+    2 passed
+  - `python evals/eval_master.py --suite cleanup --list`: 26 selected probes
+    including `phase11b_primitive_ladder_probe.py`
+- The old green baseline is no longer the current health signal. Cleanup/all
+  evals are expected to fail until Phase 11B fixes land.
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -871,9 +886,9 @@ Measured outcome:
 
 - `python evals/phase10i_user_defined_metric_probe.py`: passing.
 - `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 9 passed.
-- `python evals/eval_master.py --suite cleanup`: 24/24 passing.
-- `python evals/eval_master.py`: 53/53 passing.
-- `python -m pytest -q tests`: 239 passed.
+- `python evals/eval_master.py --suite cleanup`: 25/25 passing.
+- `python evals/eval_master.py`: 54/54 passing.
+- `python -m pytest -q tests`: 244 passed.
 
 Phase 10 stop rule after 10I:
 
@@ -887,7 +902,7 @@ Phase 10 stop rule after 10I:
 
 ## Phase 11 - Architecture Fix - Mission Flow
 
-Status: planned.
+Status: in progress.
 
 Goal: make the implemented control flow match the architecture before adding
 new capability. Compound missions must be owned by Cortex, decomposed into typed
@@ -915,10 +930,7 @@ Required flow:
 4. Sense executes evidence requests and writes observation/grounding claims.
 5. Knowledge Base records claims, primitive definitions, procedures, provenance,
    and approval state through typed APIs/tickets.
-6. ReadinessGraph gates every step from claims and pri
-- Decide whether repo liposuction should be its own phase before or after Phase
-  12. Do not mix aesthetic file shrinking with mission-flow correctness.
-mitive availability.
+6. ReadinessGraph gates every step from claims and primitive availability.
 7. Cortex issues `ApprovedCommand` / `ExecutionTicket` only after readiness.
 8. Spine executes actuation through an `ExecutionContract`.
 9. Runtime execution/render still makes zero LLM calls.
@@ -973,10 +985,218 @@ Acceptance criteria:
 - `python evals/eval_master.py --suite cleanup`, `python evals/eval_master.py`,
   and `python -m pytest -q tests` remain green after the implementation.
 
-After Phase 11:
+### Phase 11A - Cortex-Owned Inline Mission Flow
 
-- Decide whether repo liposuction should be its own phase before or after Phase
-  12. Do not mix aesthetic file shrinking with mission-flow correctness.
+Status: done.
+
+Implemented in Phase 11A:
+
+- Added `jeenom/mission_cortex.py` as the Cortex-owned mission-flow helper.
+- Moved inline metric mission parsing, primitive-definition planning, and
+  continuation intent construction out of `OperatorStationSession`.
+- Extended `MissionExecutionPlan` with mission contract, primitive definition,
+  continuation intent/plan/graph, provenance, and child ticket lineage.
+- Extended `ExecutionTicket` with `mission_id`, `parent_request_id`, and
+  provenance.
+- Added `evals/phase11_mission_flow_probe.py` and
+  `tests/test_phase11_mission_flow.py`.
+
+Measured outcome:
+
+- Inline compound metric requests no longer rely on station-local resume
+  payloads.
+- Approval preserves mission provenance into the final execution ticket.
+- Existing Phase 10I operator-defined metric behavior remains green.
+
+### Phase 11B - Hostile Primitive And Mission Eval Ladder
+
+Status: current.
+
+Goal: stop the eval suite from giving false confidence. The suite must test the
+architecture ladder from low-level primitive invocation through procedure
+assembly and compound missions, with paraphrase sweeps at every level.
+
+This is eval-first work. Do not fix production code in 11B until the red bars
+are visible.
+
+What 11B must expose:
+
+- Equivalent operator phrasing must route to equivalent typed intent, plan,
+  readiness, claims, and tickets.
+- Query/sense phrases must not be unsupported just because they use different
+  surface language.
+- Conditional actuation must not execute raw motor primitives before Sense
+  produces evidence and Cortex evaluates the condition.
+- Multi-action motor/procedure requests must preserve parent/child lineage, not
+  only the final child action.
+- Named procedural primitives must be stored through the representation surface
+  and invoked through RequestPlan/ReadinessGraph, not through a chat-memory
+  shortcut.
+- Compound missions must keep MissionContract, evidence/ranking, selection,
+  execution ticket, and provenance intact.
+
+Hostile eval files:
+
+- Added `evals/phase11b_primitive_ladder_probe.py`.
+- Added `tests/test_phase11b_primitive_ladder.py`.
+- Registered the probe in `evals/manifest.py`.
+
+Low-level Sense paraphrase sweep:
+
+- "what is in front of me"
+- "what am I facing"
+- "what object is ahead"
+- "sense the cell in front"
+- "look forward"
+
+Required invariant:
+
+- routes to a typed query/evidence plan
+- writes or reads observation claims through Sense/representation
+- does not issue `ExecutionTicket` or `RawMotorTicket`
+- does not return unsupported/refuse for known senseable relations
+
+Low-level Spine paraphrase sweep:
+
+- "take one step forward"
+- "move forward once"
+- "advance one cell"
+- "step ahead"
+- "go forward one"
+
+Required invariant:
+
+- explicit low-level actuation creates a `RawMotorTicket`
+- RequestPlan objective is `motor_control`
+- ReadinessGraph next action is `execute_motor`
+- no task-like object request leaks into raw motor authority
+
+Named procedural primitive sweep:
+
+- Teach:
+  - "when I say fing fam foom, give me the distance to all doors"
+  - "remember fing fam foom means give me the distance to all doors"
+  - "define fing fam foom as give me the distance to all doors"
+- Invoke:
+  - "fing fam foom"
+  - "do fing fam foom"
+  - "run fing fam foom"
+
+Required invariant:
+
+- teaching creates a typed knowledge/procedure update plan
+- representation snapshot records the procedure/macro, plan, and provenance
+- invocation expands into the same ranked-distance RequestPlan
+- no side-effect ticket is issued for query-only procedure invocation
+
+Low-level action procedure sweep:
+
+- "go straight two steps and turn left"
+- "move forward twice then turn left"
+- "advance two cells, then face left"
+
+Required invariant:
+
+- decomposes into a parent procedure/sequence plan
+- preserves all child motor actions and counts
+- each child action has ticketed authority or an explicit child-ticket record
+- final result/provenance does not collapse to only the final action
+
+Conditional Sense + Spine sweep:
+
+- "if there is a red door in front of me, go forward, otherwise stay"
+- "if I am facing a red door, step forward, else do nothing"
+- "move only if the object ahead is a red door"
+
+Required invariant:
+
+- Sense runs first and records the front-cell/object claim
+- Cortex evaluates the condition from claims
+- Spine executes only if the condition is true
+- if false, JEENOM reports a no-op/non-execution honestly
+- no raw motor ticket is issued before the evidence condition is satisfied
+
+Distance/query paraphrase sweep:
+
+- "how far are all the doors from you"
+- "how far are the doors from you"
+- "how far away are the doors"
+- "distance to the doors"
+- "show me the door distances"
+- "how far is each door"
+- "what are the distances to the doors"
+
+Required invariant:
+
+- all route to the same ranked-door distance query
+- required capability includes `grounding.all_doors.ranked.manhattan.agent`
+- RequestPlan objective is `query`
+- ReadinessGraph next action is `answer_query`
+- response is not unsupported/refuse
+
+Compound mission sweep:
+
+- "find euclidean distance to all doors, find manhattan distance to all doors,
+  then go to the third farthest by their sum"
+- "go to the second highest door by max(euclidean, manhattan)"
+- "create ramesian = euclidean mod 5 and go to the farthest ramesian door"
+
+Required invariant:
+
+- Cortex owns decomposition
+- `MissionExecutionPlan` exists for compound execution
+- generated primitive is query-only unless explicit actuation safety is proven
+- continuation plan preserves rank/select/execute
+- final ticket carries mission provenance
+- runtime/render still reports zero LLM calls
+
+Negative controls:
+
+- "go to the door"
+- "how far is the door from you"
+- "pick up the red key"
+- "move to the farthest door by walking randomly"
+
+Required invariant:
+
+- clarify, refuse, or block honestly
+- no silent default target
+- no unsupported raw motor or task execution
+- no answer-only degradation for an actuation request
+
+Acceptance criteria for 11B:
+
+- The new evals fail on the current repo for named, architecture-level reasons.
+- Failure output is metric-shaped JSON and names the violated invariant.
+- Focused pytest covers the same hostile ladder with clear assertions.
+- No production code is changed in 11B.
+
+Current 11B red-bar findings:
+
+- Low-level Sense paraphrases are unsupported.
+- Some low-level Spine paraphrases are unsupported.
+- Distance-query paraphrases only work when trigger words like "all" or "each"
+  are present.
+- Stateful references like "the doors" and "their distances" are not reliably
+  bound to the visible set after a scene query.
+- Named procedure teaching can store a concept without a typed memory-update
+  RequestPlan, and "when I say ..." can produce a false query answer instead of
+  storing the procedure.
+- Multi-action motor/procedure prompts can execute while preserving only the
+  final child action in the current plan/ticket state.
+- Conditional actuation can execute raw motor motion before evidence proves the
+  condition.
+- Compound mission paraphrases beyond the exact 11A inline sum phrase do not
+  consistently create `MissionExecutionPlan` lineage.
+- Actuation requests with unsupported policy language can degrade into
+  answer-only grounding responses.
+
+After Phase 11B:
+
+- Implement the smallest architecture fixes needed to make the hostile ladder
+  green.
+- Do not start Phase 12 evidence planning or repo liposuction until this ladder
+  is green.
 
 ## Phase 12 - Minimal Representation And Evidence Planning
 

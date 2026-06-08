@@ -324,10 +324,11 @@ ARC-AGI3:
 - HOW: ARC game-state API, legal action API, state parser, replay/simulation
   tools, scoring/end-state feedback.
 
-## Current Repo Shape After Phase 10C
+## Current Repo Shape After Phase 11A
 
-The implementation now enforces the cortical control-plane objects, the first
-block/schema/knowledge boundary gates, and the first substrate HOW boundary.
+The implementation now enforces the cortical control-plane objects, the
+block/schema/knowledge boundary gates, the substrate HOW boundary, and the first
+Cortex-owned compound mission flow.
 
 Current enforced gateways:
 
@@ -352,6 +353,13 @@ Current enforced gateways:
 - `SideEffectAuthority` owns side-effect ticket minting.
 - `SubstrateAdapter` exists as the HOW protocol.
 - `MiniGridSubstrateAdapter` owns the first MiniGrid env/runtime HOW paths.
+- `OperationalContext` frames MiniGrid domain meaning and planning semantics.
+- `MissionCortex` owns compound mission decomposition for inline derived metric
+  tasks.
+- `MissionExecutionPlan` carries mission contract, primitive definition,
+  continuation intent/plan/graph, provenance, and child execution tickets.
+- `ExecutionTicket` carries optional `mission_id`, `parent_request_id`, and
+  provenance so final actuation can explain the full mission lineage.
 
 Current architectural debt:
 
@@ -361,18 +369,43 @@ Current architectural debt:
     repair/synthesis, memory writes, and task runtime.
   - Sense, Cortex, ReadinessGraph, and station paths can still see each other's
     concrete fields in places.
+  - Mission flow is now Cortex-owned for inline derived metric tasks, but other
+    historical mission/procedure paths still need the same treatment before repo
+    liposuction.
+- Eval honesty debt:
+  - Current green evals still overfit known phrases. They do not yet prove that
+    paraphrases like "how far are the doors from you" and "show me the door
+    distances" route to the same ranked-distance query.
+  - Low-level Sense prompts such as "what is in front of me" are not yet guarded
+    by hostile evals.
+  - Low-level Spine paraphrases such as "advance one cell" and "step ahead" are
+    not yet guarded by hostile evals.
+  - Conditional actuation can still look like a raw motor command unless a
+    hostile eval forces Sense evidence before Spine authority.
+  - Multi-action motor/procedure requests can lose parent/child lineage unless a
+    hostile eval requires all child actions and tickets to survive.
+  - Named procedure/macro teaching can still produce false success unless evals
+    require a typed knowledge/procedure update plan and representation
+    provenance.
 - Remaining schema/knowledge debt:
   - Existing memory pockets remain internally while the facade stabilizes.
   - More Sense/Cortex/Spine paths should consume representation snapshots during
-    Phase 10 extraction.
+    Phase 12 evidence planning.
 - Substrate drift:
   - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest.
-  - `OperationalContext` is not implemented yet, so MiniGrid domain meaning is
-    still scattered through station helper code.
-  - Request planning, primitive validation fixtures, and many station formatters
+  - Request planning, primitive validation fixtures, and some station formatters
     still contain MiniGrid/door/grid assumptions.
   - Contract preflight is represented and gated, but not yet a general executable
     proof system for arbitrary robot stacks.
 
-The next architecture step is Phase 10D OperationalContext. Do not add harder
-domains first.
+The next architecture step is Phase 11B hostile primitive and mission eval
+hardening. It tests the same WHY/WHAT/HOW flow at five levels:
+
+- low-level Sense: evidence requests and observation claims
+- low-level Spine: explicit raw motor authority
+- named procedures/macros: stored representation plus RequestPlan expansion
+- conditional Sense + Spine: evidence before actuation
+- compound missions: MissionContract, claims, selection, ticket, provenance
+
+Do not start Phase 12 evidence planning, harder domains, or repo liposuction
+before the Phase 11B hostile ladder is green.

@@ -2465,6 +2465,9 @@ class ExecutionTicket:
     request_plan: RequestPlan
     readiness_graph: ReadinessGraph
     source: str = "station"
+    mission_id: str | None = None
+    parent_request_id: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.readiness_graph.request_id != self.request_id:
@@ -2534,6 +2537,12 @@ class MissionExecutionPlan:
     description: str
     request_plan: RequestPlan
     readiness_graph: ReadinessGraph
+    mission_contract: MissionContract | None = None
+    primitive_definition: PrimitiveDefinitionRequest | None = None
+    continuation_intent: OperatorIntent | None = None
+    continuation_request_plan: RequestPlan | None = None
+    continuation_readiness_graph: ReadinessGraph | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
     child_tickets: list[ExecutionTicket] = field(default_factory=list)
 
 

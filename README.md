@@ -31,10 +31,17 @@ The baseline now includes a live operator regression probe because structural
 boundary checks alone were not enough to prove user-visible progress.
 Phase 10I added operator-defined primitive assembly, so commands like defining
 `convenientDistance = min(manhattan, euclidean)` become typed, validated,
-reusable query primitives instead of unsupported text. The next architecture
-task is Phase 11: Architecture Fix - Mission Flow. Compound missions still need
-to move out of the station and into the Cortex -> Sense/claims -> readiness ->
-ticket -> Spine flow before new capability work continues.
+reusable query primitives instead of unsupported text. Phase 11 moved inline
+compound metric missions into `MissionCortex`, with typed mission plans and
+mission-linked execution tickets.
+
+The current architecture task is **Phase 11B: hostile primitive and mission eval
+hardening**. The last green suite missed real REPL failures where equivalent
+operator phrasings did not reach the same typed plan. Phase 11B adds red-bar
+coverage for low-level Sense prompts, low-level Spine prompts, named procedural
+primitives, conditional Sense+Spine flow, distance-query paraphrases, compound
+missions, and negative controls. Phase 12 waits until that hostile ladder is
+green.
 
 The guiding split is:
 
@@ -105,10 +112,10 @@ Current architectural debt:
   proof system for arbitrary robot stacks.
 - Robotics-like and ARC-style substrate pressure remain future work.
 
-Current evals prove the Phase 9 control-plane invariants. They should not be
-treated as proof that JEENOM generalizes to arbitrary robots, stacks, or ARC-like
-domains until the same cognition loop runs on MiniGrid and a robotics-like
-substrate.
+Current evals prove many control-plane invariants, but the Phase 11B work exists
+because the suite was not hostile enough to paraphrase brittleness and false
+success. Do not treat green eval numbers as proof of generalized cognition until
+the hostile primitive ladder and a robotics-like substrate both pass.
 
 ## Architecture Invariants
 
@@ -200,19 +207,33 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Current baseline after Phase 10I:
+Last green baseline before Phase 11B hostile evals:
 
-- `python evals/eval_master.py --suite cleanup`: 24/24 passing.
-- `python evals/eval_master.py`: 53/53 passing.
-- `python -m pytest -q tests`: 239 passed.
+- `python evals/eval_master.py --suite cleanup`: 25/25 passing.
+- `python evals/eval_master.py`: 54/54 passing.
+- `python -m pytest -q tests`: 244 passed.
+
+Phase 11B red-bar status:
+
+- `python evals/phase11b_primitive_ladder_probe.py`: failing with named
+  violated invariants.
+- `python -m pytest -q tests/test_phase11b_primitive_ladder.py`: 13 failed,
+  2 passed.
+- `python evals/eval_master.py --suite cleanup --list`: 26 selected probes,
+  including `phase11b_primitive_ladder_probe.py`.
+
+Cleanup/all evals are expected to fail until the Phase 11B fixes are
+implemented.
 
 Roadmap:
 
 - Phase 10: complete for now. Operator-station boundary cleanup and
   operator-defined query primitive assembly are done.
-- Phase 11: fix mission flow so compound tasks are Cortex-owned, claim-backed,
-  ticketed, and executed through Sense/Spine instead of station shortcuts.
-- Phase 12: add the minimal evidence-planning loop.
+- Phase 11A: complete. Inline compound metric missions are Cortex-owned,
+  claim-backed, ticketed, and protected by mission-flow evals.
+- Phase 11B: current. Add hostile evals for Sense/Spine/procedure/conditional
+  and compound mission paraphrase ladders.
+- Phase 12: add the minimal evidence-planning loop after 11B is green.
 - Phase 13: demonstrate the same cognition loop on MiniGrid and a robotics-like
   substrate.
 - Phase 14: pressure the same architecture with an ARC-style steerable prototype.

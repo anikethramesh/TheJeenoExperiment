@@ -15,9 +15,11 @@ flowchart LR
   REG["CapabilityRegistry<br>contracts + context task families"]
   FP["Context fingerprint<br>cache / reuse boundary"]
   SLICE["Compact context slice<br>LLM only when needed"]
+  TEST["Phase 11B hostile eval ladder<br>same flow under paraphrases"]
 
   subgraph ARCH["JEENOM WHAT"]
     CX["Cortex<br>intent, plan, repair, synthesize, ask"]
+    MC["MissionContract / MissionExecutionPlan<br>compound mission lineage"]
     RG["ReadinessGraph<br>execute / ask / refuse / gather evidence"]
     KB["KnowledgeBase<br>claims + procedures + provenance"]
     SE["Sense<br>evidence requests -> observation claims"]
@@ -33,7 +35,9 @@ flowchart LR
   OP -->|CorticalEnvelope| MSG
   MSG -->|OperatorIntent / steering| CX
   SLICE -. "only for compile / repair / synthesis" .-> CX
-  CX -->|RequestPlan| RG
+  CX -->|MissionContract when compound| MC
+  CX -->|RequestPlan when simple| RG
+  MC -->|RequestPlan + provenance| RG
   REG --> RG
   FP --> RG
   KB -->|claim/procedure snapshot| RG
@@ -47,7 +51,7 @@ flowchart LR
   SE -->|ObservationClaim| MSG
   MSG --> KB
 
-  RG -->|ExecutionTicket + ExecutionContract| MSG
+  RG -->|ExecutionTicket + mission lineage + ExecutionContract| MSG
   MSG --> SP
   SP -->|action HOW| SUB
   SUB -->|execution result| SP
@@ -58,3 +62,8 @@ flowchart LR
   MSG --> KB
 
   KB -->|updated snapshot| CX
+
+  TEST -. "low-level Sense paraphrases" .-> SE
+  TEST -. "low-level Spine paraphrases" .-> SP
+  TEST -. "named procedures + compound missions" .-> CX
+  TEST -. "conditional evidence before actuation" .-> RG
