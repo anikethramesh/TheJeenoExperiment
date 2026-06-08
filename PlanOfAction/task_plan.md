@@ -25,8 +25,9 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 11 - Minimal Representation And Evidence Planning**
-  is next; Phase 10 operator-station boundary cleanup is complete.
+- Current phase: **Phase 11 - Architecture Fix - Mission Flow** is next;
+  Phase 10 operator-station boundary cleanup is complete, but the compound
+  mission path still leaks through the station.
 - Phase 9D is complete. Operator turns now route through typed envelopes,
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
@@ -49,11 +50,12 @@ Elon-algorithm rule for this repo:
   RequestPlans, ReadinessGraphs, and plan reuse agree on the same outcome.
 - Phase 10I is complete. Operator-defined query metrics now become typed
   primitive-definition requests, gated proposals, validated/registered query
-  primitives, operational-context metrics, and ticketed knowledge records.
+  primitives, operational-context metrics, ticketed knowledge records, and
+  inline derived metrics embedded inside task requests.
 - Current verification signal:
   - `python evals/eval_master.py --suite cleanup`: 24/24 passing
   - `python evals/eval_master.py`: 53/53 passing
-  - `python -m pytest -q tests`: 237 passed
+  - `python -m pytest -q tests`: 239 passed
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
 
@@ -429,7 +431,7 @@ Do not create:
 - a macro-promotion framework
 - a general cognitive-operation registry
 
-Those come only if Phase 11 evals force them.
+Those come only if later evals force them.
 
 Numbering rule:
 
@@ -782,7 +784,7 @@ Why this belongs in Phase 10:
 - A command like "synthesize a new distance metric which is the minimum between
   euclidean and manhattan distance; call it convenientDistance" should not fall
   through as unsupported.
-- Phase 11 evidence planning should build on this capability, not work around
+- Phase 12 evidence planning should build on this capability, not work around
   its absence.
 
 Non-goals:
@@ -854,6 +856,9 @@ Acceptance criteria:
 
 - The example `convenientDistance = min(euclidean, manhattan)` can be proposed,
   approved, validated, registered, and used in a later ranked-door query.
+- Inline composition such as `go to the third farthest door based on the sum of
+  both distance metrics` proposes the derived metric, registers it on approval,
+  then resumes the original task through RequestPlan/ReadinessGraph.
 - A rejected proposal registers nothing.
 - A validation failure registers nothing and says so honestly.
 - The new primitive is query-only and cannot authorize motion by itself.
@@ -865,10 +870,10 @@ Acceptance criteria:
 Measured outcome:
 
 - `python evals/phase10i_user_defined_metric_probe.py`: passing.
-- `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 7 passed.
+- `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 9 passed.
 - `python evals/eval_master.py --suite cleanup`: 24/24 passing.
 - `python evals/eval_master.py`: 53/53 passing.
-- `python -m pytest -q tests`: 237 passed.
+- `python -m pytest -q tests`: 239 passed.
 
 Phase 10 stop rule after 10I:
 
@@ -880,7 +885,100 @@ Phase 10 stop rule after 10I:
 - Repo/file-size minimization becomes a later cleanup phase after the prototype
   proves more capability.
 
-## Phase 11 - Minimal Representation And Evidence Planning
+## Phase 11 - Architecture Fix - Mission Flow
+
+Status: planned.
+
+Goal: make the implemented control flow match the architecture before adding
+new capability. Compound missions must be owned by Cortex, decomposed into typed
+mission/procedure steps, satisfied through Sense and Spine contracts, and only
+rendered by the Operator Station.
+
+Problem to fix:
+
+- `OperatorStationSession` still owns too much mission behavior.
+- Inline derived metrics currently work, but the station can parse, propose,
+  register, resume, and dispatch them itself.
+- That makes the station act like Cortex, Sense coordinator, memory writer, and
+  dispatcher.
+- Compound requests can collapse into a flattened task such as "go to the
+  yellow door" instead of preserving the full mission reason, evidence path,
+  selection rule, and execution authority.
+- This is architecture debt, not just file-size debt.
+
+Required flow:
+
+1. Operator Station receives the utterance and hands it to the cognition kernel.
+2. Cortex produces typed intent and builds a `RequestPlan` / `MissionContract`.
+3. Cortex decomposes compound work into architecture-level steps:
+   derive/query primitive, gather evidence, bind claims, select target, execute.
+4. Sense executes evidence requests and writes observation/grounding claims.
+5. Knowledge Base records claims, primitive definitions, procedures, provenance,
+   and approval state through typed APIs/tickets.
+6. ReadinessGraph gates every step from claims and pri
+- Decide whether repo liposuction should be its own phase before or after Phase
+  12. Do not mix aesthetic file shrinking with mission-flow correctness.
+mitive availability.
+7. Cortex issues `ApprovedCommand` / `ExecutionTicket` only after readiness.
+8. Spine executes actuation through an `ExecutionContract`.
+9. Runtime execution/render still makes zero LLM calls.
+
+Eval-first requirements:
+
+- Add a mission-flow eval for a compound request:
+  "go to the third farthest door based on the sum of euclidean and manhattan
+  distance".
+- The eval must prove the resulting plan keeps the full mission structure:
+  metric definition, evidence/ranking, ordinal selection, target claim, and
+  actuation ticket.
+- The eval must fail if Operator Station owns the decomposition or resumes the
+  mission with station-local payloads.
+- The eval must fail if execution starts without `RequestPlan`,
+  `ReadinessGraph`, `ApprovedCommand`, and `ExecutionTicket`.
+- The eval must fail if Sense/evidence work is represented only as a station
+  phrase branch.
+- The eval must fail if Spine receives a flattened task without mission
+  provenance.
+- Add focused unit tests around Cortex mission decomposition and ticket lineage.
+
+Implementation requirements:
+
+- Move compound mission decomposition out of `OperatorStationSession`.
+- Keep station-local parsing only for REPL/facade concerns.
+- Add or finish a typed mission-flow object only if existing `RequestPlan` and
+  `MissionContract` cannot represent the flow without lossy flattening.
+- Route primitive-definition approval through Cortex/command authority, not
+  station-local continuation logic.
+- Route evidence/ranking through Sense/claims, not display helpers.
+- Route motion through Spine/ExecutionContract, not direct task dispatch.
+- Preserve Phase 10I user-visible behavior while changing ownership.
+
+Non-goals:
+
+- Do not add a giant world model.
+- Do not solve partial observability yet.
+- Do not start repo liposuction inside this phase.
+- Do not add new capability unless an eval proves it is required to enforce the
+  mission flow.
+
+Acceptance criteria:
+
+- The station becomes a facade for mission turns, not the owner of mission
+  decomposition.
+- Compound user-defined metric tasks execute through Cortex -> Sense/claims ->
+  ReadinessGraph -> ApprovedCommand/Ticket -> Spine.
+- Ticket/result lineage can explain why the selected target was chosen.
+- Runtime/render path remains LLM-free.
+- Existing Phase 10I behavior remains green.
+- `python evals/eval_master.py --suite cleanup`, `python evals/eval_master.py`,
+  and `python -m pytest -q tests` remain green after the implementation.
+
+After Phase 11:
+
+- Decide whether repo liposuction should be its own phase before or after Phase
+  12. Do not mix aesthetic file shrinking with mission-flow correctness.
+
+## Phase 12 - Minimal Representation And Evidence Planning
 
 Status: planned.
 
@@ -924,7 +1022,7 @@ Acceptance criteria:
 - Operator steering changes typed plan constraints.
 - MiniGrid and robotics-like mock both use the same cognition loop.
 
-## Phase 12 - Cross-Substrate Demonstration
+## Phase 13 - Cross-Substrate Demonstration
 
 Status: planned.
 
@@ -952,7 +1050,7 @@ Acceptance criteria:
 - Differences are confined to substrate adapter and domain helpers.
 - No MiniGrid vocabulary leaks into the generic kernel.
 
-## Phase 13 - ARC-Style Steerable Prototype
+## Phase 14 - ARC-Style Steerable Prototype
 
 Status: later.
 
@@ -981,7 +1079,7 @@ Acceptance criteria:
 - The LLM does not directly solve by free-form answer.
 - The operator can steer experiments and strategy.
 
-## Phase 14 - Operational Hardening
+## Phase 15 - Operational Hardening
 
 Status: later.
 
@@ -997,7 +1095,7 @@ Planned work:
 - missing primitive / ambiguity / no-path handling
 - render-time guarantees preserved across substrates
 
-## Phase 15 - Capability Stress Tests
+## Phase 16 - Capability Stress Tests
 
 Status: later.
 

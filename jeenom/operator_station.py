@@ -57,6 +57,7 @@ from .schemas import (
     SceneModel,
     SceneObject,
     SchemaValidationError,
+    SelectionObjective,
     StationActiveClaims,
     TargetSelector,
     TaskRequest,
@@ -96,6 +97,7 @@ class PendingPrimitiveDefinition:
     request: PrimitiveDefinitionRequest
     request_plan: RequestPlan
     readiness_graph: ReadinessGraph
+    resume_payload: dict[str, Any] | None = None
 
 
 _ACTION_LEAK_TERMS = (
@@ -178,6 +180,11 @@ def _metric_dependencies(formula: str) -> list[str]:
     for metric in ("euclidean", "manhattan"):
         if re.search(rf"\b{metric}\b", normalized) and metric not in dependencies:
             dependencies.append(metric)
+    if (
+        not dependencies
+        and re.search(r"\bboth\s+(?:distance\s+)?metrics?\b", normalized)
+    ):
+        dependencies.extend(["euclidean", "manhattan"])
     return dependencies
 
 
@@ -196,6 +203,14 @@ def _parse_metric_expression(formula: str) -> dict[str, Any] | None:
     number_match = re.search(r"\b(\d+(?:\.\d+)?)\b", normalized)
     constant = float(number_match.group(1)) if number_match else None
 
+    if len(dependencies) >= 2 and (
+        "sum" in normalized
+        or "total" in normalized
+        or "combined" in normalized
+        or "plus" in normalized
+        or "+" in formula
+    ):
+        return {"op": "sum", "metrics": dependencies}
     if "minimum" in normalized or "min(" in normalized or "min of" in normalized:
         return {"op": "min", "metrics": dependencies}
     if "maximum" in normalized or "max(" in normalized or "max of" in normalized:
@@ -224,6 +239,29 @@ def _parse_metric_expression(formula: str) -> dict[str, Any] | None:
     if len(dependencies) == 1:
         return {"op": "alias", "metric": dependencies[0]}
     return None
+
+
+def _metric_expression_name(expression: dict[str, Any]) -> str:
+    op = str(expression.get("op") or "metric")
+    if op in {"sum", "min", "max"}:
+        metrics = [
+            _normalize_metric_name(str(metric))
+            for metric in expression.get("metrics", [])
+        ]
+        return _normalize_metric_name("_".join([op, *metrics]))
+    if op in {"alias", "mod", "add", "subtract"}:
+        metric = _normalize_metric_name(str(expression.get("metric") or "metric"))
+        suffix = ""
+        if expression.get("constant") is not None:
+            suffix = "_" + str(expression["constant"]).replace(".", "_")
+        return _normalize_metric_name(f"{op}_{metric}{suffix}")
+    if op in {"abs_diff", "abs_diff_plus"}:
+        metrics = [
+            _normalize_metric_name(str(metric))
+            for metric in expression.get("metrics", [])
+        ]
+        return _normalize_metric_name("_".join([op, *metrics]))
+    return _normalize_metric_name(op)
 
 
 def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest | str | None:
@@ -287,6 +325,102 @@ def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest
             },
         )
     return None
+
+
+def _inline_metric_resume_payload(
+    text: str,
+    expression: dict[str, Any],
+) -> dict[str, Any] | str | None:
+    normalized = _normalize_utterance(text)
+    wants_task = bool(
+        re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
+    )
+    ordinal_semantics = normalize_distance_ordinal(normalized)
+    direction = (
+        ordinal_semantics.order
+        if ordinal_semantics is not None
+        else infer_direction_from_utterance(normalized)
+    )
+    ordinal = ordinal_semantics.ordinal if ordinal_semantics is not None else None
+    if direction is not None and ordinal is None:
+        ordinal = 1
+    is_rank_query = bool(
+        re.search(r"\b(rank|list|show)\b", normalized)
+        or re.search(r"\b(all|every|each)\b.{0,30}\bdoors?\b", normalized)
+    )
+    if wants_task and direction is None:
+        return (
+            "I can derive that metric, but the task does not say how to select "
+            "a target from it. Use wording like 'third farthest' or 'closest'."
+        )
+    operation = "select" if wants_task else "rank" if is_rank_query and direction is None else "answer"
+    return {
+        "utterance": text,
+        "wants_task": wants_task,
+        "operation": operation,
+        "order": direction,
+        "ordinal": ordinal,
+        "object_type": "door",
+        "expression": dict(expression),
+    }
+
+
+def _parse_inline_metric_request(
+    text: str,
+) -> tuple[PrimitiveDefinitionRequest, dict[str, Any]] | str | None:
+    normalized = _normalize_utterance(text)
+    if "door" not in normalized or "distance" not in normalized:
+        return None
+    if not (
+        re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
+        or re.search(r"\b(rank|list|show|what|which|find)\b", normalized)
+    ):
+        return None
+
+    formula_match = re.search(
+        r"\b(?:based on|according to|using|by)\s+(?:the\s+)?(?P<formula>.+)$",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    if formula_match is None:
+        return None
+    formula = formula_match.group("formula").strip()
+    expression = _parse_metric_expression(formula)
+    if expression is None:
+        return None
+    if expression.get("op") == "alias":
+        return None
+    if expression.get("op") == "unsafe":
+        return (
+            "REFUSE\n"
+            "Metric definitions must be query-only. I will not build a metric "
+            "that contains actuation, movement, controller, or motor side effects."
+        )
+    resume_payload = _inline_metric_resume_payload(text, expression)
+    if isinstance(resume_payload, str):
+        return resume_payload
+    if resume_payload is None:
+        return None
+
+    dependencies = list(dict.fromkeys(_metric_dependencies(formula)))
+    normalized_name = _metric_expression_name(expression)
+    request = PrimitiveDefinitionRequest(
+        definition_type="distance_metric",
+        name=normalized_name,
+        normalized_name=normalized_name,
+        expression=expression,
+        dependencies=dependencies,
+        dependency_handles=[_metric_dependency_handle(metric) for metric in dependencies],
+        proposed_handle=_metric_dependency_handle(normalized_name),
+        safety_class="query",
+        authority_level="operator",
+        provenance={
+            "operator_utterance": text,
+            "formula": formula,
+            "inline_request": True,
+        },
+    )
+    return request, resume_payload
 
 
 def _parse_metric_query(text: str) -> str | None:
@@ -449,6 +583,20 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
         )
     if isinstance(primitive_definition, str):
         return _approved("unsupported", text, primitive_definition)
+
+    inline_metric = _parse_inline_metric_request(text)
+    if isinstance(inline_metric, tuple):
+        request, resume_payload = inline_metric
+        return _approved(
+            "primitive_definition",
+            text,
+            payload={
+                "definition": request.as_dict(),
+                "resume_payload": resume_payload,
+            },
+        )
+    if isinstance(inline_metric, str):
+        return _approved("unsupported", text, inline_metric)
 
     custom_metric = _parse_metric_query(text)
     if custom_metric is not None:
@@ -1283,7 +1431,14 @@ class OperatorStationSession:
 
         self._run_mismatch_detection(fresh_plan)
         
-        if self.last_operational_mismatches and readiness_graph.graph_status != "executable":
+        should_repair = (
+            readiness_graph.graph_status != "executable"
+            or any(
+                mismatch.mismatch_type == "STALE_CLAIMS"
+                for mismatch in self.last_operational_mismatches
+            )
+        )
+        if self.last_operational_mismatches and should_repair:
             repair_loop = RepairLoop(self)
             repair_events = repair_loop.attempt_repair(self.last_operational_mismatches)
             self.last_repair_events.extend(repair_events)
@@ -1683,10 +1838,23 @@ class OperatorStationSession:
             expected_response="propose_definition",
         )
 
-    def propose_primitive_definition(self, definition: dict[str, Any]) -> str:
+    def propose_primitive_definition(
+        self,
+        definition: dict[str, Any],
+        *,
+        resume_payload: dict[str, Any] | None = None,
+    ) -> str:
         request = PrimitiveDefinitionRequest.from_dict(definition)
         existing = self.capability_registry.lookup(request.proposed_handle)
         if existing is not None and existing.implementation_status == "implemented":
+            if resume_payload is not None:
+                resumed = self._resume_inline_metric_request(request, resume_payload)
+                return (
+                    "PRIMITIVE DEFINITION ALREADY REGISTERED\n"
+                    f"handle={request.proposed_handle}\n\n"
+                    "RESUMING ORIGINAL REQUEST\n"
+                    f"{resumed}"
+                )
             return (
                 "PRIMITIVE DEFINITION NOT STORED\n"
                 f"handle={request.proposed_handle}\n"
@@ -1709,6 +1877,7 @@ class OperatorStationSession:
             request=request,
             request_plan=plan,
             readiness_graph=graph,
+            resume_payload=resume_payload,
         )
         dependency_lines = []
         for metric, handle in zip(request.dependencies, request.dependency_handles):
@@ -1728,6 +1897,11 @@ class OperatorStationSession:
             f"expression={expression}\n"
             "dependencies:\n"
             + ("\n".join(dependency_lines) if dependency_lines else "  - none")
+            + (
+                "\nAfter registration I will resume the original request."
+                if resume_payload is not None
+                else ""
+            )
             + "\nShould I build it now? (yes / no)"
         )
 
@@ -1758,12 +1932,113 @@ class OperatorStationSession:
             )
         if self._is_acceptance(normalized):
             self.pending_primitive_definition = None
-            return self._approve_primitive_definition(pending.request, utterance)
+            result = self._approve_primitive_definition(pending.request, utterance)
+            if pending.resume_payload is not None and "registered=true" in result:
+                resumed = self._resume_inline_metric_request(
+                    pending.request,
+                    pending.resume_payload,
+                )
+                return f"{result}\n\nRESUMING ORIGINAL REQUEST\n{resumed}"
+            return result
         return (
             "CLARIFY\n"
             f"Primitive definition pending: {pending.request.proposed_handle}\n"
             "Please answer yes or no."
         )
+
+    def _resume_inline_metric_request(
+        self,
+        request: PrimitiveDefinitionRequest,
+        resume_payload: dict[str, Any],
+    ) -> str:
+        utterance = str(resume_payload.get("utterance") or request.provenance.get("operator_utterance") or request.name)
+        wants_task = bool(resume_payload.get("wants_task"))
+        operation = str(resume_payload.get("operation") or ("select" if wants_task else "rank"))
+        order = resume_payload.get("order")
+        ordinal = resume_payload.get("ordinal")
+        object_type = str(resume_payload.get("object_type") or "door")
+        required = [request.proposed_handle]
+        if wants_task:
+            required.append("task.go_to_object.door")
+        answer_fields = (
+            ["ranked_doors", "distance"]
+            if operation in {"rank", "list"}
+            else ["target", "distance"]
+        )
+        selection_objective = None
+        if order in {"ascending", "descending"} and ordinal is not None:
+            selection_objective = SelectionObjective(
+                attribute="distance",
+                direction="maximum" if order == "descending" else "minimum",
+                ordinal=int(ordinal),
+                metric=request.normalized_name,
+            )
+        intent = OperatorIntent(
+            intent_type="task_instruction" if wants_task else "status_query",
+            status_query=None if wants_task else "ground_target",
+            task_type="go_to_object" if wants_task else None,
+            grounding_query_plan={
+                "object_type": object_type,
+                "operation": operation,
+                "primitive_handle": request.proposed_handle,
+                "metric": request.normalized_name,
+                "reference": "agent",
+                "order": order,
+                "ordinal": ordinal,
+                "color": None,
+                "exclude_colors": [],
+                "distance_value": None,
+                "comparison": None,
+                "tie_policy": "clarify" if wants_task else "display",
+                "answer_fields": answer_fields,
+                "required_capabilities": required,
+                "preserved_constraints": [
+                    "inline_metric",
+                    request.normalized_name,
+                    *request.dependencies,
+                ],
+                "metric_dependencies": list(request.dependencies),
+                "derived_metric": True,
+            },
+            primitive_definition=request,
+            capability_status="executable",
+            required_capabilities=required,
+            selection_objective=selection_objective,
+            confidence=1.0,
+            reason=(
+                "Resuming operator request after approved inline derived metric "
+                f"{request.normalized_name}."
+            ),
+        )
+        command = self.command_from_operator_intent(intent, utterance)
+        if command.kind == "task_instruction":
+            instruction = self.resolve_task_instruction(command.utterance)
+            if instruction is None:
+                return self.missing_reference_summary(command.utterance)
+            plan = self.last_request_plan
+            graph = self.last_readiness_graph
+            if plan is None or graph is None:
+                raise RuntimeError("Inline metric resume requires a recorded RequestPlan")
+            ticket = self._execution_ticket_from_plan(
+                instruction,
+                plan,
+                graph,
+                source="operator_inline_metric",
+            )
+            run_result = self._run_task_with_ticket(ticket)
+            result = self.result_summary(run_result)
+            if self.last_result is not None:
+                instruction = self.last_result.get("task", {}).get("instruction")
+                if instruction:
+                    return f"resolved_instruction={instruction}\n{result}"
+            return result
+
+        result = self.execute_command(command)
+        if self.last_result is not None:
+            instruction = self.last_result.get("task", {}).get("instruction")
+            if instruction:
+                return f"resolved_instruction={instruction}\n{result}"
+        return result
 
     def _approve_primitive_definition(
         self,
@@ -1924,6 +2199,12 @@ class OperatorStationSession:
                 for metric in expression.get("metrics", [])
             ]
             return max(values)
+        if op == "sum":
+            values = [
+                self._base_metric_distance(scene, obj, str(metric))
+                for metric in expression.get("metrics", [])
+            ]
+            return sum(values)
         if op == "mod":
             base = self._base_metric_distance(scene, obj, str(expression.get("metric")))
             constant = float(expression.get("constant"))
@@ -2301,9 +2582,22 @@ class OperatorStationSession:
                         "the plan does not preserve ascending/closest semantics."
                     )
 
-        if "euclidean" in normalized and plan.get("metric") != "euclidean":
+        plan_metric = plan.get("metric")
+        metric_dependencies = {
+            str(metric)
+            for metric in (plan.get("metric_dependencies") or [])
+        }
+        if (
+            "euclidean" in normalized
+            and plan_metric != "euclidean"
+            and "euclidean" not in metric_dependencies
+        ):
             return "The utterance specifies Euclidean distance, but the plan does not."
-        if "manhattan" in normalized and plan.get("metric") != "manhattan":
+        if (
+            "manhattan" in normalized
+            and plan_metric != "manhattan"
+            and "manhattan" not in metric_dependencies
+        ):
             return "The utterance specifies Manhattan distance, but the plan does not."
 
         color = self.domain_helper.color_reference_in_utterance(normalized)

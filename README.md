@@ -32,7 +32,9 @@ boundary checks alone were not enough to prove user-visible progress.
 Phase 10I added operator-defined primitive assembly, so commands like defining
 `convenientDistance = min(manhattan, euclidean)` become typed, validated,
 reusable query primitives instead of unsupported text. The next architecture
-task is Phase 11: minimal representation and evidence planning.
+task is Phase 11: Architecture Fix - Mission Flow. Compound missions still need
+to move out of the station and into the Cortex -> Sense/claims -> readiness ->
+ticket -> Spine flow before new capability work continues.
 
 The guiding split is:
 
@@ -75,7 +77,7 @@ Implemented so far:
   before registration.
 - Operator-defined query metric assembly for pure ranked-door grounding
   primitives, with approval, validation, registry/context update, and ticketed
-  provenance recording.
+  provenance recording, including inline derived metrics inside task requests.
 - Explicit 5-level abstraction hierarchy: primitive, command, procedure, task,
   and goal/mission.
 
@@ -202,13 +204,15 @@ Current baseline after Phase 10I:
 
 - `python evals/eval_master.py --suite cleanup`: 24/24 passing.
 - `python evals/eval_master.py`: 53/53 passing.
-- `python -m pytest -q tests`: 237 passed.
+- `python -m pytest -q tests`: 239 passed.
 
 Roadmap:
 
 - Phase 10: complete for now. Operator-station boundary cleanup and
   operator-defined query primitive assembly are done.
-- Phase 11: add the minimal evidence-planning loop.
-- Phase 12: demonstrate the same cognition loop on MiniGrid and a robotics-like
+- Phase 11: fix mission flow so compound tasks are Cortex-owned, claim-backed,
+  ticketed, and executed through Sense/Spine instead of station shortcuts.
+- Phase 12: add the minimal evidence-planning loop.
+- Phase 13: demonstrate the same cognition loop on MiniGrid and a robotics-like
   substrate.
-- Phase 13: pressure the same architecture with an ARC-style steerable prototype.
+- Phase 14: pressure the same architecture with an ARC-style steerable prototype.

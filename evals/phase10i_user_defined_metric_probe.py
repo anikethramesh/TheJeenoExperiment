@@ -206,6 +206,69 @@ def _run_manclid_equals_definition(metrics: dict[str, bool], details: dict[str, 
     metrics["manclid_query_uses_custom_handle"] = expected_handle in _plan_handles(session)
 
 
+def _run_inline_sum_task(metrics: dict[str, bool], details: dict[str, Any]) -> None:
+    session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
+    expected_handle = "grounding.all_doors.ranked.sum_euclidean_manhattan.agent"
+
+    proposal = session.handle_utterance(
+        "go to the third farthest door based on the sum of both distance metrics"
+    )
+    details["inline_sum_proposal"] = first_line(proposal)
+    details["inline_sum_pending_type"] = type(_pending_definition(session)).__name__
+    details["inline_sum_plan_objective_after_proposal"] = (
+        session.last_request_plan.objective_type
+        if session.last_request_plan is not None
+        else None
+    )
+    lower = proposal.lower()
+    metrics["inline_sum_task_does_not_degrade_to_metric_clarification"] = (
+        "which distance metric should i use" not in lower
+    )
+    metrics["inline_sum_task_creates_definition_proposal"] = (
+        _looks_like_definition_proposal(proposal)
+        and _pending_definition(session) is not None
+        and session.last_request_plan is not None
+        and session.last_request_plan.objective_type == "primitive_definition"
+    )
+    metrics["inline_sum_task_preserves_formula_and_dependencies"] = (
+        "sum" in lower and "euclidean" in lower and "manhattan" in lower
+    )
+
+    resumed = session.handle_utterance("yes")
+    details["inline_sum_resumed"] = first_line(resumed)
+    details["inline_sum_handles_after_resume"] = sorted(
+        handle for handle in _handles(session) if "sum_euclidean_manhattan" in handle
+    )
+    details["inline_sum_plan_handles_after_resume"] = sorted(_plan_handles(session))
+    details["inline_sum_plan_objective_after_resume"] = (
+        session.last_request_plan.objective_type
+        if session.last_request_plan is not None
+        else None
+    )
+    details["inline_sum_next_action_after_resume"] = (
+        session.last_readiness_graph.next_action
+        if session.last_readiness_graph is not None
+        else None
+    )
+    metrics["inline_sum_approval_registers_handle"] = expected_handle in _handles(session)
+    metrics["inline_sum_metric_supported_after_approval"] = _metric_supported(
+        session,
+        "sum_euclidean_manhattan",
+    )
+    metrics["inline_sum_approval_resumes_original_task"] = (
+        "RESUMING ORIGINAL REQUEST" in resumed
+        and "RUN COMPLETE" in resumed
+        and "go to the yellow door" in resumed
+    )
+    metrics["inline_sum_resume_uses_custom_handle"] = expected_handle in _plan_handles(session)
+    metrics["inline_sum_resume_records_task_plan"] = (
+        session.last_request_plan is not None
+        and session.last_request_plan.objective_type == "task"
+        and session.last_readiness_graph is not None
+        and session.last_readiness_graph.next_action == "execute_task"
+    )
+
+
 def _run_negative_controls(metrics: dict[str, bool], details: dict[str, Any]) -> None:
     undefined = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
     undefined_response = undefined.handle_utterance("rank all doors by ramesian")
@@ -278,6 +341,7 @@ def main() -> int:
         _run_ramesian_definition(metrics, details)
         _run_convenient_definition(metrics, details)
         _run_manclid_equals_definition(metrics, details)
+        _run_inline_sum_task(metrics, details)
         _run_negative_controls(metrics, details)
     except Exception as exc:  # pragma: no cover - emitted as eval detail
         details["error"] = f"{type(exc).__name__}: {exc}"
@@ -301,6 +365,14 @@ def main() -> int:
             "manclid_metric_supported_after_approval",
             "manclid_registered_metric_can_be_used_with_whats",
             "manclid_query_uses_custom_handle",
+            "inline_sum_task_does_not_degrade_to_metric_clarification",
+            "inline_sum_task_creates_definition_proposal",
+            "inline_sum_task_preserves_formula_and_dependencies",
+            "inline_sum_approval_registers_handle",
+            "inline_sum_metric_supported_after_approval",
+            "inline_sum_approval_resumes_original_task",
+            "inline_sum_resume_uses_custom_handle",
+            "inline_sum_resume_records_task_plan",
             "undefined_metric_does_not_fallback_to_builtin",
             "undefined_metric_reports_missing_definition",
             "rejected_metric_was_actually_proposed",

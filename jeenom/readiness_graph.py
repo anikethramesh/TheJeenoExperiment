@@ -59,8 +59,11 @@ def _claims_status(
     *,
     active_claims: StationActiveClaims | None,
     claims_valid: bool,
+    claims_produced_by_dependency: bool = False,
 ) -> tuple[str | None, str | None]:
     if not step.scene_fingerprint_required:
+        return None, None
+    if claims_produced_by_dependency:
         return None, None
     if active_claims is None:
         return "stale_claims", "Step needs ActiveClaims, but none are available yet."
@@ -167,6 +170,7 @@ def evaluate_request_plan(
 
     nodes: list[ReadinessNode] = []
     statuses_by_step: dict[str, str] = {}
+    outputs_by_step: dict[str, set[str]] = {}
     graph_violated_assumptions: list[str] = []
     graph_diagnostic_assumptions: list[str] = []
 
@@ -191,10 +195,19 @@ def evaluate_request_plan(
                 status = "environment_assumption_failed"
                 reason = f"Environment assumption failed: {assumption_reason}"
             else:
+                dependency_outputs: set[str] = set()
+                for dep in step.depends_on:
+                    if statuses_by_step.get(dep) == "executable":
+                        dependency_outputs.update(outputs_by_step.get(dep, set()))
+                claims_produced_by_dependency = any(
+                    read in dependency_outputs
+                    for read in step.memory_reads
+                )
                 claims_status, claims_reason = _claims_status(
                     step,
                     active_claims=active_claims,
                     claims_valid=claims_valid,
+                    claims_produced_by_dependency=claims_produced_by_dependency,
                 )
                 if claims_status is not None:
                     status = claims_status
@@ -203,6 +216,7 @@ def evaluate_request_plan(
                     status, reason = _status_for_primitive(step, registry)
 
         statuses_by_step[step.step_id] = status
+        outputs_by_step[step.step_id] = set(step.outputs or [])
         nodes.append(
             ReadinessNode(
                 step_id=step.step_id,
