@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from jeenom.minigrid_operational_context import MiniGridOperationalContext
-from jeenom.operator_station import OperatorStationSession, classify_utterance
+from jeenom.capability_registry import CapabilityRegistry
+from jeenom.operator_station import OperatorStationSession, _make_classify_utterance
 
 
 class TestPhase10DomainHelper(unittest.TestCase):
@@ -32,7 +33,8 @@ class TestPhase10DomainHelper(unittest.TestCase):
         self.assertEqual(parsed["object_type"], "door")
 
     def test_classify_utterance_preserves_domain_behavior(self):
-        command = classify_utterance("go to the gray door")
+        classify = _make_classify_utterance(CapabilityRegistry.minigrid_default())
+        command = classify("go to the gray door")
 
         self.assertEqual(command.command_type, "task_instruction")
 

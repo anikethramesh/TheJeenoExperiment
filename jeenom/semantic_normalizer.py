@@ -61,7 +61,6 @@ class DistanceOrdinalSemantics:
             self.ordinal_word,
             self.direction_term,
             self.canonical_direction,
-            "door",
         ]
         if self.metric is not None:
             constraints.append(self.metric)
@@ -90,12 +89,15 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
 
     Handles phrases such as "second highest manhattan distance" and
     "third smallest distance" without making an LLM output the authority.
+    Gate: a detectable metric (via _detect_metric) or the generic word
+    "distance" must appear — otherwise the semantics are too incomplete to act on.
+    _detect_metric is the substrate-coupling point; it should eventually read
+    registered metric names from PlanningSemantics rather than hardcoding them.
     """
 
     normalized = re.sub(r"\s+", " ", text.strip().lower())
-    if "door" not in normalized or "distance" not in normalized:
+    if _detect_metric(normalized) is None and "distance" not in normalized:
         return None
-
     extracted = _extract_ordinal(normalized)
     if extracted is None:
         return None
@@ -126,6 +128,10 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
     return None
 
 
+# ── Substrate coupling boundary ──────────────────────────────────────────────
+# _detect_metric names substrate-registered metric names directly.
+# Future fix: derive known metric names from PlanningSemantics so this stays
+# substrate-neutral when a second substrate is added.
 def _detect_metric(normalized: str) -> str | None:
     if "euclidean" in normalized:
         return "euclidean"

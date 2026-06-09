@@ -165,7 +165,8 @@ def canonical_task_params(
 
 _MOTOR_ACTION_ALIASES: dict[str, re.Pattern[str]] = {
     "move_forward": re.compile(
-        r"\b(?:go\s+(?:straight|forward)|move\s+forward|step\s+forward|walk\s+forward)\b"
+        r"\b(?:go\s+(?:straight|forward)|move\s+forward|step\s+forward|walk\s+forward"
+        r"|advance(?!\s+to\b)|step\s+ahead)\b"
     ),
     "turn_right": re.compile(r"\b(?:turn|rotate)\s+right\b"),
     "turn_left":  re.compile(r"\b(?:turn|rotate)\s+left\b"),
@@ -499,8 +500,14 @@ class SmokeTestCompiler(CompilerBackend):
         normalized = " ".join(utterance.lower().strip().split())
 
         # Concept teach — check BEFORE door_match so "when i say X go to Y" isn't hijacked.
+        # Try comma-delimited first (multi-word label: "when I say fing fam foom, ...").
         _teach_m_early = re.match(
-            r"^(?:when|if) (?:i )?say (\S+)[,.]?\s+"
+            r"^(?:when|if) (?:i )?say (.+?),\s*"
+            r"(?:you need to\s+|please\s+|i want you to\s+|just\s+|automatically\s+)?(.+?)$",
+            normalized,
+            re.IGNORECASE,
+        ) or re.match(
+            r"^(?:when|if) (?:i )?say (\S+)\s+"
             r"(?:you need to\s+|please\s+|i want you to\s+|just\s+|automatically\s+)?(.+?)$",
             normalized,
             re.IGNORECASE,
@@ -725,7 +732,7 @@ class SmokeTestCompiler(CompilerBackend):
                         if is_navigation
                         else [semantic_ranked_handle]
                     ),
-                    "preserved_constraints": ordinal_semantics.preserved_constraints,
+                    "preserved_constraints": [*ordinal_semantics.preserved_constraints, "door"],
                 },
                 capability_status=(
                     "executable"
@@ -971,6 +978,18 @@ class SmokeTestCompiler(CompilerBackend):
                 reason="Deterministic operator-intent fallback emitted an active-claim reference plan.",
             )
 
+        # Block random-walk actuation requests before they degrade to a grounding answer.
+        if re.search(r"\brandom(?:ly)?\b", normalized) and re.search(
+            r"\b(?:walk|move\s+to|go\s+to|navigate)\b", normalized
+        ):
+            return OperatorIntent(
+                intent_type="unsupported",
+                required_capabilities=["policy.random_walk"],
+                capability_status="unsupported",
+                confidence=0.9,
+                reason="Random walk policy is not a supported navigation strategy.",
+            )
+
         if any(t in normalized for t in _SUPERLATIVE_TERMS) and "door" in normalized:
             return OperatorIntent(
                 intent_type="task_instruction" if is_navigation else "status_query",
@@ -1048,6 +1067,16 @@ class SmokeTestCompiler(CompilerBackend):
                 "all doors", "all of them", "list all", "each door", "each of these doors",
             )
         )
+        # Paraphrase coverage: "how far are the doors", "distance to the doors", etc.
+        # Require "doors" (plural) or "distances" to avoid routing singular "the door"
+        # queries here (those are handled by color_mention or clarification).
+        if not is_ranked_query and not is_navigation and "door" in normalized:
+            is_ranked_query = (
+                "distances" in normalized
+                or ("how far" in normalized and "doors" in normalized)
+                or ("far away" in normalized and "doors" in normalized)
+                or ("distance" in normalized and "doors" in normalized)
+            )
 
         if is_ranked_query and "door" in normalized:
             metric = (
@@ -1362,6 +1391,34 @@ class SmokeTestCompiler(CompilerBackend):
                 capability_status="unsupported",
                 confidence=0.9,
                 reason="Door toggle/open task is unsupported.",
+            )
+
+        # Front-cell sense query paraphrases → status_query (no motion)
+        _SENSE_FRONT_PATTERNS = [
+            r"\bwhat\s+is\s+in\s+front\b",
+            r"\bwhat\s+(?:am\s+i|are\s+you)\s+facing\b",
+            r"\bwhat\s+(?:object|thing)\s+is\s+(?:ahead|in\s+front)\b",
+            r"\bsense\s+the\s+cell\b",
+            r"\blook\s+forward\b",
+        ]
+        if any(re.search(p, normalized) for p in _SENSE_FRONT_PATTERNS):
+            return OperatorIntent(
+                intent_type="status_query",
+                status_query="scene",
+                target_selector=None,
+                confidence=0.9,
+                reason="Deterministic operator-intent fallback matched a front-cell sense query.",
+            )
+
+        # Conditional motor: "if X, go forward" — requires Sense evidence before Spine
+        if re.match(r"^(?:if|when)\b", normalized) and re.search(
+            r"\b(?:go\s+forward|step\s+forward|move\s+forward|advance|step\s+ahead)\b",
+            normalized,
+        ):
+            return OperatorIntent(
+                intent_type="conditional_sense_motor",
+                confidence=0.9,
+                reason="Conditional motor command requires Sense evidence before Spine actuation.",
             )
 
         # Expand implicit motor commands into explicit sequences

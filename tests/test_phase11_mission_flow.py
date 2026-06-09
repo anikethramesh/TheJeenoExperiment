@@ -22,7 +22,7 @@ class TestPhase11MissionFlow(unittest.TestCase):
         from jeenom.mission_cortex import MissionCortex, parse_inline_metric_request
 
         session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
-        parsed = parse_inline_metric_request(INLINE_TASK)
+        parsed = parse_inline_metric_request(INLINE_TASK, session.capability_registry)
         self.assertIsNotNone(parsed)
         self.assertFalse(isinstance(parsed, str), parsed)
 

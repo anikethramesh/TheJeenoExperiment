@@ -78,27 +78,24 @@ def _normalize_metric_name(name: str) -> str:
     return text
 
 
-def _metric_dependency_handle(metric: str) -> str:
-    return f"grounding.all_doors.ranked.{metric}.agent"
-
-
-def _metric_dependencies(formula: str) -> list[str]:
+def _metric_dependencies(formula: str, known_metrics: list[str]) -> list[str]:
+    """Scan formula for known metric names. known_metrics comes from the registry."""
     normalized = _normalize_utterance(formula)
     dependencies: list[str] = []
-    for metric in ("euclidean", "manhattan"):
-        if re.search(rf"\b{metric}\b", normalized) and metric not in dependencies:
+    for metric in known_metrics:
+        if re.search(rf"\b{re.escape(metric)}\b", normalized) and metric not in dependencies:
             dependencies.append(metric)
     if (
         not dependencies
         and re.search(r"\bboth\s+(?:distance\s+)?metrics?\b", normalized)
     ):
-        dependencies.extend(["euclidean", "manhattan"])
+        dependencies.extend(known_metrics)
     return dependencies
 
 
-def _parse_metric_expression(formula: str) -> dict[str, Any] | None:
+def _parse_metric_expression(formula: str, known_metrics: list[str]) -> dict[str, Any] | None:
     normalized = _normalize_utterance(formula)
-    dependencies = _metric_dependencies(formula)
+    dependencies = _metric_dependencies(formula, known_metrics)
     if any(term in normalized for term in _ACTION_LEAK_TERMS):
         return {
             "op": "unsafe",
@@ -264,10 +261,12 @@ def _continuation_intent(
     )
 
 
-def parse_inline_metric_request(text: str) -> InlineMetricMissionRequest | str | None:
+def parse_inline_metric_request(
+    text: str,
+    registry: CapabilityRegistry,
+) -> InlineMetricMissionRequest | str | None:
     normalized = _normalize_utterance(text)
-    if "door" not in normalized or "distance" not in normalized:
-        return None
+    # Gate on navigation/query intent — no substrate primitive name check here.
     if not (
         re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
         or re.search(r"\b(rank|list|show|what|which|find)\b", normalized)
@@ -282,7 +281,29 @@ def parse_inline_metric_request(text: str) -> InlineMetricMissionRequest | str |
     if formula_match is None:
         return None
     formula = formula_match.group("formula").strip()
-    expression = _parse_metric_expression(formula)
+
+    ranked_handles = registry.ranked_metric_handles()
+    known_metrics = list(ranked_handles.keys())
+
+    # "their sum/max/min" — resolve metric deps from full utterance context
+    _their_op_m = re.match(
+        r"^their\s+(sum|max|min|maximum|minimum|total)$",
+        formula.lower(),
+    )
+    if _their_op_m:
+        op_word = _their_op_m.group(1)
+        op = {
+            "sum": "sum", "total": "sum",
+            "max": "max", "maximum": "max",
+            "min": "min", "minimum": "min",
+        }[op_word]
+        deps = _metric_dependencies(normalized, known_metrics)
+        expression: dict[str, Any] | None = (
+            {"op": op, "metrics": deps} if len(deps) >= 2 else None
+        )
+    else:
+        expression = _parse_metric_expression(formula, known_metrics)
+
     if expression is None:
         return None
     if expression.get("op") == "alias":
@@ -294,7 +315,9 @@ def parse_inline_metric_request(text: str) -> InlineMetricMissionRequest | str |
             "that contains actuation, movement, controller, or motor side effects."
         )
 
-    dependencies = list(dict.fromkeys(_metric_dependencies(formula)))
+    dependencies = list(dict.fromkeys(
+        expression.get("metrics") or _metric_dependencies(formula, known_metrics)
+    ))
     normalized_name = _metric_expression_name(expression)
     request = PrimitiveDefinitionRequest(
         definition_type="distance_metric",
@@ -302,8 +325,8 @@ def parse_inline_metric_request(text: str) -> InlineMetricMissionRequest | str |
         normalized_name=normalized_name,
         expression=expression,
         dependencies=dependencies,
-        dependency_handles=[_metric_dependency_handle(metric) for metric in dependencies],
-        proposed_handle=_metric_dependency_handle(normalized_name),
+        dependency_handles=[registry.ranked_handle_for(metric) for metric in dependencies],
+        proposed_handle=registry.ranked_handle_for(normalized_name),
         safety_class="query",
         authority_level="operator",
         provenance={

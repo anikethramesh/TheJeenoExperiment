@@ -14,7 +14,7 @@ from jeenom.capability_registry import CapabilityRegistry
 from jeenom.memory import OperationalMemory
 from jeenom.minigrid_envs import ensure_custom_minigrid_envs_registered
 from jeenom.minigrid_adapter import MiniGridAdapter
-from jeenom.operator_station import OperatorStationSession, classify_utterance
+from jeenom.operator_station import OperatorStationSession, _make_classify_utterance
 from jeenom.plan_cache import PlanCache
 from jeenom.plan_reuse import PlanReuseCache
 from jeenom.primitive_library import (
@@ -1027,8 +1027,9 @@ class JeenomMiniGridTests(unittest.TestCase):
             "forget everything": "reset",
             "quit": "quit",
         }
+        classify = _make_classify_utterance(CapabilityRegistry.minigrid_default())
         for utterance, expected_kind in cases.items():
-            self.assertEqual(classify_utterance(utterance).kind, expected_kind)
+            self.assertEqual(classify(utterance).kind, expected_kind)
 
     def test_capability_registry_reports_minigrid_manifest_statuses(self):
         registry = CapabilityRegistry.minigrid_default()

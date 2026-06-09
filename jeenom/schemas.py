@@ -56,6 +56,7 @@ OPERATOR_INTENT_TYPES = (
     "sequence_instruction",
     "motor_command",
     "motor_sequence",
+    "conditional_sense_motor",
     "mission_contract",
     "reset",
     "quit",

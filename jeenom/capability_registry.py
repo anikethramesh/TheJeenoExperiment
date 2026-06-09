@@ -489,6 +489,51 @@ class CapabilityRegistry:
             return "grounding.unique_door.color_filter"
         return None
 
+    def ranked_metric_handles(self) -> dict[str, str]:
+        """Return {metric_name: handle} for all registered ranked-grounding primitives.
+
+        Identifies primitives by the 'ranked_door_list' output claim and extracts
+        the metric name from the handle. This is the authoritative source for which
+        metric names exist — no caller should hardcode those names.
+        """
+        result: dict[str, str] = {}
+        for spec in self.manifest.primitives:
+            if spec.layer != "grounding":
+                continue
+            if "ranked_door_list" not in (spec.outputs or []):
+                continue
+            parts = spec.name.split(".")
+            try:
+                idx = parts.index("ranked")
+                if idx + 1 < len(parts) - 1:
+                    metric = parts[idx + 1]
+                    result[metric] = spec.name
+            except ValueError:
+                continue
+        return result
+
+    def ranked_handle_for(self, metric_name: str) -> str:
+        """Return the capability handle for a metric name.
+
+        For known metrics returns the registered handle.
+        For new operator-defined metrics derives the handle by following the
+        naming convention of existing ranked primitives, so the convention is
+        defined once (in primitive_library) not scattered across callers.
+        """
+        known = self.ranked_metric_handles()
+        if metric_name in known:
+            return known[metric_name]
+        for handle in known.values():
+            parts = handle.split(".")
+            try:
+                idx = parts.index("ranked")
+                prefix = ".".join(parts[: idx + 1])
+                suffix = ".".join(parts[idx + 2 :])
+                return f"{prefix}.{metric_name}.{suffix}"
+            except ValueError:
+                continue
+        return f"grounding.ranked.{metric_name}.agent"
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "name": self.manifest.name,

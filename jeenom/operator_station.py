@@ -175,27 +175,12 @@ def _normalize_metric_name(name: str) -> str:
     return text
 
 
-def _metric_dependency_handle(metric: str) -> str:
-    return f"grounding.all_doors.ranked.{metric}.agent"
 
 
-def _metric_dependencies(formula: str) -> list[str]:
+def _parse_metric_expression(formula: str, known_metrics: list[str]) -> dict[str, Any] | None:
+    from .mission_cortex import _metric_dependencies
     normalized = _normalize_utterance(formula)
-    dependencies: list[str] = []
-    for metric in ("euclidean", "manhattan"):
-        if re.search(rf"\b{metric}\b", normalized) and metric not in dependencies:
-            dependencies.append(metric)
-    if (
-        not dependencies
-        and re.search(r"\bboth\s+(?:distance\s+)?metrics?\b", normalized)
-    ):
-        dependencies.extend(["euclidean", "manhattan"])
-    return dependencies
-
-
-def _parse_metric_expression(formula: str) -> dict[str, Any] | None:
-    normalized = _normalize_utterance(formula)
-    dependencies = _metric_dependencies(formula)
+    dependencies = _metric_dependencies(formula, known_metrics)
     if any(term in normalized for term in _ACTION_LEAK_TERMS):
         return {
             "op": "unsafe",
@@ -269,7 +254,11 @@ def _metric_expression_name(expression: dict[str, Any]) -> str:
     return _normalize_metric_name(op)
 
 
-def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest | str | None:
+def _parse_primitive_definition_request(
+    text: str,
+    registry: CapabilityRegistry,
+) -> PrimitiveDefinitionRequest | str | None:
+    from .mission_cortex import _metric_dependencies
     patterns = [
         re.compile(
             r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
@@ -293,6 +282,7 @@ def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest
             re.IGNORECASE,
         ),
     ]
+    known_metrics = list(registry.ranked_metric_handles().keys())
     for pattern in patterns:
         match = pattern.match(text.strip())
         if not match:
@@ -300,7 +290,7 @@ def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest
         name = match.group("name")
         formula = match.group("formula").strip()
         normalized_name = _normalize_metric_name(name)
-        expression = _parse_metric_expression(formula)
+        expression = _parse_metric_expression(formula, known_metrics)
         if expression is None:
             return (
                 "I could not parse that metric formula. Use a query-only formula "
@@ -312,8 +302,8 @@ def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest
                 "Metric definitions must be query-only. I will not build a metric "
                 "that contains actuation, movement, controller, or motor side effects."
             )
-        dependencies = list(dict.fromkeys(_metric_dependencies(formula)))
-        dependency_handles = [_metric_dependency_handle(metric) for metric in dependencies]
+        dependencies = list(dict.fromkeys(_metric_dependencies(formula, known_metrics)))
+        dependency_handles = [registry.ranked_handle_for(metric) for metric in dependencies]
         return PrimitiveDefinitionRequest(
             definition_type="distance_metric",
             name=name,
@@ -321,7 +311,7 @@ def _parse_primitive_definition_request(text: str) -> PrimitiveDefinitionRequest
             expression=expression,
             dependencies=dependencies,
             dependency_handles=dependency_handles,
-            proposed_handle=_metric_dependency_handle(normalized_name),
+            proposed_handle=registry.ranked_handle_for(normalized_name),
             safety_class="query",
             authority_level="operator",
             provenance={
@@ -402,7 +392,7 @@ def _approved(
     return ApprovedCommand(command_type=command_type, utterance=utterance, payload=p, **kwargs)
 
 
-def classify_utterance(utterance: str) -> ApprovedCommand:
+def classify_utterance(utterance: str, registry: CapabilityRegistry) -> ApprovedCommand:
     text = utterance.strip()
     normalized = _normalize_utterance(text)
 
@@ -483,7 +473,7 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
     ):
         return ApprovedCommand(command_type="task_instruction", utterance=text)
 
-    primitive_definition = _parse_primitive_definition_request(text)
+    primitive_definition = _parse_primitive_definition_request(text, registry)
     if isinstance(primitive_definition, PrimitiveDefinitionRequest):
         return _approved(
             "primitive_definition",
@@ -493,7 +483,7 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
     if isinstance(primitive_definition, str):
         return _approved("unsupported", text, primitive_definition)
 
-    inline_metric = parse_inline_metric_request(text)
+    inline_metric = parse_inline_metric_request(text, registry)
     if isinstance(inline_metric, InlineMetricMissionRequest):
         return _approved(
             "primitive_definition",
@@ -564,6 +554,11 @@ def classify_utterance(utterance: str) -> ApprovedCommand:
     return ApprovedCommand(command_type="unresolved", utterance=text)
 
 
+def _make_classify_utterance(registry: CapabilityRegistry):
+    """Return a classify_utterance callable bound to a specific registry instance."""
+    return lambda utterance: classify_utterance(utterance, registry)
+
+
 def _parse_target_fact(normalized: str) -> dict[str, str] | None:
     return _DEFAULT_DOMAIN_HELPER.parse_target_fact(normalized)
 
@@ -615,13 +610,14 @@ class OperatorStationSession:
         self.domain_helper = self.runtime_package.domain_helper
         self.planning_semantics = PlanningSemantics(self.operational_context)
         self.intent_verifier = IntentVerifier(planning_semantics=self.planning_semantics)
+        self.substrate: SubstrateAdapter = self.runtime_package.substrate
+        self.capability_registry = self.runtime_package.resolve_capability_registry()
+        self._classify_utterance = _make_classify_utterance(self.capability_registry)
         self.turn_orchestrator = TurnOrchestrator(
-            classify_utterance=classify_utterance,
+            classify_utterance=self._classify_utterance,
             normalize_utterance=_normalize_utterance,
             looks_like_bare_label=_looks_like_bare_label,
         )
-        self.substrate: SubstrateAdapter = self.runtime_package.substrate
-        self.capability_registry = self.runtime_package.resolve_capability_registry()
         self.mission_cortex = MissionCortex(
             planning_semantics=self.planning_semantics,
             registry=self.capability_registry,
@@ -904,6 +900,14 @@ class OperatorStationSession:
                 ))
 
 
+        # concept_teach must bypass composition/cap-matching; teach_concept sets its own plan.
+        if intent.intent_type == "concept_teach":
+            name = (intent.concept_name or "").strip()
+            expansion = (intent.concept_utterance or "").strip()
+            if not name or not expansion:
+                return _approved("clarification", utterance, "Please specify both a name and an instruction for the concept.")
+            return _approved("concept_teach", utterance, payload={"name": name, "utterance": expansion})
+
         request_plan_recorded = False
         if intent.grounding_query_plan is not None:
             self._record_request_plan(utterance, intent)
@@ -1040,6 +1044,47 @@ class OperatorStationSession:
             self.log(f"motor_sequence: {len(sequence)} actions")
             return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
 
+
+        if intent.intent_type == "conditional_sense_motor":
+            import uuid
+            cond_plan = RequestPlan(
+                request_id=f"conditional_sense_motor:{str(uuid.uuid4())[:8]}",
+                original_utterance=utterance,
+                objective_type="control",
+                objective_summary="Conditional motor: sense environment before actuation.",
+                steps=[
+                    RequestPlanStep(
+                        step_id="sense_condition",
+                        layer="sensing",
+                        operation="execute",
+                        inputs={"query": "scene"},
+                        outputs=["sense.front_cell"],
+                    ),
+                    RequestPlanStep(
+                        step_id="conditional_execute_motor",
+                        layer="action",
+                        operation="refuse",
+                        depends_on=["sense_condition"],
+                        inputs={"condition": utterance},
+                    ),
+                ],
+                expected_response="ask_clarification",
+            )
+            cond_graph = evaluate_request_plan(
+                cond_plan,
+                registry=self.capability_registry,
+                active_claims=self.active_claims,
+                claims_valid=self._claims_valid_for_current_environment(),
+                environment_identity=self.current_environment_identity,
+            )
+            self.last_request_plan = cond_plan
+            self.last_readiness_graph = cond_graph
+            return _approved(
+                "clarification",
+                utterance,
+                "Conditional motor command requires Sense evidence before actuation. "
+                "Please confirm the condition and the fallback action.",
+            )
 
         if intent.intent_type == "mission_contract":
             steps = list(intent.mission_steps or [])
@@ -1952,7 +1997,7 @@ class OperatorStationSession:
         )
 
     def _ensure_metric_dependency(self, metric: str) -> tuple[bool, str]:
-        handle = _metric_dependency_handle(metric)
+        handle = self.capability_registry.ranked_handle_for(metric)
         spec = self.capability_registry.lookup(handle)
         if spec is None:
             return False, f"dependency handle {handle} is missing"
@@ -2011,7 +2056,7 @@ class OperatorStationSession:
             return float(scene.manhattan_distance_from_agent(obj))
         if metric == "euclidean":
             return math.sqrt((obj.x - scene.agent_x) ** 2 + (obj.y - scene.agent_y) ** 2)
-        fn = self.capability_registry.get_synthesized_callable(_metric_dependency_handle(metric))
+        fn = self.capability_registry.get_synthesized_callable(self.capability_registry.ranked_handle_for(metric))
         if fn is not None:
             ranked = fn(scene, {"object_type": "door", "color": None, "exclude_colors": []})
             for dist, candidate in ranked:
@@ -2140,7 +2185,7 @@ class OperatorStationSession:
         raw_metric = str(command.payload.get("metric") or "")
         metric = self._resolve_metric_name(raw_metric)
         if metric is None:
-            proposed = _metric_dependency_handle(_normalize_metric_name(raw_metric))
+            proposed = self.capability_registry.ranked_handle_for(_normalize_metric_name(raw_metric))
             self.last_request_plan = RequestPlan(
                 request_id=f"metric_query:{abs(hash((command.utterance, raw_metric))) % 1_000_000}",
                 original_utterance=command.utterance,
@@ -2173,7 +2218,7 @@ class OperatorStationSession:
                 "I do not have that metric defined yet. Define it first, then approve it."
             )
 
-        handle = _metric_dependency_handle(metric)
+        handle = self.capability_registry.ranked_handle_for(metric)
         intent = OperatorIntent(
             intent_type="status_query",
             status_query="ground_target",
@@ -3564,6 +3609,13 @@ class OperatorStationSession:
             return intent
 
         normalized = _normalize_utterance(utterance)
+
+        # Never promote random-walk utterances to a query intent.
+        if re.search(r"\brandom(?:ly)?\b", normalized) and re.search(
+            r"\b(?:walk|move\s+to|go\s+to|navigate)\b", normalized
+        ):
+            return intent
+
         signal_types = {signal.signal_type for signal in verif_result.signals}
         object_type = (
             self.planning_semantics.object_type_from_text(normalized)
@@ -3666,6 +3718,11 @@ class OperatorStationSession:
         signal_types = {signal.signal_type for signal in verif_result.signals}
         if not signal_types.intersection(
             {"superlative", "cardinality", "ordinal", "distance_value"}
+        ):
+            return None
+        normalized = _normalize_utterance(utterance)
+        if re.search(r"\brandom(?:ly)?\b", normalized) and re.search(
+            r"\b(?:walk|move\s+to|go\s+to|navigate)\b", normalized
         ):
             return None
 
@@ -5519,6 +5576,10 @@ class OperatorStationSession:
 
     def teach_concept(self, name: str, utterance: str) -> str:
         """Teach a named concept and pre-compile its plan into the reuse cache."""
+        import uuid
+        from .request_planner import build_request_plan
+        from .readiness_graph import evaluate_request_plan
+
         plan = None
         try:
             intent = self.compiler.compile_operator_intent(
@@ -5528,9 +5589,6 @@ class OperatorStationSession:
                 capability_manifest=self.capability_registry.compact_summary(),
                 active_claims_summary=None,
             )
-            from .request_planner import build_request_plan
-            from .readiness_graph import evaluate_request_plan
-
             candidate = build_request_plan(
                 utterance,
                 intent,
@@ -5556,7 +5614,33 @@ class OperatorStationSession:
                 f"reason=planning_failed:{type(exc).__name__}"
             )
 
-        concept = self.knowledge_base.teach(name, utterance, plan=plan)
+        ku_plan = RequestPlan(
+            request_id=f"knowledge_update:{str(uuid.uuid4())[:8]}",
+            original_utterance=utterance,
+            objective_type="knowledge_update",
+            objective_summary=f"Store procedure '{name}'.",
+            steps=[
+                RequestPlanStep(
+                    step_id="update_knowledge",
+                    layer="memory",
+                    operation="update",
+                    inputs={"procedure_name": name, "expansion": utterance},
+                    outputs=["knowledge_base.procedures"],
+                ),
+            ],
+            expected_response="update_memory",
+        )
+        ku_graph = evaluate_request_plan(
+            ku_plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=self._claims_valid_for_current_environment(),
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = ku_plan
+        self.last_readiness_graph = ku_graph
+
+        concept = self.representation.put_procedure(name, utterance, plan=plan)
         plan_status = "plan pre-compiled and cached" if plan is not None else "no plan (will compile on first recall)"
         self.log(f"concept taught: name={concept.name!r} utterance={concept.utterance!r} type={concept.concept_type} {plan_status}")
         result = (
@@ -5636,7 +5720,7 @@ class OperatorStationSession:
 
         # Atomic concept — expand and dispatch
         expanded = concept.utterance
-        expanded_command = classify_utterance(expanded)
+        expanded_command = self._classify_utterance(expanded)
         if expanded_command.kind == "unresolved":
             expanded_command = self.command_from_llm_intent(expanded)
         return expanded_command
@@ -5856,6 +5940,34 @@ class OperatorStationSession:
         self, sequence: list[dict[str, Any]], original_utterance: str
     ) -> str:
         """Execute an ordered list of motor actions on the persistent session adapter."""
+        import uuid
+        seq_plan = RequestPlan(
+            request_id=f"motor_sequence:{str(uuid.uuid4())[:8]}",
+            original_utterance=original_utterance,
+            objective_type="motor_control",
+            objective_summary=f"Motor sequence: {len(sequence)} actions.",
+            steps=[
+                RequestPlanStep(
+                    step_id=f"execute_motor_{i}",
+                    layer="action",
+                    operation="execute",
+                    inputs={"action_name": s["action"], "repeat_count": s["count"]},
+                    constraints={"raw_motor": True},
+                )
+                for i, s in enumerate(sequence)
+            ],
+            expected_response="execute_motor",
+        )
+        seq_graph = evaluate_request_plan(
+            seq_plan,
+            registry=self.capability_registry,
+            active_claims=self.active_claims,
+            claims_valid=self._claims_valid_for_current_environment(),
+            environment_identity=self.current_environment_identity,
+        )
+        self.last_request_plan = seq_plan
+        self.last_readiness_graph = seq_graph
+
         parts: list[str] = []
         for step in sequence:
             action_name = step["action"]
@@ -5863,6 +5975,9 @@ class OperatorStationSession:
             self.log(f"motor_sequence step: {action_name} × {count}")
             result_text = self._run_motor_command(action_name, count, original_utterance)
             parts.append(result_text)
+
+        self.last_request_plan = seq_plan
+        self.last_readiness_graph = seq_graph
         return "MOTOR SEQUENCE\n" + "\n".join(parts)
 
     def _run_mission(self, steps: list[str], original_utterance: str) -> str:
