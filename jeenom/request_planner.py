@@ -52,8 +52,9 @@ def _expected_response(intent: OperatorIntent) -> str:
 
 
 def _comparison_from_text_or_plan(text: str, plan: dict[str, Any] | None) -> str | None:
-    if plan is not None and plan.get("comparison"):
-        return str(plan["comparison"])
+    if plan is not None:
+        c = plan.get("comparison")
+        return str(c) if c else None
     normalized = _normalize(text)
     if "at least" in normalized:
         return "at_least"
@@ -67,8 +68,9 @@ def _comparison_from_text_or_plan(text: str, plan: dict[str, Any] | None) -> str
 
 
 def _distance_value_from_text_or_plan(text: str, plan: dict[str, Any] | None) -> int | None:
-    if plan is not None and plan.get("distance_value") is not None:
-        return int(plan["distance_value"])
+    if plan is not None:
+        dv = plan.get("distance_value")
+        return int(dv) if dv is not None else None
     match = re.search(r"\b(\d+)\b", text)
     if match is None:
         return None

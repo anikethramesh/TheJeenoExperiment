@@ -10,13 +10,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .capability_arbitrator import ArbitratorBackend, build_arbitrator
+from .cortex_session import CortexSession
 from .capability_matcher import CapabilityMatchResult, CapabilityMatcher, default_matcher
 from .capability_registry import CapabilityRegistry
 from .command_authority import CommandAuthority
 from .primitive_synthesizer import SynthesizerBackend, build_synthesizer
 from .primitive_validator import PrimitiveValidator, default_validator
-from .readiness_graph import evaluate_request_plan
-from .request_planner import build_request_plan
 from .intent_verifier import IntentVerificationResult, IntentVerifier
 from .cortex import Cortex
 from .llm_compiler import CompilerBackend, SmokeTestCompiler, build_compiler, canonical_task_params
@@ -24,6 +23,10 @@ from .memory import OperationalMemory
 from .mission_cortex import (
     InlineMetricMissionRequest,
     MissionCortex,
+    _metric_dependencies,
+    _metric_expression_name,
+    _normalize_metric_name,
+    _parse_metric_expression,
     parse_inline_metric_request,
 )
 from .minigrid_runtime_package import (
@@ -41,7 +44,12 @@ from .runtime_package import RuntimePackage
 from .semantic_normalizer import infer_direction_from_utterance, normalize_distance_ordinal
 from .side_effect_authority import SideEffectAuthority
 from .substrate_adapter import SubstrateAdapter
-from .turn_orchestrator import TurnOrchestrator
+from .turn_orchestrator import (
+    PendingClarification,
+    PendingPrimitiveDefinition,
+    PendingSynthesisProposal,
+    TurnOrchestrator,
+)
 from .schemas import (
     ApprovedCommand,
     ArbitrationTrace,
@@ -70,61 +78,6 @@ from .schemas import (
 
 
 _DEFAULT_DOMAIN_HELPER = default_minigrid_domain_helper()
-
-
-@dataclass
-class PendingClarification:
-    clarification_type: str
-    original_utterance: str
-    resume_kind: str
-    partial_selector: dict[str, Any]
-    missing_field: str
-    supported_values: list[str]
-    candidates: list[dict[str, Any]] = field(default_factory=list)
-    request_plan: RequestPlan | None = None
-    readiness_graph: ReadinessGraph | None = None
-    pending_envelope: CorticalEnvelope | None = None
-
-
-@dataclass
-class PendingSynthesisProposal:
-    handle: str
-    original_utterance: str
-    intent: Any
-    cap_match: Any
-    similar_handles: list[str]
-    proposed_description: str | None = None
-    proposed_condition: dict[str, Any] | None = None
-
-
-@dataclass
-class PendingPrimitiveDefinition:
-    request: PrimitiveDefinitionRequest
-    request_plan: RequestPlan
-    readiness_graph: ReadinessGraph
-    mission_plan: MissionExecutionPlan | None = None
-
-
-_ACTION_LEAK_TERMS = (
-    "move",
-    "moves",
-    "moving",
-    "turn",
-    "turns",
-    "pickup",
-    "pick up",
-    "grab",
-    "toggle",
-    "open",
-    "unlock",
-    "navigate",
-    "go forward",
-    "env step",
-    "env.step",
-    "controller",
-    "motor",
-    "actuate",
-)
 
 
 def _scene_object_to_dict(obj: SceneObject) -> dict[str, Any]:
@@ -168,97 +121,10 @@ def _looks_like_bare_label(normalized: str) -> bool:
     )
 
 
-def _normalize_metric_name(name: str) -> str:
-    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name.strip())
-    text = re.sub(r"[^A-Za-z0-9_]+", "_", text)
-    text = re.sub(r"_+", "_", text).strip("_").lower()
-    return text
-
-
-
-
-def _parse_metric_expression(formula: str, known_metrics: list[str]) -> dict[str, Any] | None:
-    from .mission_cortex import _metric_dependencies
-    normalized = _normalize_utterance(formula)
-    dependencies = _metric_dependencies(formula, known_metrics)
-    if any(term in normalized for term in _ACTION_LEAK_TERMS):
-        return {
-            "op": "unsafe",
-            "reason": "Metric definitions must be query-only and cannot include actuation.",
-            "metrics": dependencies,
-        }
-    if not dependencies:
-        return None
-
-    number_match = re.search(r"\b(\d+(?:\.\d+)?)\b", normalized)
-    constant = float(number_match.group(1)) if number_match else None
-
-    if len(dependencies) >= 2 and (
-        "sum" in normalized
-        or "total" in normalized
-        or "combined" in normalized
-        or "plus" in normalized
-        or "+" in formula
-    ):
-        return {"op": "sum", "metrics": dependencies}
-    if "minimum" in normalized or "min(" in normalized or "min of" in normalized:
-        return {"op": "min", "metrics": dependencies}
-    if "maximum" in normalized or "max(" in normalized or "max of" in normalized:
-        return {"op": "max", "metrics": dependencies}
-    if "mod" in normalized or "modulo" in normalized:
-        if constant is None:
-            return None
-        return {"op": "mod", "metric": dependencies[0], "constant": constant}
-    if "abs" in normalized and "-" in formula and len(dependencies) >= 2:
-        expression: dict[str, Any] = {
-            "op": "abs_diff",
-            "metrics": dependencies[:2],
-        }
-        if constant is not None and ("+" in formula or " plus " in normalized):
-            expression["op"] = "abs_diff_plus"
-            expression["constant"] = constant
-        return expression
-    if " plus " in normalized or "+" in formula:
-        if constant is None:
-            return None
-        return {"op": "add", "metric": dependencies[0], "constant": constant}
-    if " minus " in normalized or "-" in formula:
-        if constant is None:
-            return None
-        return {"op": "subtract", "metric": dependencies[0], "constant": constant}
-    if len(dependencies) == 1:
-        return {"op": "alias", "metric": dependencies[0]}
-    return None
-
-
-def _metric_expression_name(expression: dict[str, Any]) -> str:
-    op = str(expression.get("op") or "metric")
-    if op in {"sum", "min", "max"}:
-        metrics = [
-            _normalize_metric_name(str(metric))
-            for metric in expression.get("metrics", [])
-        ]
-        return _normalize_metric_name("_".join([op, *metrics]))
-    if op in {"alias", "mod", "add", "subtract"}:
-        metric = _normalize_metric_name(str(expression.get("metric") or "metric"))
-        suffix = ""
-        if expression.get("constant") is not None:
-            suffix = "_" + str(expression["constant"]).replace(".", "_")
-        return _normalize_metric_name(f"{op}_{metric}{suffix}")
-    if op in {"abs_diff", "abs_diff_plus"}:
-        metrics = [
-            _normalize_metric_name(str(metric))
-            for metric in expression.get("metrics", [])
-        ]
-        return _normalize_metric_name("_".join([op, *metrics]))
-    return _normalize_metric_name(op)
-
-
 def _parse_primitive_definition_request(
     text: str,
     registry: CapabilityRegistry,
 ) -> PrimitiveDefinitionRequest | str | None:
-    from .mission_cortex import _metric_dependencies
     patterns = [
         re.compile(
             r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
@@ -622,6 +488,10 @@ class OperatorStationSession:
             planning_semantics=self.planning_semantics,
             registry=self.capability_registry,
         )
+        self.cortex_session = CortexSession(
+            registry=self.capability_registry,
+            planning_semantics=self.planning_semantics,
+        )
         # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
         self.knowledge_base = KnowledgeBase(
             storage_path=self.memory.memory_dir / "knowledge_base.json"
@@ -660,9 +530,6 @@ class OperatorStationSession:
             self.plan_cache,
         )
         self.startup_prewarm_summary: dict[str, Any] | None = None
-        self.pending_clarification: PendingClarification | None = None
-        self.pending_synthesis_proposal: PendingSynthesisProposal | None = None
-        self.pending_primitive_definition: PendingPrimitiveDefinition | None = None
         self.last_mission_execution_plan: MissionExecutionPlan | None = None
         self.last_execution_ticket: ExecutionTicket | None = None
         self.last_memory_write_ticket: MemoryWriteTicket | None = None
@@ -696,6 +563,30 @@ class OperatorStationSession:
             self.representation.clear_active_claims(reason="station cleared active claims")
             return
         self.representation.set_active_claims(claims)
+
+    @property
+    def pending_clarification(self) -> PendingClarification | None:
+        return self.turn_orchestrator.pending_clarification
+
+    @pending_clarification.setter
+    def pending_clarification(self, value: PendingClarification | None) -> None:
+        self.turn_orchestrator.pending_clarification = value
+
+    @property
+    def pending_synthesis_proposal(self) -> PendingSynthesisProposal | None:
+        return self.turn_orchestrator.pending_synthesis_proposal
+
+    @pending_synthesis_proposal.setter
+    def pending_synthesis_proposal(self, value: PendingSynthesisProposal | None) -> None:
+        self.turn_orchestrator.pending_synthesis_proposal = value
+
+    @property
+    def pending_primitive_definition(self) -> PendingPrimitiveDefinition | None:
+        return self.turn_orchestrator.pending_primitive_definition
+
+    @pending_primitive_definition.setter
+    def pending_primitive_definition(self, value: PendingPrimitiveDefinition | None) -> None:
+        self.turn_orchestrator.pending_primitive_definition = value
 
     @property
     def preview_adapter(self) -> Any:
@@ -1070,9 +961,8 @@ class OperatorStationSession:
                 ],
                 expected_response="ask_clarification",
             )
-            cond_graph = evaluate_request_plan(
+            cond_graph = self.cortex_session.evaluate(
                 cond_plan,
-                registry=self.capability_registry,
                 active_claims=self.active_claims,
                 claims_valid=self._claims_valid_for_current_environment(),
                 environment_identity=self.current_environment_identity,
@@ -1301,20 +1191,14 @@ class OperatorStationSession:
 
     def _record_request_plan(self, utterance: str, intent: OperatorIntent) -> None:
         claims_valid = self._claims_valid_for_current_environment()
-        active_summary = (
-            self.active_claims.compact_summary()
-            if self.active_claims is not None and claims_valid
-            else None
-        )
 
-        # Build a fresh plan to compute the structural key and check against cache.
-        # Plan construction is deterministic and cheap (no LLM calls).
-        fresh_plan = build_request_plan(
+        # Build plan and initial readiness through cortex_session (no LLM calls).
+        fresh_plan, readiness_graph = self.cortex_session.plan(
             utterance,
             intent,
-            active_claims_summary=active_summary,
+            active_claims=self.active_claims,
+            claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
-            planning_semantics=self.planning_semantics,
         )
 
         cacheable_plan = self._request_plan_is_reusable(fresh_plan)
@@ -1343,9 +1227,8 @@ class OperatorStationSession:
                 # plan is always up-to-date.  Update the cache entry so future
                 # lookups also get the current plan.
                 cached_entry.plan = fresh_plan
-                readiness_graph = evaluate_request_plan(
+                readiness_graph = self.cortex_session.evaluate(
                     fresh_plan,
-                    registry=self.capability_registry,
                     active_claims=self.active_claims,
                     claims_valid=claims_valid,
                     environment_identity=self.current_environment_identity,
@@ -1367,14 +1250,7 @@ class OperatorStationSession:
         else:
             self.last_plan_reuse_verdict = None
 
-        # Fresh compile path — no matching cache entry or reuse was rejected.
-        readiness_graph = evaluate_request_plan(
-            fresh_plan,
-            registry=self.capability_registry,
-            active_claims=self.active_claims,
-            claims_valid=claims_valid,
-            environment_identity=self.current_environment_identity,
-        )
+        # Fresh compile path — readiness_graph already computed above.
         self.last_request_plan = fresh_plan
         self.last_readiness_graph = readiness_graph
         self._record_request_state(
@@ -1388,7 +1264,7 @@ class OperatorStationSession:
             self.request_plan_reuse_cache.store(fresh_plan)
 
         self._run_mismatch_detection(fresh_plan)
-        
+
         should_repair = (
             readiness_graph.graph_status != "executable"
             or any(
@@ -1400,13 +1276,12 @@ class OperatorStationSession:
             repair_loop = RepairLoop(self)
             repair_events = repair_loop.attempt_repair(self.last_operational_mismatches)
             self.last_repair_events.extend(repair_events)
-            
+
             if any(event.success for event in repair_events):
                 self.log("repair successful, re-evaluating readiness graph")
                 claims_valid = self._claims_valid_for_current_environment()
-                readiness_graph = evaluate_request_plan(
+                readiness_graph = self.cortex_session.evaluate(
                     fresh_plan,
-                    registry=self.capability_registry,
                     active_claims=self.active_claims,
                     claims_valid=claims_valid,
                     environment_identity=self.current_environment_identity,
@@ -1474,27 +1349,13 @@ class OperatorStationSession:
         instruction: str,
     ) -> tuple[RequestPlan, ReadinessGraph]:
         intent = self._task_intent_for_instruction(instruction)
-        claims_valid = self._claims_valid_for_current_environment()
-        active_summary = (
-            self.active_claims.compact_summary()
-            if self.active_claims is not None and claims_valid
-            else None
-        )
-        plan = build_request_plan(
+        return self.cortex_session.plan(
             utterance,
             intent,
-            active_claims_summary=active_summary,
-            environment_identity=self.current_environment_identity,
-            planning_semantics=self.planning_semantics,
-        )
-        graph = evaluate_request_plan(
-            plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
-            claims_valid=claims_valid,
+            claims_valid=self._claims_valid_for_current_environment(),
             environment_identity=self.current_environment_identity,
         )
-        return plan, graph
 
     def _execution_ticket_from_plan(
         self,
@@ -1595,21 +1456,13 @@ class OperatorStationSession:
         count: int,
     ) -> tuple[RequestPlan, ReadinessGraph]:
         intent = self._motor_intent_for_action(action_name, count)
-        plan = build_request_plan(
+        return self.cortex_session.plan(
             utterance,
             intent,
-            active_claims_summary=None,
-            environment_identity=self.current_environment_identity,
-            planning_semantics=self.planning_semantics,
-        )
-        graph = evaluate_request_plan(
-            plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=self._claims_valid_for_current_environment(),
             environment_identity=self.current_environment_identity,
         )
-        return plan, graph
 
     def _raw_motor_ticket_from_plan(
         self,
@@ -1707,16 +1560,9 @@ class OperatorStationSession:
             confidence=1.0,
             reason="Deterministic durable knowledge update.",
         )
-        plan = build_request_plan(
+        plan, graph = self.cortex_session.plan(
             utterance,
             intent,
-            active_claims_summary=None,
-            environment_identity=self.current_environment_identity,
-            planning_semantics=self.planning_semantics,
-        )
-        graph = evaluate_request_plan(
-            plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=self._claims_valid_for_current_environment(),
             environment_identity=self.current_environment_identity,
@@ -2204,9 +2050,8 @@ class OperatorStationSession:
                 ],
                 expected_response="answer_query",
             )
-            self.last_readiness_graph = evaluate_request_plan(
+            self.last_readiness_graph = self.cortex_session.evaluate(
                 self.last_request_plan,
-                registry=self.capability_registry,
                 active_claims=self.active_claims,
                 claims_valid=self._claims_valid_for_current_environment(),
                 environment_identity=self.current_environment_identity,
@@ -2623,6 +2468,7 @@ class OperatorStationSession:
                 ordinal=int(ordinal),
                 order=order,
                 wants_task=wants_task,
+                tie_policy=str(plan.get("tie_policy") or "clarify"),
             )
 
         if answer_fields.intersection({"closest", "farthest"}):
@@ -4138,6 +3984,7 @@ class OperatorStationSession:
         ordinal: int,
         order: str,
         wants_task: bool,
+        tie_policy: str = "clarify",
     ) -> ApprovedCommand:
         ranked = list(claims.ranked_scene_doors)
         if order == "descending":
@@ -4148,7 +3995,7 @@ class OperatorStationSession:
 
         entry = ranked[rank]
         tied = [item for item in ranked if item.distance == entry.distance]
-        if len(tied) > 1:
+        if len(tied) > 1 and tie_policy != "first":
             message = (
                 "CLARIFY\n"
                 f"That ordinal falls inside a distance tie at distance {entry.distance}. "
@@ -4791,21 +4638,9 @@ class OperatorStationSession:
         intent = self._intent_for_clarification_resume(pending, selector)
         self.last_operator_intent = intent
         claims_valid = self._claims_valid_for_current_environment()
-        active_summary = (
-            self.active_claims.compact_summary()
-            if self.active_claims is not None and claims_valid
-            else None
-        )
-        plan = build_request_plan(
+        plan, graph = self.cortex_session.plan(
             pending.original_utterance,
             intent,
-            active_claims_summary=active_summary,
-            environment_identity=self.current_environment_identity,
-            planning_semantics=self.planning_semantics,
-        )
-        graph = evaluate_request_plan(
-            plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
@@ -4878,21 +4713,9 @@ class OperatorStationSession:
         intent = self._intent_for_clarification_resume(pending, selector)
         self.last_operator_intent = intent
         claims_valid = self._claims_valid_for_current_environment()
-        active_summary = (
-            self.active_claims.compact_summary()
-            if self.active_claims is not None and claims_valid
-            else None
-        )
-        plan = build_request_plan(
+        plan, graph = self.cortex_session.plan(
             pending.original_utterance,
             intent,
-            active_claims_summary=active_summary,
-            environment_identity=self.current_environment_identity,
-            planning_semantics=self.planning_semantics,
-        )
-        graph = evaluate_request_plan(
-            plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
@@ -5577,8 +5400,6 @@ class OperatorStationSession:
     def teach_concept(self, name: str, utterance: str) -> str:
         """Teach a named concept and pre-compile its plan into the reuse cache."""
         import uuid
-        from .request_planner import build_request_plan
-        from .readiness_graph import evaluate_request_plan
 
         plan = None
         try:
@@ -5589,16 +5410,9 @@ class OperatorStationSession:
                 capability_manifest=self.capability_registry.compact_summary(),
                 active_claims_summary=None,
             )
-            candidate = build_request_plan(
+            candidate, graph = self.cortex_session.plan(
                 utterance,
                 intent,
-                active_claims_summary=None,
-                environment_identity=self.current_environment_identity,
-                planning_semantics=self.planning_semantics,
-            )
-            graph = evaluate_request_plan(
-                candidate,
-                registry=self.capability_registry,
                 active_claims=None,
                 claims_valid=False,
                 environment_identity=self.current_environment_identity,
@@ -5630,9 +5444,8 @@ class OperatorStationSession:
             ],
             expected_response="update_memory",
         )
-        ku_graph = evaluate_request_plan(
+        ku_graph = self.cortex_session.evaluate(
             ku_plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=self._claims_valid_for_current_environment(),
             environment_identity=self.current_environment_identity,
@@ -5680,6 +5493,18 @@ class OperatorStationSession:
         seq = self.knowledge_base._is_sequence(",".join(cleaned))
         if seq is not None:
             return ApprovedCommand(command_type="procedure_execute", utterance=utterance, payload={"steps": seq})
+        # If all steps are motor commands, route to motor_sequence_execute, not sequence_execute.
+        # This prevents motor-only chains like "move forward twice then turn left" from being sent
+        # to _run_sequence, which only handles task (go_to_object) utterances.
+        from .llm_compiler import _parse_motor_command as _pmc
+        motor_steps = [_pmc(step) for step in cleaned]
+        if all(step is not None for step in motor_steps):
+            sequence = [{"action": act, "count": cnt} for act, cnt in motor_steps]
+            return ApprovedCommand(
+                command_type="motor_sequence_execute",
+                utterance=utterance,
+                payload={"sequence": sequence},
+            )
         # Multi-word parts that aren't named concepts → raw utterance sequence
         if all(cleaned):
             return ApprovedCommand(command_type="sequence_execute", utterance=utterance, payload={"steps": cleaned})
@@ -5783,9 +5608,8 @@ class OperatorStationSession:
             )
 
         claims_valid = self._claims_valid_for_current_environment()
-        readiness_graph = evaluate_request_plan(
+        readiness_graph = self.cortex_session.evaluate(
             plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
@@ -5870,9 +5694,8 @@ class OperatorStationSession:
             )
 
         claims_valid = self._claims_valid_for_current_environment()
-        readiness_graph = evaluate_request_plan(
+        readiness_graph = self.cortex_session.evaluate(
             plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
@@ -5958,9 +5781,8 @@ class OperatorStationSession:
             ],
             expected_response="execute_motor",
         )
-        seq_graph = evaluate_request_plan(
+        seq_graph = self.cortex_session.evaluate(
             seq_plan,
-            registry=self.capability_registry,
             active_claims=self.active_claims,
             claims_valid=self._claims_valid_for_current_environment(),
             environment_identity=self.current_environment_identity,

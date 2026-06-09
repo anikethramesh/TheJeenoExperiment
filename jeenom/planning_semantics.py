@@ -74,9 +74,9 @@ class PlanningSemantics:
         return None
 
     def metric_from_text_or_plan(self, text: str, plan: dict[str, Any] | None) -> str | None:
-        if plan is not None and plan.get("metric"):
-            metric = str(plan["metric"])
-            return metric if self.metric_supported(metric) else None
+        if plan is not None:
+            metric = plan.get("metric")
+            return str(metric) if metric else None
         normalized = _normalize(text)
         for metric in self.metrics:
             if re.search(rf"\b{re.escape(metric)}\b", normalized):

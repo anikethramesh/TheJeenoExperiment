@@ -335,6 +335,123 @@ def _run_compound_missions(metrics: dict[str, bool], details: dict[str, Any]) ->
             )
 
 
+def _run_composition_invariants(metrics: dict[str, bool], details: dict[str, Any]) -> None:
+    """Red-bar tests for primitive composition architectural invariants.
+
+    Invariant 1 — plan-trust: when a grounding_query_plan is present, text-parsing
+    fallbacks (_comparison_from_text_or_plan, metric_from_text_or_plan) must not
+    override the structured plan values, even when the utterance contains keywords
+    that would normally trigger those parsers.
+
+    Invariant 2 — pre-built continuation plan: the continuation RequestPlan must be
+    built at proposal time and stored in MissionExecutionPlan.continuation_request_plan,
+    not reconstructed from the original utterance at approval time.
+
+    Invariant 3 — plan reuse on approval: resume_after_approval must reuse the
+    pre-built plan (same request_id) rather than re-running build_request_plan.
+    """
+    from jeenom.request_planner import build_request_plan
+    from jeenom.schemas import OperatorIntent
+
+    # Use a fresh session's planning_semantics — guaranteed to be correctly wired.
+    _ref_session = make_session(env_id=ENV_ID, seed=SEED)
+    semantics = _ref_session.planning_semantics
+
+    # ── Invariant 1a: comparison not extracted from text when plan is present ──
+    # Adversarial: utterance contains "above" (comparison word) but the
+    # grounding_query_plan explicitly has comparison: None.  No
+    # filter_distance_threshold step may appear.
+    adversarial_utterance = (
+        "create abovemetric = euclidean mod 5 and go above to the farthest abovemetric door"
+    )
+    continuation_intent_adv = OperatorIntent(
+        intent_type="task_instruction",
+        task_type="go_to_object",
+        grounding_query_plan={
+            "object_type": "door",
+            "operation": "select",
+            "primitive_handle": "grounding.all_doors.ranked.mod_euclidean_5_0.agent",
+            "metric": "mod_euclidean_5_0",
+            "reference": "agent",
+            "order": "descending",
+            "ordinal": 1,
+            "color": None,
+            "exclude_colors": [],
+            "distance_value": None,
+            "comparison": None,
+            "tie_policy": "first",
+            "answer_fields": ["target", "distance"],
+            "required_capabilities": ["grounding.all_doors.ranked.mod_euclidean_5_0.agent", "task.go_to_object.door"],
+            "preserved_constraints": ["inline_metric", "mod_euclidean_5_0", "euclidean"],
+            "metric_dependencies": ["euclidean"],
+            "derived_metric": True,
+            "mission_id": "mission:test",
+        },
+        capability_status="executable",
+        required_capabilities=["grounding.all_doors.ranked.mod_euclidean_5_0.agent", "task.go_to_object.door"],
+        confidence=1.0,
+        reason="test",
+    )
+    plan_adv = build_request_plan(adversarial_utterance, continuation_intent_adv, planning_semantics=semantics)
+    step_ids_adv = {s.step_id for s in plan_adv.steps}
+    metrics["composition_plan_trust_comparison_not_extracted_from_adversarial_text"] = (
+        "filter_distance_threshold" not in step_ids_adv
+    )
+    details["composition_plan_trust_comparison_step_ids"] = sorted(step_ids_adv)
+
+    # ── Invariant 1b: metric from plan used even when not yet in metric_supported ──
+    # At proposal time, "mod_euclidean_5_0" is not in the semantics metrics list yet
+    # (_install_metric_semantics hasn't run). metric_from_text_or_plan must still
+    # return "mod_euclidean_5_0" from the plan, not None or a fallback.
+    metric_in_constraints = next(
+        (
+            step.constraints.get("metric")
+            for step in plan_adv.steps
+            if step.step_id == "rank_scene_doors"
+        ),
+        "MISSING",
+    )
+    metrics["composition_plan_trust_metric_from_plan_not_text"] = (
+        metric_in_constraints == "mod_euclidean_5_0"
+    )
+    details["composition_plan_trust_metric_in_constraints"] = metric_in_constraints
+
+    # ── Invariant 2: continuation plan pre-built at proposal time ──
+    # After the first handle_utterance, pending_primitive_definition.mission_plan
+    # must already have continuation_request_plan set with the correct step structure.
+    session_prebuilt = make_session(env_id=ENV_ID, seed=SEED)
+    session_prebuilt.handle_utterance(
+        "create ramesian = euclidean mod 5 and go to the farthest ramesian door"
+    )
+    pending = getattr(session_prebuilt, "pending_primitive_definition", None)
+    prebuilt_plan = getattr(getattr(pending, "mission_plan", None), "continuation_request_plan", None)
+    prebuilt_step_ids = set(_step_ids(prebuilt_plan))
+    metrics["composition_continuation_plan_prebuilt_at_proposal"] = (
+        prebuilt_plan is not None
+        and "rank_scene_doors" in prebuilt_step_ids
+        and "select_grounded_target" in prebuilt_step_ids
+        and "execute_task" in prebuilt_step_ids
+    )
+    metrics["composition_continuation_plan_no_spurious_filter_at_proposal"] = (
+        prebuilt_plan is not None
+        and "filter_distance_threshold" not in prebuilt_step_ids
+    )
+    details["composition_prebuilt_step_ids"] = sorted(prebuilt_step_ids)
+
+    # ── Invariant 3: approval reuses pre-built plan (same request_id) ──
+    prebuilt_request_id = getattr(prebuilt_plan, "request_id", None)
+    session_prebuilt.handle_utterance("yes")
+    final_mission = getattr(session_prebuilt, "last_mission_execution_plan", None)
+    final_cont_plan = getattr(final_mission, "continuation_request_plan", None)
+    final_request_id = getattr(final_cont_plan, "request_id", None)
+    metrics["composition_approval_reuses_prebuilt_plan"] = (
+        prebuilt_request_id is not None
+        and final_request_id == prebuilt_request_id
+    )
+    details["composition_prebuilt_request_id"] = prebuilt_request_id
+    details["composition_final_request_id"] = final_request_id
+
+
 def _run_negative_controls(metrics: dict[str, bool], details: dict[str, Any]) -> None:
     controls = [
         ("go to the door", "clarify_ambiguous_target"),
@@ -384,6 +501,7 @@ def main() -> int:
         _run_conditional_sense_spine(metrics, details)
         _run_distance_paraphrases(metrics, details)
         _run_compound_missions(metrics, details)
+        _run_composition_invariants(metrics, details)
         _run_negative_controls(metrics, details)
     except Exception as exc:  # pragma: no cover - emitted as eval detail
         details["error"] = f"{type(exc).__name__}: {exc}"

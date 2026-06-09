@@ -50,8 +50,10 @@ def main() -> int:
     metrics["clarification_resume_has_no_direct_execution_or_memory_write"] = not direct_unsafe_calls
     details["direct_unsafe_resume_calls"] = direct_unsafe_calls
 
+    # Accept either the old direct call (evaluate_request_plan) or the new cortex_session
+    # delegation (plan / evaluate) — both guarantee readiness is re-checked before resuming.
     metrics["clarification_resume_reevaluates_readiness"] = any(
-        item[1] == "evaluate_request_plan" for item in all_calls
+        item[1] in {"evaluate_request_plan", "plan", "evaluate"} for item in all_calls
     )
 
     metrics["clarification_resume_gate_holds"] = all(metrics.values())

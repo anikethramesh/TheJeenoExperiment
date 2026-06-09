@@ -1,18 +1,65 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .schemas import ApprovedCommand
+from .schemas import (
+    ApprovedCommand,
+    CorticalEnvelope,
+    MissionExecutionPlan,
+    PrimitiveDefinitionRequest,
+    ReadinessGraph,
+    RequestPlan,
+)
 
 
-@dataclass(frozen=True)
+@dataclass
+class PendingClarification:
+    clarification_type: str
+    original_utterance: str
+    resume_kind: str
+    partial_selector: dict[str, Any]
+    missing_field: str
+    supported_values: list[str]
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    request_plan: RequestPlan | None = None
+    readiness_graph: ReadinessGraph | None = None
+    pending_envelope: CorticalEnvelope | None = None
+
+
+@dataclass
+class PendingSynthesisProposal:
+    handle: str
+    original_utterance: str
+    intent: Any
+    cap_match: Any
+    similar_handles: list[str]
+    proposed_description: str | None = None
+    proposed_condition: dict[str, Any] | None = None
+
+
+@dataclass
+class PendingPrimitiveDefinition:
+    request: PrimitiveDefinitionRequest
+    request_plan: RequestPlan
+    readiness_graph: ReadinessGraph
+    mission_plan: MissionExecutionPlan | None = None
+
+
+@dataclass
 class TurnOrchestrator:
-    """Top-level operator turn router for an OperatorStationSession facade."""
+    """Top-level operator turn router for an OperatorStationSession facade.
+
+    Owns the multi-turn pending state (clarification, synthesis, primitive definition)
+    so that the station facade remains stateless with respect to turn flow.
+    """
 
     classify_utterance: Callable[[str], ApprovedCommand]
     normalize_utterance: Callable[[str], str]
     looks_like_bare_label: Callable[[str], bool]
+    pending_clarification: PendingClarification | None = None
+    pending_synthesis_proposal: PendingSynthesisProposal | None = None
+    pending_primitive_definition: PendingPrimitiveDefinition | None = None
 
     def handle_utterance_text(self, station: Any, utterance: str) -> str:
         station.last_repair_events = []

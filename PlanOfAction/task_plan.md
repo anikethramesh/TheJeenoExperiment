@@ -764,7 +764,8 @@ Measured outcome:
 - The live regression probe fails if a ranked-distance answer is backed by an
   unsupported/refuse plan, if metric follow-up loses prior grounding context, or
   if unresolved/refuse plans are cached as reusable progress.
-- `operator_station.py` is 5488 lines after the 10H live-regression fix. Phase
+- `operator_station.py` is 5488 lines afte
+r the 10H live-regression fix. Phase
   10 deliberately did not chase file slimming, and this regression fix added
   station code that should be extracted later.
 - Verification after 10H:

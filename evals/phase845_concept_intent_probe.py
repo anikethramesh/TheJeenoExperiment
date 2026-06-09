@@ -43,6 +43,7 @@ import gymnasium as gym
 import minigrid  # noqa: F401
 from minigrid.wrappers import FullyObsWrapper
 
+from jeenom.capability_registry import CapabilityRegistry
 from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.operator_station import OperatorStationSession, classify_utterance
 from jeenom.schemas import (
@@ -213,7 +214,8 @@ def main() -> int:
         )
 
         # ── Explicit regex fast path still works ──────────────────────────────
-        cmd_explicit = classify_utterance("remember zap means go to the blue door")
+        _registry = CapabilityRegistry.minigrid_default()
+        cmd_explicit = classify_utterance("remember zap means go to the blue door", _registry)
         metrics["explicit_regex_still_works"] = (
             cmd_explicit.kind == "concept_teach"
             and cmd_explicit.payload.get("name") == "zap"
@@ -223,7 +225,7 @@ def main() -> int:
         # ── Natural-language teach no longer short-circuits to concept_teach in classify_utterance ──
         # It must route through unresolved → SmokeTestCompiler
         cmd_natural_classify = classify_utterance(
-            "when i say scout, you need to go to the red door"
+            "when i say scout, you need to go to the red door", _registry
         )
         metrics["natural_language_routes_to_smoke"] = cmd_natural_classify.kind == "unresolved"
 

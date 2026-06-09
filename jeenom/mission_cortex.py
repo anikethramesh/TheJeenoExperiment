@@ -237,7 +237,7 @@ def _continuation_intent(
             "exclude_colors": [],
             "distance_value": None,
             "comparison": None,
-            "tie_policy": "clarify" if wants_task else "display",
+            "tie_policy": "first" if wants_task else "display",
             "answer_fields": answer_fields,
             "required_capabilities": required,
             "preserved_constraints": [
@@ -272,6 +272,68 @@ def parse_inline_metric_request(
         or re.search(r"\b(rank|list|show|what|which|find)\b", normalized)
     ):
         return None
+
+    # "create X = formula and go to the farthest X door" — inline definition + task.
+    _def_task_m = re.match(
+        r"^(?:create|define|make|build)?\s*(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*=\s*"
+        r"(?P<formula>.+?)\s+(?:and\s+)?(?:go to|go the|reach|get to|head to|navigate to)\b",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    if _def_task_m:
+        ranked_handles = registry.ranked_metric_handles()
+        known_metrics = list(ranked_handles.keys())
+        _def_formula = _def_task_m.group("formula").strip()
+        _def_name = _def_task_m.group("name")
+        expression = _parse_metric_expression(_def_formula, known_metrics)
+        if expression is not None and expression.get("op") not in {None, "unsafe", "alias"}:
+            if expression.get("op") == "unsafe":
+                return (
+                    "REFUSE\n"
+                    "Metric definitions must be query-only. I will not build a metric "
+                    "that contains actuation, movement, controller, or motor side effects."
+                )
+            normalized_name = _metric_expression_name(expression)
+            dependencies = list(dict.fromkeys(
+                expression.get("metrics") or _metric_dependencies(_def_formula, known_metrics)
+            ))
+            request = PrimitiveDefinitionRequest(
+                definition_type="distance_metric",
+                name=_def_name,
+                normalized_name=normalized_name,
+                expression=expression,
+                dependencies=dependencies,
+                dependency_handles=[registry.ranked_handle_for(metric) for metric in dependencies],
+                proposed_handle=registry.ranked_handle_for(normalized_name),
+                safety_class="query",
+                authority_level="operator",
+                provenance={"operator_utterance": text, "formula": _def_formula, "inline_request": True},
+            )
+            mission_id = _mission_id_for(text, request.proposed_handle)
+            continuation = _continuation_intent(
+                mission_id=mission_id, utterance=text, request=request, expression=expression,
+            )
+            if isinstance(continuation, str):
+                return continuation
+            contract = MissionContract(
+                mission_id=mission_id,
+                description=f"Compound operator mission: {text}",
+                task_sequence=[text],
+                success_condition="approved_metric_then_original_request_complete",
+                abort_on_failure=True,
+            )
+            return InlineMetricMissionRequest(
+                mission_id=mission_id,
+                primitive_definition=request,
+                continuation_intent=continuation,
+                mission_contract=contract,
+                provenance={
+                    "original_utterance": text,
+                    "formula": _def_formula,
+                    "expression": dict(expression),
+                    "primitive_handle": request.proposed_handle,
+                },
+            )
 
     formula_match = re.search(
         r"\b(?:based on|according to|using|by)\s+(?:the\s+)?(?P<formula>.+)$",
@@ -444,6 +506,31 @@ class MissionCortex:
             environment_identity=environment_identity,
             mission_id=mission_request.mission_id,
         )
+        # Pre-build the continuation plan from the structured continuation_intent so
+        # that resume_after_approval can reuse it rather than reconstructing from the
+        # original utterance text.  The registry doesn't have the new primitive yet so
+        # the readiness graph will be non-executable here — that is expected and
+        # corrected in resume_after_approval after registration.
+        active_summary = (
+            active_claims.compact_summary()
+            if active_claims is not None and claims_valid
+            else None
+        )
+        continuation_intent = mission_request.continuation_intent
+        cont_plan = build_request_plan(
+            utterance,
+            continuation_intent,
+            active_claims_summary=active_summary,
+            environment_identity=environment_identity,
+            planning_semantics=self.planning_semantics,
+        )
+        cont_graph = evaluate_request_plan(
+            cont_plan,
+            registry=self.registry,
+            active_claims=active_claims,
+            claims_valid=claims_valid,
+            environment_identity=environment_identity,
+        )
         return MissionExecutionPlan(
             mission_id=mission_request.mission_id,
             description=mission_request.mission_contract.description,
@@ -451,7 +538,9 @@ class MissionCortex:
             readiness_graph=graph,
             mission_contract=mission_request.mission_contract,
             primitive_definition=mission_request.primitive_definition,
-            continuation_intent=mission_request.continuation_intent,
+            continuation_intent=continuation_intent,
+            continuation_request_plan=cont_plan,
+            continuation_readiness_graph=cont_graph,
             provenance=dict(mission_request.provenance),
         )
 
@@ -465,6 +554,19 @@ class MissionCortex:
     ) -> MissionExecutionPlan:
         if mission_plan.continuation_intent is None:
             raise ValueError("MissionExecutionPlan requires continuation_intent")
+        if mission_plan.continuation_request_plan is not None:
+            # Reuse the pre-built plan structure; only re-evaluate readiness now that
+            # the primitive has been registered and the registry has changed.
+            graph = evaluate_request_plan(
+                mission_plan.continuation_request_plan,
+                registry=self.registry,
+                active_claims=active_claims,
+                claims_valid=claims_valid,
+                environment_identity=environment_identity,
+            )
+            mission_plan.continuation_readiness_graph = graph
+            return mission_plan
+        # Fallback: no pre-built plan — reconstruct from the continuation intent.
         active_summary = (
             active_claims.compact_summary()
             if active_claims is not None and claims_valid

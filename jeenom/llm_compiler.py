@@ -168,8 +168,8 @@ _MOTOR_ACTION_ALIASES: dict[str, re.Pattern[str]] = {
         r"\b(?:go\s+(?:straight|forward)|move\s+forward|step\s+forward|walk\s+forward"
         r"|advance(?!\s+to\b)|step\s+ahead)\b"
     ),
-    "turn_right": re.compile(r"\b(?:turn|rotate)\s+right\b"),
-    "turn_left":  re.compile(r"\b(?:turn|rotate)\s+left\b"),
+    "turn_right": re.compile(r"\b(?:turn|rotate|face)\s+right\b"),
+    "turn_left":  re.compile(r"\b(?:turn|rotate|face)\s+left\b"),
     "pickup":     re.compile(r"\b(?:pick\s+up|pickup|grab)\b"),
     "toggle":     re.compile(r"\btoggle\b"),
 }
@@ -1078,7 +1078,24 @@ class SmokeTestCompiler(CompilerBackend):
                 or ("distance" in normalized and "doors" in normalized)
             )
 
-        if is_ranked_query and "door" in normalized:
+        # Stateful pronoun reference: "show their distances" / "rank them" — when active
+        # claims already have ranked doors, resolve "their"/"them" as "the visible doors".
+        _has_ranked_claims = (
+            active_claims_summary is not None
+            and bool(active_claims_summary.get("ranked_doors") or active_claims_summary.get("ranked_scene_doors"))
+        )
+        _has_implicit_door_ref = _has_ranked_claims and bool(
+            re.search(r"\b(?:their|them|these|those|the ones|the doors)\b", normalized)
+        )
+        if (
+            not is_ranked_query
+            and not is_navigation
+            and _has_implicit_door_ref
+            and ("distances" in normalized or "distance" in normalized or "how far" in normalized or "far" in normalized)
+        ):
+            is_ranked_query = True
+
+        if is_ranked_query and ("door" in normalized or _has_implicit_door_ref):
             metric = (
                 "euclidean"
                 if "euclidean" in normalized
@@ -1393,6 +1410,34 @@ class SmokeTestCompiler(CompilerBackend):
                 reason="Door toggle/open task is unsupported.",
             )
 
+        # Ambiguous navigation: "go to the door" without a color specifier → ask which door.
+        if (
+            is_navigation
+            and "door" in normalized
+            and not re.search(rf"\b(?:{color_pattern})\s+door\b", normalized)
+            and not re.search(r"\b(?:closest|nearest|farthest|furthest|highest|lowest|second|third|first)\b", normalized)
+        ):
+            color_list = "red, blue, green, yellow, purple, grey"
+            return OperatorIntent(
+                intent_type="ambiguous",
+                confidence=0.85,
+                reason=f"Ambiguous target: no color specified. Please clarify which door. Supported: {color_list}",
+            )
+
+        # Ambiguous distance query: "how far is the door from you" — singular door, no color.
+        if (
+            ("how far" in normalized or "distance" in normalized)
+            and "door" in normalized
+            and not re.search(rf"\b(?:{color_pattern})\s+door\b", normalized)
+            and "doors" not in normalized
+        ):
+            color_list = "red, blue, green, yellow, purple, grey"
+            return OperatorIntent(
+                intent_type="ambiguous",
+                confidence=0.85,
+                reason=f"Ambiguous query: no color specified. Please clarify which door. Supported: {color_list}",
+            )
+
         # Front-cell sense query paraphrases → status_query (no motion)
         _SENSE_FRONT_PATTERNS = [
             r"\bwhat\s+is\s+in\s+front\b",
@@ -1410,9 +1455,12 @@ class SmokeTestCompiler(CompilerBackend):
                 reason="Deterministic operator-intent fallback matched a front-cell sense query.",
             )
 
-        # Conditional motor: "if X, go forward" — requires Sense evidence before Spine
-        if re.match(r"^(?:if|when)\b", normalized) and re.search(
-            r"\b(?:go\s+forward|step\s+forward|move\s+forward|advance|step\s+ahead)\b",
+        # Conditional motor: "if X, go forward" / "move only if X" — Sense evidence before Spine.
+        _is_conditional = re.match(r"^(?:if|when)\b", normalized) or re.search(
+            r"\b(?:only\s+if|only\s+when)\b", normalized
+        )
+        if _is_conditional and re.search(
+            r"\b(?:go\s+forward|step\s+forward|move\s+forward|advance|step\s+ahead|move)\b",
             normalized,
         ):
             return OperatorIntent(
