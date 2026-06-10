@@ -452,6 +452,143 @@ def _run_composition_invariants(metrics: dict[str, bool], details: dict[str, Any
     details["composition_final_request_id"] = final_request_id
 
 
+def _run_sense_authority_invariants(metrics: dict[str, bool], details: dict[str, Any]) -> None:
+    """Red-bar tests for the SenseTicket typed authority pattern.
+
+    Invariant 4 — sense ticket issued: before invoking a grounding/ranking primitive
+    on a cache miss, a SenseTicket must be issued and stored as session.last_sense_ticket.
+
+    Invariant 5 — sense gate: SenseTicket.__post_init__ must raise SchemaValidationError
+    when the readiness graph is not executable.
+
+    Invariant 6 — attribute presence: last_sense_ticket must exist as a session attribute
+    (even when None) so callers can always inspect it.
+    """
+    from jeenom.schemas import RequestPlan, ReadinessGraph, SchemaValidationError, SenseTicket
+
+    # ── Invariant 6: attribute exists on every fresh session ──
+    session_attr = make_session(env_id=ENV_ID, seed=SEED)
+    attr_val = getattr(session_attr, "last_sense_ticket", "MISSING")
+    metrics["sense_fast_path_attribute_exists_on_session"] = attr_val != "MISSING"
+    details["sense_attr_initial_value"] = str(attr_val)
+
+    # ── Invariant 4: ranked query issues a SenseTicket (cache miss path) ──
+    session_sense = make_session(env_id=ENV_ID, seed=SEED)
+    session_sense.handle_utterance("go to the farthest door")
+    ticket = getattr(session_sense, "last_sense_ticket", None)
+    metrics["sense_primitive_issues_typed_ticket"] = (
+        ticket is not None and isinstance(ticket, SenseTicket)
+    )
+    metrics["sense_ticket_carries_ranked_handle"] = (
+        isinstance(ticket, SenseTicket)
+        and "ranked" in getattr(ticket, "primitive_handle", "")
+    )
+    metrics["sense_ticket_graph_is_executable"] = (
+        isinstance(ticket, SenseTicket)
+        and getattr(getattr(ticket, "readiness_graph", None), "graph_status", None)
+        == "executable"
+    )
+    details["sense_ticket_primitive_handle"] = getattr(ticket, "primitive_handle", None)
+    details["sense_ticket_graph_status"] = getattr(
+        getattr(ticket, "readiness_graph", None), "graph_status", None
+    )
+
+    # ── Invariant 5: schema rejects non-executable graph ──
+    dummy_plan = RequestPlan(
+        request_id="request:sense_test",
+        original_utterance="go to the farthest door",
+        objective_type="query",
+        objective_summary="test",
+        steps=[],
+        preservation_signals=[],
+        expected_response="answer_query",
+    )
+    bad_graph = ReadinessGraph(
+        request_id="request:sense_test",
+        graph_status="synthesizable",
+        next_action="propose_synthesis",
+    )
+    schema_error_raised = False
+    try:
+        SenseTicket(
+            request_id="request:sense_test",
+            primitive_handle="grounding.all_doors.ranked.manhattan.agent",
+            request_plan=dummy_plan,
+            readiness_graph=bad_graph,
+        )
+    except SchemaValidationError:
+        schema_error_raised = True
+    metrics["sense_ticket_schema_rejects_non_executable_graph"] = schema_error_raised
+
+
+def _run_define_metric_routing(metrics: dict[str, bool], details: dict[str, Any]) -> None:
+    """Red-bar tests for LLM define_metric intent routing.
+
+    Invariant 7 — define_metric is a recognised intent type in the schema.
+    Invariant 8 — station routes define_metric to a proposal (not unsupported).
+    Invariant 9 — diverse phrasings all reach the proposal path (not regex-only).
+    Invariant 10 — LLM supported intent types list advertises define_metric.
+    """
+    from jeenom.schemas import OPERATOR_INTENT_TYPES, OperatorIntent
+
+    # ── Invariant 7: schema knows define_metric ──
+    metrics["define_metric_in_operator_intent_types"] = (
+        "define_metric" in OPERATOR_INTENT_TYPES
+    )
+
+    # ── Invariant 8: a minimal OperatorIntent with define_metric passes validation ──
+    try:
+        oi = OperatorIntent(
+            intent_type="define_metric",
+            confidence=0.9,
+            reason="test",
+            required_capabilities=[],
+        )
+        schema_valid = oi.intent_type == "define_metric"
+    except Exception:
+        schema_valid = False
+    metrics["define_metric_operator_intent_schema_valid"] = schema_valid
+
+    # ── Invariant 9: canonical phrasing routes to proposal (regex path) ──
+    s1 = make_session(env_id=ENV_ID, seed=SEED)
+    r1 = s1.handle_utterance(
+        "create a distance metric called blagian which is the sum of the euclidean and manhattan distance"
+    )
+    details["define_metric_canonical_response"] = r1[:200]
+    metrics["define_metric_canonical_routes_to_proposal"] = (
+        "PRIMITIVE DEFINITION PROPOSAL" in r1
+        and "blagian" in r1
+    )
+
+    # ── Invariant 10: alternate phrasing also routes to proposal ──
+    s2 = make_session(env_id=ENV_ID, seed=SEED)
+    r2 = s2.handle_utterance(
+        "define a metric called cityblock as euclidean plus manhattan"
+    )
+    details["define_metric_alternate_response"] = r2[:200]
+    metrics["define_metric_alternate_phrasing_routes_to_proposal"] = (
+        "PRIMITIVE DEFINITION PROPOSAL" in r2
+        and "cityblock" in r2
+    )
+
+    # ── Invariant 10b: imperative phrasing also routes to proposal ──
+    s3 = make_session(env_id=ENV_ID, seed=SEED)
+    r3 = s3.handle_utterance(
+        "I want to create a new distance metric named hyprid using euclidean plus manhattan"
+    )
+    details["define_metric_imperative_response"] = r3[:200]
+    metrics["define_metric_imperative_phrasing_routes_to_proposal"] = (
+        "PRIMITIVE DEFINITION PROPOSAL" in r3
+        and "hyprid" in r3
+    )
+
+    # ── Invariant 11: LLM compiler advertises define_metric ──
+    import inspect
+    from jeenom.llm_compiler import LLMCompiler
+    src = inspect.getsource(LLMCompiler.compile_operator_intent)
+    metrics["llm_compiler_advertises_define_metric"] = "define_metric" in src
+
+
 def _run_negative_controls(metrics: dict[str, bool], details: dict[str, Any]) -> None:
     controls = [
         ("go to the door", "clarify_ambiguous_target"),
@@ -502,6 +639,8 @@ def main() -> int:
         _run_distance_paraphrases(metrics, details)
         _run_compound_missions(metrics, details)
         _run_composition_invariants(metrics, details)
+        _run_sense_authority_invariants(metrics, details)
+        _run_define_metric_routing(metrics, details)
         _run_negative_controls(metrics, details)
     except Exception as exc:  # pragma: no cover - emitted as eval detail
         details["error"] = f"{type(exc).__name__}: {exc}"

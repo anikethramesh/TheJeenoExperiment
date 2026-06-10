@@ -48,6 +48,7 @@ OPERATOR_INTENT_TYPES = (
     "knowledge_update",
     "status_query",
     "primitive_definition",
+    "define_metric",
     "claim_reference",
     "cache_query",
     "concept_teach",
@@ -1519,6 +1520,8 @@ class OperatorIntent:
                 raise SchemaValidationError(
                     "primitive_definition requires primitive_definition payload"
                 )
+        elif self.intent_type == "define_metric":
+            pass  # routing-only: station parses the utterance into PrimitiveDefinitionRequest
         elif self.intent_type == "cache_query":
             if self.status_query not in {None, "cache"}:
                 raise SchemaValidationError("cache_query status_query must be cache or null")
@@ -2528,6 +2531,53 @@ class RawMotorTicket:
             raise SchemaValidationError("RawMotorTicket requires action_name")
         if self.repeat_count < 1:
             raise SchemaValidationError("RawMotorTicket repeat_count must be >= 1")
+
+
+@dataclass
+class SenseTicket:
+    """Authority token required before invoking a grounding/ranking primitive.
+
+    Issued on a cache miss in _ensure_ranked_door_claims once the readiness
+    graph confirms the full request plan is executable.  Sense is an
+    intermediate step, so no next_action check is applied — only the graph
+    status gate matters.
+    """
+
+    request_id: str
+    primitive_handle: str
+    request_plan: RequestPlan
+    readiness_graph: ReadinessGraph
+    source: str = "station"
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.readiness_graph.request_id != self.request_id:
+            raise SchemaValidationError("SenseTicket request_id must match ReadinessGraph")
+        if self.request_plan.request_id != self.request_id:
+            raise SchemaValidationError("SenseTicket request_id must match RequestPlan")
+        if not self.primitive_handle:
+            raise SchemaValidationError("SenseTicket requires a non-empty primitive_handle")
+        # Refuse/unsupported intents must never trigger sense (the graph itself rejected the request).
+        if self.readiness_graph.graph_status in {"refuse", "unsupported"}:
+            raise SchemaValidationError(
+                f"SenseTicket: graph_status='{self.readiness_graph.graph_status}' "
+                "— sense not authorized for refused/unsupported intents"
+            )
+        # When the full plan is executable, all steps are authorized — sense is fine.
+        if self.readiness_graph.graph_status == "executable":
+            return
+        # Partial plans (e.g. synthesizable filter step, but executable ranking step):
+        # allow sense if the specific grounding node for this primitive is executable.
+        grounding_node_ready = any(
+            node.required_handle == self.primitive_handle and node.status == "executable"
+            for node in self.readiness_graph.nodes
+        )
+        if not grounding_node_ready:
+            raise SchemaValidationError(
+                f"SenseTicket: primitive '{self.primitive_handle}' is not authorized — "
+                f"no executable grounding node found in readiness graph "
+                f"(graph_status={self.readiness_graph.graph_status})"
+            )
 
 
 @dataclass

@@ -114,7 +114,7 @@ def main() -> int:
 
         unsupported = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
         first = unsupported.handle_utterance(
-            "synthesize a new distance metric named convenientDistance"
+            "translate hello into French"
         )
         cache_size_after_first = len(unsupported.request_plan_reuse_cache.entries)
         second = unsupported.handle_utterance("another unknown operator request")

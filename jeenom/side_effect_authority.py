@@ -7,6 +7,7 @@ from .schemas import (
     RawMotorTicket,
     ReadinessGraph,
     RequestPlan,
+    SenseTicket,
 )
 
 
@@ -74,4 +75,22 @@ class SideEffectAuthority:
             request_plan=request_plan,
             readiness_graph=readiness_graph,
             source=source or self.source_name,
+        )
+
+    def issue_sense_ticket(
+        self,
+        *,
+        primitive_handle: str,
+        request_plan: RequestPlan,
+        readiness_graph: ReadinessGraph,
+        source: str | None = None,
+        provenance: dict | None = None,
+    ) -> SenseTicket:
+        return SenseTicket(
+            request_id=request_plan.request_id,
+            primitive_handle=primitive_handle,
+            request_plan=request_plan,
+            readiness_graph=readiness_graph,
+            source=source or self.source_name,
+            provenance=dict(provenance or {}),
         )

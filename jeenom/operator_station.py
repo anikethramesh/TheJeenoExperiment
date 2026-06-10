@@ -68,9 +68,10 @@ from .schemas import (
     ReadinessGraph,
     RequestPlanStep,
     RequestPlan,
+    SchemaValidationError,
+    SenseTicket,
     SceneModel,
     SceneObject,
-    SchemaValidationError,
     StationActiveClaims,
     TargetSelector,
     TaskRequest,
@@ -125,24 +126,28 @@ def _parse_primitive_definition_request(
     text: str,
     registry: CapabilityRegistry,
 ) -> PrimitiveDefinitionRequest | str | None:
+    _VERB_PREFIX = (
+        r"^(?:i\s+(?:want\s+to|would\s+like\s+to|need\s+to|'d\s+like\s+to)\s+)?"
+        r"(?:please\s+)?(?:define|make|create|synthesize|build)\s+"
+    )
     patterns = [
         re.compile(
-            r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
-            r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
+            _VERB_PREFIX
+            + r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
             r"(?:(?:called|named)\s+)?(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*=\s*"
             r"(?P<formula>.+)$",
             re.IGNORECASE,
         ),
         re.compile(
-            r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
-            r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
+            _VERB_PREFIX
+            + r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
             r"(?:called|named)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\s+"
-            r"(?:as|to be|which is|that is|that)\s+(?P<formula>.+)$",
+            r"(?:as|to be|which is|that is|that|using|where|based on)\s+(?P<formula>.+)$",
             re.IGNORECASE,
         ),
         re.compile(
-            r"^(?:please\s+)?(?:define|make|create|synthesize)\s+"
-            r"(?:a\s+|an\s+)?(?:new\s+)?distance\s+metric\s+"
+            _VERB_PREFIX
+            + r"(?:a\s+|an\s+)?(?:new\s+)?distance\s+metric\s+"
             r"(?:which is|that is|as)\s+(?P<formula>.+?)\s+"
             r"(?:and\s+)?call\s+it\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)$",
             re.IGNORECASE,
@@ -534,6 +539,7 @@ class OperatorStationSession:
         self.last_execution_ticket: ExecutionTicket | None = None
         self.last_memory_write_ticket: MemoryWriteTicket | None = None
         self.last_raw_motor_ticket: RawMotorTicket | None = None
+        self.last_sense_ticket: SenseTicket | None = None
         self.last_operator_intent: OperatorIntent | None = None
         self.last_cortical_envelope: CorticalEnvelope | None = None
         self.last_approved_command: ApprovedCommand | None = None
@@ -934,6 +940,20 @@ class OperatorStationSession:
 
             self.log(f"motor_sequence: {len(sequence)} actions")
             return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
+
+        if intent.intent_type == "define_metric":
+            parsed = _parse_primitive_definition_request(utterance, self.capability_registry)
+            if parsed is None:
+                return _approved(
+                    "clarification",
+                    utterance,
+                    "I understood you want to define a new distance metric, but I could not "
+                    "parse the name or formula. Try: 'create a metric called NAME which is FORMULA'.",
+                )
+            if isinstance(parsed, str):
+                return _approved("clarification", utterance, parsed)
+            self.log(f"define_metric: routed to propose_primitive_definition for '{parsed.name}'")
+            return _approved("primitive_definition", utterance, payload={"definition": parsed.as_dict()})
 
 
         if intent.intent_type == "conditional_sense_motor":
@@ -2387,7 +2407,11 @@ class OperatorStationSession:
         wants_task = intent.intent_type == "task_instruction" or self._utterance_requests_navigation(
             _normalize_utterance(utterance)
         )
-        claims = self._ensure_ranked_door_claims(plan.get("primitive_handle"))
+        claims = self._ensure_ranked_door_claims(
+            plan.get("primitive_handle"),
+            request_plan=self.last_request_plan,
+            readiness_graph=self.last_readiness_graph,
+        )
         if isinstance(claims, str):
             return _approved("missing_skills", utterance, payload={"message": claims, "match": cap_match.compact()}, capability_match=cap_match)
 
@@ -2970,7 +2994,11 @@ class OperatorStationSession:
             or not self.active_claims.ranked_scene_doors
             or self.active_claims.last_grounding_query.get("primitive") != expected_ranked_handle
         ):
-            claims = self._ensure_ranked_door_claims(expected_ranked_handle)
+            claims = self._ensure_ranked_door_claims(
+                expected_ranked_handle,
+                request_plan=self.last_request_plan,
+                readiness_graph=self.last_readiness_graph,
+            )
             if isinstance(claims, str):
                 return ApprovedCommand(
                     kind="missing_skills",
@@ -3582,7 +3610,11 @@ class OperatorStationSession:
                 ranked_handle = euc
             else:
                 return None
-        claims = self._ensure_ranked_door_claims(ranked_handle)
+        claims = self._ensure_ranked_door_claims(
+            ranked_handle,
+            request_plan=self.last_request_plan,
+            readiness_graph=self.last_readiness_graph,
+        )
         if isinstance(claims, str):
             return _approved("missing_skills", utterance, payload={"message": claims, "match": cap_match.compact()}, capability_match=cap_match)
 
@@ -3672,6 +3704,9 @@ class OperatorStationSession:
     def _ensure_ranked_door_claims(
         self,
         handle: str | None = None,
+        *,
+        request_plan: RequestPlan | None = None,
+        readiness_graph: ReadinessGraph | None = None,
     ) -> StationActiveClaims | str:
         handle = handle or "grounding.all_doors.ranked.manhattan.agent"
         spec = self.capability_registry.lookup(handle)
@@ -3691,6 +3726,21 @@ class OperatorStationSession:
             and self.active_claims.last_grounding_query.get("primitive") == handle
         ):
             return self.active_claims
+        # Cache miss — invoking the sense primitive requires typed authority.
+        if request_plan is None or readiness_graph is None:
+            return (
+                f"Cannot invoke sense primitive '{handle}' without typed sense authority: "
+                "no request plan or readiness graph provided."
+            )
+        try:
+            ticket = self.side_effect_authority.issue_sense_ticket(
+                primitive_handle=handle,
+                request_plan=request_plan,
+                readiness_graph=readiness_graph,
+            )
+        except SchemaValidationError as exc:
+            return f"Sense authority denied for '{handle}': {exc}"
+        self.last_sense_ticket = ticket
         doors = scene.find(object_type="door")
         if not doors:
             return "No doors visible in the current scene."
@@ -3742,10 +3792,17 @@ class OperatorStationSession:
         color = self.domain_helper.color_reference_in_utterance(normalized)
         if color is None:
             return None
-        claims = self._ensure_ranked_door_claims()
-        if isinstance(claims, str):
+        # Fast path: only use existing valid claims — never invoke a fresh sense primitive
+        # here because no request plan or readiness graph is available at this point
+        # (called before command_from_operator_intent sets last_request_plan).
+        scene = self._ensure_scene_model()
+        if (
+            self.active_claims is None
+            or scene is None
+            or not self._claims_valid_for_current_environment(scene)
+        ):
             return None
-        matches = [entry for entry in claims.ranked_scene_doors if entry.color == color]
+        matches = [entry for entry in self.active_claims.ranked_scene_doors if entry.color == color]
         if len(matches) != 1:
             return None
         return _approved("task_instruction", f"go to the {matches[0].color} door")
@@ -5861,6 +5918,7 @@ class OperatorStationSession:
         self.last_execution_ticket = None
         self.last_memory_write_ticket = None
         self.last_raw_motor_ticket = None
+        self.last_sense_ticket = None
         self.last_operator_intent = None
         self.last_cortical_envelope = None
         self.last_approved_command = None
