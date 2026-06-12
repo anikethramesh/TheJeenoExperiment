@@ -1376,10 +1376,12 @@ pass against the completed MiniGrid ORPI-v0 boundary.
 - `substrate_orpi_postcondition_probe.py` - conformance 3: all postconditions are
   object-centric Δg; every actuation with `safety_class != query` names a
   `postcondition_primitive`.
-- `substrate_orpi_cadence_probe.py` - conformance 4: AST static check - no
-  deliberation-cadence call on a Spine/control path.
-- `substrate_orpi_no_llm_in_loop_probe.py` - conformance 6: AST static check - no
-  compiled plan references a `deliberative` meta-primitive.
+- `substrate_orpi_cadence_probe.py` - conformance 4: data check over manifest
+  contracts - no actuation/sense contract has wrong cadence; no control-cadence
+  contract is deliberative.
+- `substrate_orpi_no_llm_in_loop_probe.py` - conformance 6: exercises the
+  runtime enforcement gate in `CortexSession.plan` - a synthetic deliberative
+  plan raises `SchemaValidationError`.
 - `pipeline_orpi_labelled_episode_probe.py` - conformance 5: full success,
   refusal, and task turns round-trip to valid, JSON-serializable
   `LabelledEpisode` artifacts with verification evidence.
@@ -1392,9 +1394,13 @@ pass against the completed MiniGrid ORPI-v0 boundary.
 - The three NEW fields exist with degenerate MiniGrid defaults; no other
   substrate semantics leak into the schema.
 - Every executed turn round-trips to a valid `LabelledEpisode`, failed episodes
-  included with attribution; task episodes include verification/postcondition
-  evidence and serialize as JSON.
-- The taxonomy remap lands with zero regressions on the existing eval suite.
+  included with attribution, and serializes as JSON.
+- Known v0 proxy: `LabelledEpisode.verification` reflects `task_complete` /
+  boolean claims, not `postcondition_primitive` invocation against predicted Δg.
+  `LabelledEpisode.attribution` passes through `FailureOutcome.category`, not the
+  ORPI attribution taxonomy. Both are completed in Phase 13.
+- The taxonomy compatibility layer lands with zero regressions on the existing
+  eval suite.
 
 ## Phase 13 - Steered Curriculum under Partial Observability
 

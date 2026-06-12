@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .capability_registry import CapabilityRegistry
+from .orpi import assert_no_deliberative_meta_plan_references
 from .planning_semantics import PlanningSemantics
 from .readiness_graph import evaluate_request_plan
 from .request_planner import build_request_plan
@@ -53,6 +54,7 @@ class CortexSession:
             environment_identity=environment_identity,
             planning_semantics=self.planning_semantics,
         )
+        assert_no_deliberative_meta_plan_references(plan, self.registry)
         graph = evaluate_request_plan(
             plan,
             registry=self.registry,

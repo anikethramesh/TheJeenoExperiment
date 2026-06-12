@@ -1,15 +1,35 @@
-"""ORPI conformance: MiniGrid registers a manifest at adapter/runtime init."""
+"""ORPI conformance: MiniGrid registers a manifest at adapter/runtime init.
+
+The permissive-window-is-never-live guarantee requires that the manifest exists on
+the adapter *before* any other method is called on it.  We verify this by inspecting
+the adapter's internal state immediately after construction, without calling
+orpi_manifest() first.
+"""
 from __future__ import annotations
 
 from harness import emit_result
 
 
 def main() -> int:
+    from jeenom.minigrid_operational_context import MiniGridOperationalContext
+    from jeenom.minigrid_substrate_adapter import MiniGridSubstrateAdapter
     from jeenom.minigrid_runtime_package import build_minigrid_runtime_package
     from jeenom.orpi import OrpiManifest
 
     metrics: dict[str, bool] = {}
     details: dict[str, object] = {}
+
+    # Check the adapter directly: manifest must be present before any method call.
+    fresh_adapter = MiniGridSubstrateAdapter(
+        env_id="MiniGrid-GoToDoor-8x8-v0",
+        render_mode="none",
+    )
+    manifest_at_init = fresh_adapter._orpi_manifest  # noqa: SLF001
+    metrics["manifest_exists_immediately_after_adapter_init"] = isinstance(
+        manifest_at_init, OrpiManifest
+    )
+
+    # Check the runtime package path.
     package = build_minigrid_runtime_package(
         env_id="MiniGrid-GoToDoor-8x8-v0",
         render_mode="none",

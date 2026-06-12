@@ -58,15 +58,17 @@ Every primitive declares exactly one class:
   are exception handlers that pause execution. **Compiled plans may never reference deliberative
   meta-primitives.** This is the enforcement point for the no-LLM-in-the-loop invariant.
 
-These three classes are the value set of `schemas.PrimitiveSpec.primitive_type` under ORPI v0. The
-prior value set (`task | grounding | sensing | action | claims`) is remapped — see Phase 12 in
-[task_plan.md](task_plan.md) for the migration.
+These three classes are the ORPI taxonomy. `OrpiContract.primitive_type` always returns one of
+`{sense, actuation, meta}` via `orpi_primitive_type_for()`.
 
-Implementation note for the completed MiniGrid Phase 12 boundary: the code exposes the ORPI
-taxonomy through `OrpiContract` while preserving the legacy `PrimitiveSpec.primitive_type` values
-for existing registry grouping and prompt summaries. This compatibility bridge is intentional; the
-hard schema remap can happen after the contract/manifest/trace boundary survives more substrate
-pressure.
+**Compatibility bridge (v0):** `schemas.PrimitiveSpec.primitive_type` still accepts both the legacy
+values (`task | grounding | sensing | action | claims`) and the ORPI values (`sense | actuation |
+meta`). The mapping is: `sensing → sense`, `action → actuation`, `task / grounding / claims →
+meta`. MiniGrid primitives are authored with legacy values; `OrpiContract` projects them into the
+ORPI taxonomy. The hard schema-level remap — where primitives are authored with ORPI types directly
+— is deferred until the contract/manifest/trace boundary survives the Phase 15 cross-substrate
+port. This is the right sequencing: standardise the interface before forcing every primitive
+author to use the new vocabulary.
 
 ## 4. The Contract
 
@@ -75,7 +77,7 @@ additions; everything else already exists in the repo.
 
 | Field | Meaning | Notes |
 |---|---|---|
-| `name`, `primitive_type`, `layer`, `description` | identity | `primitive_type` ∈ {sense, actuation, meta}; `layer` ∈ {sense, cortex, spine} |
+| `name`, `primitive_type`, `layer`, `description` | identity | `OrpiContract.primitive_type` ∈ {sense, actuation, meta} (mapped from legacy values by `orpi_primitive_type_for()`); `layer` ∈ {sense, cortex, spine} |
 | `inputs` / `outputs` | typed parameters | continuous params (grasp pose, force threshold) live here — the symbol layer passes them through, never chooses them |
 | `preconditions` | claims that must hold, with min confidence | evaluated by ReadinessGraph |
 | `postconditions` | **object-centric state deltas** (Δg), not action descriptions | "door(d).state: closed→open", not "arm moved" — this is what makes procedures retargetable across embodiments |
@@ -121,12 +123,28 @@ grounding       — claims consumed, with provenance/confidence/freshness at rea
 plan            — RequestPlan + ReadinessGraph verdicts per step
 authority       — tickets issued, scope, issuer
 execution       — per-step CommandResult, incl. typed FailureOutcome
-verification    — postcondition_primitive results vs. predicted postconditions
-attribution     — on failure: which contract was violated
+verification    — postcondition_primitive results vs. predicted postconditions  [*]
+attribution     — on failure: which contract was violated                        [*]
                   (stale_claim | miscompiled_intent | unmet_postcondition |
                    missing_authority | substrate_fault)
 steering        — any operator interventions in this episode (Phase 13 ask-for-help)
 ```
+
+**[*] v0 proxy note.** `verification` and `attribution` are the highest-value fields for
+component-level credit assignment — and the ones most incomplete in v0.
+
+- `verification` currently reflects `final_state.task_complete` and boolean `final_claims`,
+  *not* the result of invoking each contract's `postcondition_primitive` against its predicted
+  object-centric Δg. MiniGrid's degenerate case (`postcondition_primitive=None` for most
+  primitives) makes this survivable for v0, but the wiring to the actual checker is missing.
+- `attribution` passes through the raw `FailureOutcome.category` (`stuck | progress | timeout |
+  blocking_claim`), not the ORPI attribution taxonomy (`stale_claim | miscompiled_intent |
+  unmet_postcondition | missing_authority | substrate_fault`). Mapping from `FailureOutcome` to
+  the ORPI taxonomy is Phase 13 work.
+
+These are deliberately left as stubs in v0 so the outbound trace exists and round-trips; the
+real checker and attribution mapper land in Phase 13 when the derived-claim layer gives them
+something meaningful to verify.
 
 The trace is the product's audit story ("what did the operator tell it, when, and did the robot
 honour it") and the learning story (component-level credit assignment for deployment loops) in one
@@ -140,9 +158,15 @@ A substrate is ORPI-v0 conformant when:
 2. The manifest is registered at init (probe-enforced).
 3. All postconditions are object-centric deltas; all actuation primitives with `safety_class ≠ query`
    name a `postcondition_primitive`.
-4. Cadence declarations are honoured (static probe: no deliberation-cadence call inside Spine paths).
+4. Cadence declarations are honoured: no actuation contract has non-control cadence; no sense
+   contract has non-perception cadence; no control-cadence contract is deliberative. (v0 probe:
+   data check over manifest contracts. Full AST static check — tracing Spine call paths — is
+   deferred to v1 when the second substrate makes it worth the investment.)
 5. Every executed turn emits a `LabelledEpisode`.
-6. No compiled plan references a `deliberative` meta-primitive (static probe).
+6. No compiled plan references a `deliberative` meta-primitive. This invariant is enforced at
+   runtime in `CortexSession.plan` (raises `SchemaValidationError` on violation) and covered by
+   a probe. (v0 probe: exercises the enforcement path with a synthetic deliberative plan. Full
+   AST static check of all plan-build paths is deferred to v1.)
 
 ## 8. Versioning Policy
 

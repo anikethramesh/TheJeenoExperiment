@@ -1,4 +1,9 @@
-"""ORPI conformance: compiled plans cannot reference deliberative meta primitives."""
+"""ORPI conformance: compiled plans cannot reference deliberative meta primitives.
+
+v0 check: runtime enforcement — exercises the gate in CortexSession.plan with a
+synthetic deliberative plan and asserts SchemaValidationError is raised.
+Full AST static check of all plan-build paths is deferred to v1.
+"""
 from __future__ import annotations
 
 from harness import emit_result

@@ -32,22 +32,18 @@ class MiniGridSubstrateAdapter:
         self.operational_context = operational_context or MiniGridOperationalContext.default(
             env_id=env_id
         )
-        self._capability_registry: CapabilityRegistry | None = None
-        self._orpi_manifest: OrpiManifest | None = None
+        self._capability_registry: CapabilityRegistry = CapabilityRegistry.minigrid_default()
+        self._orpi_manifest: OrpiManifest = OrpiManifest.from_context_and_registry(
+            self.operational_context,
+            self._capability_registry,
+        )
         self.preview_adapter: MiniGridAdapter | None = None
         self.task_adapter: MiniGridAdapter | None = None
 
     def capability_registry(self) -> CapabilityRegistry:
-        if self._capability_registry is None:
-            self._capability_registry = CapabilityRegistry.minigrid_default()
         return self._capability_registry
 
     def orpi_manifest(self) -> OrpiManifest:
-        if self._orpi_manifest is None:
-            self._orpi_manifest = OrpiManifest.from_context_and_registry(
-                self.operational_context,
-                self.capability_registry(),
-            )
         return self._orpi_manifest
 
     def create_sense(
@@ -145,6 +141,9 @@ class MiniGridSubstrateAdapter:
     ) -> dict[str, Any]:
         render_adapter = self.preview_adapter
         skip_reset = False
+        if render_adapter is None and self.render_mode == "human":
+            render_adapter = self.task_adapter
+            skip_reset = render_adapter is not None
         self.preview_adapter = None
         if render_adapter is None:
             self.close_task_window()

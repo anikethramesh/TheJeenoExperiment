@@ -157,6 +157,17 @@ class MiniGridSpine:
             if step.name == "plan_grid_path":
                 runtime = self._plan_grid_path(step.params, percepts)
                 if not runtime["planned_action_names"]:
+                    if runtime["path"]:
+                        return ExecutionReport(
+                            status="succeeded",
+                            progress={
+                                "contract": execution_contract.skill,
+                                "path": runtime["path"],
+                                "executed_action": None,
+                                "already_at_navigation_goal": True,
+                            },
+                            source="spine",
+                        )
                     return ExecutionReport(
                         status="failed",
                         reason="no_path_found",

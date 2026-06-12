@@ -553,6 +553,8 @@ def run_episode(
             adapter = MiniGridAdapter(env)
         if skip_reset:
             # Continue from current adapter state — window stays open, position preserved.
+            if aligned_target is not None:
+                adapter.retarget_to_object(aligned_target)
             observation = adapter.observe()
         else:
             observation = adapter.reset(seed=seed)

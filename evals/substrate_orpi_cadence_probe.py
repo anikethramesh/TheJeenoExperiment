@@ -1,4 +1,8 @@
-"""ORPI conformance: cadence declarations keep control paths non-deliberative."""
+"""ORPI conformance: cadence declarations keep control paths non-deliberative.
+
+v0 check: data-based — inspects cadence/mode fields on every manifest contract.
+Full AST static check (tracing actual Spine call paths) is deferred to v1.
+"""
 from __future__ import annotations
 
 from harness import emit_result

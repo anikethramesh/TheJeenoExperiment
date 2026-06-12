@@ -136,12 +136,16 @@
       carrying intent, grounding, plan, authority, execution, verification, and
       failure attribution. This is the standard outbound supervision artifact.
 
-    **Breaking schema change (Phase 12):** `PrimitiveSpec.primitive_type` is remapped
-    from `{task, grounding, sensing, action, claims}` to the three ORPI classes
-    `{sense, actuation, meta}` (`sensing -> sense`, `action -> actuation`,
-    `task | grounding | claims -> meta`). The no-LLM-in-the-loop invariant (rule 6) is
-    enforced at the contract: a compiled plan may never reference a `deliberative`
-    meta-primitive. Conformance is probe-enforced (six items; see `orpi_spec.md` §7).
+    **Taxonomy (Phase 12):** `OrpiContract.primitive_type` always returns one of
+    `{sense, actuation, meta}` via `orpi_primitive_type_for()`. The mapping is:
+    `sensing → sense`, `action → actuation`, `task / grounding / claims → meta`.
+    `PrimitiveSpec.primitive_type` still accepts both legacy and ORPI values; primitives
+    are authored with legacy values for now. The hard schema remap (authors write ORPI
+    types directly) is deferred to after the Phase 15 cross-substrate port, when it won't
+    break a single substrate. The no-LLM-in-the-loop invariant (rule 6) is enforced in
+    `CortexSession.plan`: a compiled plan referencing a `deliberative` meta-primitive
+    raises `SchemaValidationError`. Conformance is probe-enforced (six items; see
+    `orpi_spec.md` §7).
 
 12. ApprovedCommand and tickets are executable authority.
     A plan or primitive name is not enough to act. The station must wrap each
