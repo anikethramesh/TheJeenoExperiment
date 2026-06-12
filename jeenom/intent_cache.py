@@ -241,9 +241,17 @@ def seed_intent_cache(cache: IntentCache, registry: Any) -> None:
 
     cache._register_compiled(_CONCEPT_TEACH_PAT, _concept_teach_builder, search=False)
 
-    # Concept-forget: anchored match → control path
-    def _concept_forget_builder(m: re.Match[str]) -> OperatorIntent:
+    # Concept-forget: anchored match → control path.
+    # Hard-reset phrases ("everything", "memory", etc.) must fall through to
+    # classify_utterance which routes them as reset(clear_memory=True).
+    _FORGET_HARD_RESET_NAMES: frozenset[str] = frozenset({
+        "everything", "memory", "all", "all memory",
+    })
+
+    def _concept_forget_builder(m: re.Match[str]) -> OperatorIntent | None:
         cname = m.group("name").strip().strip("'\"")
+        if cname.lower() in _FORGET_HARD_RESET_NAMES:
+            return None  # let classify_utterance handle as hard reset
         return OperatorIntent(intent_type="concept_forget", concept_name=cname)
 
     cache._register_compiled(_CONCEPT_FORGET_PAT, _concept_forget_builder, search=False)

@@ -16,7 +16,8 @@ Checks:
   plan_restored_after_reload          — reloaded concept still has plan
   define_syntax_works                 — 'define X as Y' also teaches a concept
   search_finds_partial_match          — search('bing') finds 'bingo'
-  clear_memory_clears_concepts        — 'forget everything' removes all concepts
+  clear_memory_clears_concepts        — reset(clear_memory=True) removes all concepts
+  forget_everything_nlu_clears_memory — 'forget everything' utterance routes to hard reset
   golden_path_unaffected              — 'go to the red door' unaffected
 """
 from __future__ import annotations
@@ -121,12 +122,22 @@ def main() -> int:
             len(results) >= 1 and any(c.name == "bingo" for c in results)
         )
 
-        # ── Stage 8: clear memory clears concepts ────────────────────────────
+        # ── Stage 8: clear memory clears concepts (direct API) ──────────────
         session6 = _make_session(memory_root=Path(tempfile.mkdtemp()))
         session6.handle_utterance("remember bingo means go to the red door")
         session6.reset(clear_memory=True)
         metrics["clear_memory_clears_concepts"] = (
             len(session6.knowledge_base.all_concepts()) == 0
+        )
+
+        # ── Stage 8b: "forget everything" NLU path clears memory ─────────────
+        # Regression: IntentCache concept_forget pattern intercepted "forget everything"
+        # before classify_utterance could route it as a hard reset.
+        session7 = _make_session(memory_root=Path(tempfile.mkdtemp()))
+        session7.handle_utterance("remember bingo means go to the red door")
+        forget_resp = session7.handle_utterance("forget everything")
+        metrics["forget_everything_nlu_clears_memory"] = (
+            len(session7.knowledge_base.all_concepts()) == 0
         )
 
         # ── Stage 9: Golden path unaffected ─────────────────────────────────
