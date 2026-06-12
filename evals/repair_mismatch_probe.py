@@ -44,7 +44,7 @@ from jeenom.mismatch import MismatchDetector, OperationalMismatch
 from jeenom.operator_station import OperatorStationSession
 from jeenom.schemas import (
     EnvironmentAssumption,
-    GroundedDoorEntry,
+    GroundedObjectEntry,
     RequestPlan,
     RequestPlanStep,
     SceneModel,
@@ -117,7 +117,7 @@ def _claims(
 ) -> StationActiveClaims:
     """Build StationActiveClaims with the scene's fingerprint so is_valid_for() returns True."""
     doors = [
-        GroundedDoorEntry(
+        GroundedObjectEntry(
             color=ranked_colors[i],
             x=scene.objects[i].x,
             y=scene.objects[i].y,
@@ -184,10 +184,10 @@ def main() -> int:
     invalidated_claims = StationActiveClaims(
         scene_fingerprint=(1, 1, 0),  # matches scene
         ranked_scene_doors=[
-            GroundedDoorEntry(color="blue", x=4, y=1, distance=1.0, metric="manhattan"),
-            GroundedDoorEntry(color="red",  x=2, y=1, distance=3.0, metric="manhattan"),
+            GroundedObjectEntry(color="blue", x=4, y=1, distance=1.0, metric="manhattan"),
+            GroundedObjectEntry(color="red",  x=2, y=1, distance=3.0, metric="manhattan"),
         ],
-        last_grounded_target=GroundedDoorEntry(color="blue", x=4, y=1, distance=1.0),
+        last_grounded_target=GroundedObjectEntry(color="blue", x=4, y=1, distance=1.0),
         last_grounded_rank=0,
         last_grounding_query={"relation": "closest", "metric": "manhattan"},
     )

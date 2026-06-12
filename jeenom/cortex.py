@@ -4,7 +4,6 @@ from dataclasses import asdict
 from typing import Any
 
 from .command_registry import evidence_needs_for_step
-from .primitive_library import ACTION_PRIMITIVES, SENSING_PRIMITIVES, TASK_PRIMITIVES, produced_evidence
 from .schemas import (
     EvidenceFrame,
     ExecutionContract,
@@ -14,59 +13,11 @@ from .schemas import (
 )
 
 
-class Readiness:
-    def __init__(self, memory):
-        self.memory = memory
-
-    def check(self, procedure, substrate: str = "minigrid"):
-        available_evidence = produced_evidence(SENSING_PRIMITIVES) | {
-            "occupancy_grid",
-            "object_location",
-            "agent_pose",
-            "adjacency_to_target",
-        }
-        available_actions = set(ACTION_PRIMITIVES)
-
-        missing_task_primitives = []
-        missing_evidence = set()
-        missing_actions = set()
-
-        for step_name in procedure.steps:
-            spec = TASK_PRIMITIVES.get(step_name)
-            if spec is None:
-                missing_task_primitives.append(step_name)
-                continue
-
-            for evidence in spec.consumes:
-                if evidence not in available_evidence:
-                    missing_evidence.add(evidence)
-
-            for action in spec.required_action_primitives:
-                if action not in available_actions:
-                    missing_actions.add(action)
-
-        status = "executable"
-        if missing_task_primitives:
-            status = "impossible"
-        elif missing_evidence or missing_actions:
-            status = "partial"
-
-        return ReadinessReport(
-            status=status,
-            task_type=procedure.task_type,
-            missing_task_primitives=sorted(missing_task_primitives),
-            missing_evidence=sorted(missing_evidence),
-            missing_actions=sorted(missing_actions),
-            recipe_steps=list(procedure.steps),
-        )
-
-
 class Cortex:
     def __init__(self, memory, compiler, plan_cache=None):
         self.memory = memory
         self.compiler = compiler
         self.plan_cache = plan_cache
-        self.readiness = Readiness(memory)
         self._claims: dict[str, ObservationClaim] = {}
         self.trace: list[TraceEvent] = []
         self.task_request = None
@@ -105,10 +56,6 @@ class Cortex:
     # ── Task lifecycle ─────────────────────────────────────────────────────────
 
     def onboard_task(self, task_request, procedure):
-        readiness = self.readiness.check(procedure, substrate="minigrid")
-        if readiness.status == "impossible":
-            raise RuntimeError(f"Task is not executable: {asdict(readiness)}")
-
         self.task_request = task_request
         self.procedure = procedure
         self.resolved_task_params = self.memory.resolve_target_params(task_request.params)
@@ -124,6 +71,11 @@ class Cortex:
         )
         self.execution_state["knowledge_override_active"] = color_override or type_override
 
+        readiness = ReadinessReport(
+            status="executable",
+            task_type=procedure.task_type,
+            recipe_steps=list(procedure.steps),
+        )
         self.record_trace(
             "task_onboarded",
             {

@@ -1,6 +1,6 @@
 """JEENOM MiniGrid package."""
 
-from .cortex import Cortex, Readiness
+from .cortex import Cortex
 from .command_authority import CommandAuthority
 from .llm_compiler import LLMCompiler, SmokeTestCompiler, build_compiler
 from .memory import OperationalMemory
@@ -32,7 +32,6 @@ __all__ = [
     "OperationalMemory",
     "PlanningSemantics",
     "PrimitiveDefinitionRequest",
-    "Readiness",
     "RepresentationStore",
     "RuntimePackage",
     "SideEffectAuthority",

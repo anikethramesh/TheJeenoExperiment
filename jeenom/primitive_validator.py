@@ -9,7 +9,7 @@ Grounding primitives (fn(scene, selector) → list[tuple[float, SceneObject]]):
   - Empty scene → [].
   - Color/exclude_colors filters respected.
 
-Claims-filter primitives (fn(entries, condition) → list[GroundedDoorEntry]):
+Claims-filter primitives (fn(entries, condition) → list[GroundedObjectEntry]):
   - Must return a filtered subset of the input entries.
   - Empty entries → [].
   - Must only access entry fields — no scene, env, or network access.
@@ -203,7 +203,7 @@ def _get_fixtures(handle: str) -> list[ValidationFixture]:
 @dataclass
 class ClaimsFilterFixture:
     name: str
-    entries: list[Any]              # list[GroundedDoorEntry]
+    entries: list[Any]              # list[GroundedObjectEntry]
     condition: dict[str, Any]
     expected_colors: set[str | None] | None = None  # None = any non-raising result
     expected_empty: bool = False
@@ -211,8 +211,8 @@ class ClaimsFilterFixture:
 
 
 def _make_entry(color: str | None, x: int, y: int, distance: float, metric: str = "euclidean") -> Any:
-    from jeenom.schemas import GroundedDoorEntry
-    return GroundedDoorEntry(color=color, x=x, y=y, distance=distance, metric=metric)
+    from jeenom.schemas import GroundedObjectEntry
+    return GroundedObjectEntry(color=color, x=x, y=y, distance=distance, metric=metric)
 
 
 CLAIMS_FILTER_FIXTURES: list[ClaimsFilterFixture] = [
@@ -331,17 +331,17 @@ class PrimitiveValidator:
         function_name: str,
         code: str,
     ) -> ValidationResult:
-        """Validate a claims-filter primitive: fn(entries, condition) → list[GroundedDoorEntry]."""
+        """Validate a claims-filter primitive: fn(entries, condition) → list[GroundedObjectEntry]."""
         name = handle.split("claims.")[-1] if "claims." in handle else handle
         fixtures = CLAIMS_FILTER_FIXTURE_SETS.get(name, CLAIMS_FILTER_FIXTURES)
 
-        # Claims-filter functions receive GroundedDoorEntry objects and must not import anything.
-        from jeenom.schemas import GroundedDoorEntry
+        # Claims-filter functions receive GroundedObjectEntry objects and must not import anything.
+        from jeenom.schemas import GroundedObjectEntry
         namespace: dict[str, Any] = {
             "__builtins__": {k: __builtins__[k] for k in self.ALLOWED_BUILTINS if k in (  # type: ignore[index]
                 __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)  # type: ignore[arg-type]
             )},
-            "GroundedDoorEntry": GroundedDoorEntry,
+            "GroundedObjectEntry": GroundedObjectEntry,
         }
         try:
             exec(compile(code, f"<synthesized:{function_name}>", "exec"), namespace)  # noqa: S102
@@ -394,7 +394,7 @@ class PrimitiveValidator:
             actual_colors = set()
             for item in result:
                 if not hasattr(item, "color"):
-                    return f"[{fixture.name}] result items must be GroundedDoorEntry, got {type(item)}"
+                    return f"[{fixture.name}] result items must be GroundedObjectEntry, got {type(item)}"
                 actual_colors.add(item.color)
             if actual_colors != fixture.expected_colors:
                 return (

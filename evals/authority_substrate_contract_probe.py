@@ -13,7 +13,7 @@ from jeenom.plan_reuse import PlanReuseCache
 from jeenom.readiness_graph import evaluate_request_plan
 from jeenom.schemas import (
     EnvironmentIdentity,
-    GroundedDoorEntry,
+    GroundedObjectEntry,
     PrimitiveManifest,
     RequestPlan,
     RequestPlanStep,
@@ -88,7 +88,7 @@ def _single_step_plan(handle: str, **constraints: object) -> RequestPlan:
 
 
 def _claims(*, confidence: float = 1.0, frame_id: str = "map") -> StationActiveClaims:
-    entry = GroundedDoorEntry(color="red", object_type="door", x=1, y=1, distance=1)
+    entry = GroundedObjectEntry(color="red", object_type="door", x=1, y=1, distance=1)
     return StationActiveClaims(
         scene_fingerprint=(0, 0, 0),
         ranked_scene_doors=[entry],

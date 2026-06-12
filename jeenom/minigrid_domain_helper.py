@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .schemas import GroundedDoorEntry, OperationalContext
+from .schemas import GroundedObjectEntry, OperationalContext
 
 
 def _normalize_text(text: str) -> str:
@@ -179,7 +179,7 @@ class MiniGridDomainHelper:
                 return metric
         return self.default_metric
 
-    def entry_target_dict(self, entry: GroundedDoorEntry) -> dict[str, Any]:
+    def entry_target_dict(self, entry: GroundedObjectEntry) -> dict[str, Any]:
         return {
             "type": entry.object_type,
             "color": entry.color,
@@ -187,7 +187,7 @@ class MiniGridDomainHelper:
             "y": entry.y,
         }
 
-    def entry_label(self, entry: GroundedDoorEntry | dict[str, Any]) -> str:
+    def entry_label(self, entry: GroundedObjectEntry | dict[str, Any]) -> str:
         if isinstance(entry, dict):
             color = entry.get("color")
             object_type = entry.get("object_type") or entry.get("type") or self.default_object_type
@@ -202,7 +202,7 @@ class MiniGridDomainHelper:
             distance = entry.distance
         return f"{color} {object_type}@({x},{y}) distance={distance}"
 
-    def task_utterance_for_entry(self, entry: GroundedDoorEntry | dict[str, Any]) -> str:
+    def task_utterance_for_entry(self, entry: GroundedObjectEntry | dict[str, Any]) -> str:
         if isinstance(entry, dict):
             color = entry.get("color")
             object_type = entry.get("object_type") or entry.get("type") or self.default_object_type
@@ -213,7 +213,7 @@ class MiniGridDomainHelper:
 
     def format_ranked_doors_from_entries(
         self,
-        entries: Iterable[GroundedDoorEntry | dict[str, Any]],
+        entries: Iterable[GroundedObjectEntry | dict[str, Any]],
         *,
         metric: str,
         include_navigation_hint: bool = True,
@@ -229,7 +229,7 @@ class MiniGridDomainHelper:
         self,
         *,
         color: str,
-        matches: list[GroundedDoorEntry],
+        matches: list[GroundedObjectEntry],
         answer_fields: set[str],
     ) -> str:
         if not matches:

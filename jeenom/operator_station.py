@@ -23,10 +23,7 @@ from .memory import OperationalMemory
 from .mission_cortex import (
     InlineMetricMissionRequest,
     MissionCortex,
-    _metric_dependencies,
-    _metric_expression_name,
     _normalize_metric_name,
-    _parse_metric_expression,
     parse_inline_metric_request,
 )
 from .minigrid_runtime_package import (
@@ -44,6 +41,7 @@ from .runtime_package import RuntimePackage
 from .semantic_normalizer import infer_direction_from_utterance, normalize_distance_ordinal
 from .side_effect_authority import SideEffectAuthority
 from .substrate_adapter import SubstrateAdapter
+from .intent_cache import IntentCache, SEQUENCE_STEP_PREFIX, SEQUENCE_STEP_SUFFIX, parse_metric_query, seed_intent_cache
 from .turn_orchestrator import (
     PendingClarification,
     PendingPrimitiveDefinition,
@@ -57,7 +55,7 @@ from .schemas import (
     CorticalEnvelope,
     EnvironmentIdentity,
     ExecutionTicket,
-    GroundedDoorEntry,
+    GroundedObjectEntry,
     MemoryUpdate,
     MemoryWriteTicket,
     MissionExecutionPlan,
@@ -121,115 +119,6 @@ def _looks_like_bare_label(normalized: str) -> bool:
         and normalized not in _common_words
     )
 
-
-def _parse_primitive_definition_request(
-    text: str,
-    registry: CapabilityRegistry,
-) -> PrimitiveDefinitionRequest | str | None:
-    _VERB_PREFIX = (
-        r"^(?:i\s+(?:want\s+to|would\s+like\s+to|need\s+to|'d\s+like\s+to)\s+)?"
-        r"(?:please\s+)?(?:define|make|create|synthesize|build)\s+"
-    )
-    patterns = [
-        re.compile(
-            _VERB_PREFIX
-            + r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
-            r"(?:(?:called|named)\s+)?(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*=\s*"
-            r"(?P<formula>.+)$",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            _VERB_PREFIX
-            + r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
-            r"(?:called|named)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\s+"
-            r"(?:as|to be|which is|that is|that|using|where|based on)\s+(?P<formula>.+)$",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            _VERB_PREFIX
-            + r"(?:a\s+|an\s+)?(?:new\s+)?distance\s+metric\s+"
-            r"(?:which is|that is|as)\s+(?P<formula>.+?)\s+"
-            r"(?:and\s+)?call\s+it\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)$",
-            re.IGNORECASE,
-        ),
-    ]
-    known_metrics = list(registry.ranked_metric_handles().keys())
-    for pattern in patterns:
-        match = pattern.match(text.strip())
-        if not match:
-            continue
-        name = match.group("name")
-        formula = match.group("formula").strip()
-        normalized_name = _normalize_metric_name(name)
-        expression = _parse_metric_expression(formula, known_metrics)
-        if expression is None:
-            return (
-                "I could not parse that metric formula. Use a query-only formula "
-                "such as min(euclidean, manhattan), euclidean mod 5, or manhattan plus 3."
-            )
-        if expression.get("op") == "unsafe":
-            return (
-                "REFUSE\n"
-                "Metric definitions must be query-only. I will not build a metric "
-                "that contains actuation, movement, controller, or motor side effects."
-            )
-        dependencies = list(dict.fromkeys(_metric_dependencies(formula, known_metrics)))
-        dependency_handles = [registry.ranked_handle_for(metric) for metric in dependencies]
-        return PrimitiveDefinitionRequest(
-            definition_type="distance_metric",
-            name=name,
-            normalized_name=normalized_name,
-            expression=expression,
-            dependencies=dependencies,
-            dependency_handles=dependency_handles,
-            proposed_handle=registry.ranked_handle_for(normalized_name),
-            safety_class="query",
-            authority_level="operator",
-            provenance={
-                "operator_utterance": text,
-                "formula": formula,
-            },
-        )
-    return None
-
-
-def _parse_metric_query(text: str) -> str | None:
-    raw = text.strip()
-    patterns = [
-        re.compile(
-            r"\b(?:rank|list|show)\s+(?:all\s+)?(?:the\s+)?doors\s+by\s+"
-            r"(?P<metric>[A-Za-z][A-Za-z0-9_]*)\b",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"\b(?:what\s+is|whats|what's|show|list)\s+(?:the\s+)?"
-            r"(?P<metric>[A-Za-z][A-Za-z0-9_]*)\s+"
-            r"(?:distance\s+)?(?:to|for|of)\s+all\s+(?:the\s+)?doors\b",
-            re.IGNORECASE,
-        ),
-    ]
-    stopwords = {
-        "distance",
-        "distances",
-        "closest",
-        "farthest",
-        "furthest",
-        "door",
-        "doors",
-        "all",
-        "the",
-        "manhattan",
-        "euclidean",
-    }
-    for pattern in patterns:
-        match = pattern.search(raw)
-        if not match:
-            continue
-        metric = match.group("metric")
-        normalized = _normalize_metric_name(metric)
-        if normalized and normalized not in stopwords:
-            return normalized
-    return None
 
 
 def _looks_like_question(normalized_utterance: str) -> bool:
@@ -338,22 +227,28 @@ def classify_utterance(utterance: str, registry: CapabilityRegistry) -> Approved
     }:
         return ApprovedCommand(command_type="task_instruction", utterance=text)
 
-    if "delivery target" in normalized and re.search(
-        r"^(go to|reach|find|get to|head to|navigate to) (the )?delivery target$",
-        normalized,
-    ):
-        return ApprovedCommand(command_type="task_instruction", utterance=text)
-
-    primitive_definition = _parse_primitive_definition_request(text, registry)
-    if isinstance(primitive_definition, PrimitiveDefinitionRequest):
-        return _approved(
-            "primitive_definition",
-            text,
-            payload={"definition": primitive_definition.as_dict()},
+    if "delivery target" in normalized:
+        _nav_verbs = {
+            "go to", "reach", "find", "get to", "head to", "navigate to",
+        }
+        prefix = (
+            normalized.replace(" the delivery target", "")
+            .replace(" delivery target", "")
+            .strip()
         )
-    if isinstance(primitive_definition, str):
-        return _approved("unsupported", text, primitive_definition)
+        if prefix in _nav_verbs:
+            return ApprovedCommand(command_type="task_instruction", utterance=text)
 
+    # Metric-query patterns (e.g. "rank all doors by X", "what is X distance to all doors").
+    # These bypass dispatch to avoid capability-matching regressions — metric_query routes
+    # directly to metric_query_summary which handles its own plan evaluation.
+    custom_metric = parse_metric_query(text)
+    if custom_metric is not None:
+        return _approved("metric_query", text, payload={"metric": custom_metric})
+
+    # Inline metric definition + mission (e.g. "go to door closest by my_metric = min(...)").
+    # Pure metric-definition patterns are handled via IntentCache before classify_utterance;
+    # only the combined inline case lands here.
     inline_metric = parse_inline_metric_request(text, registry)
     if isinstance(inline_metric, InlineMetricMissionRequest):
         return _approved(
@@ -366,42 +261,6 @@ def classify_utterance(utterance: str, registry: CapabilityRegistry) -> Approved
         )
     if isinstance(inline_metric, str):
         return _approved("unsupported", text, inline_metric)
-
-    custom_metric = _parse_metric_query(text)
-    if custom_metric is not None:
-        return _approved("metric_query", text, payload={"metric": custom_metric})
-
-    # Concept teach — explicit syntax: "remember X means Y" / "define X as Y"
-    _concept_teach_m = re.match(
-        r"^(?:remember|teach|define)\s+(.+?)\s+(?:means|as|is shorthand for)\s+(.+)$",
-        normalized,
-    )
-    if _concept_teach_m:
-        cname = _concept_teach_m.group(1).strip().strip("'\"")
-        # Re-match against raw text (commas intact) to preserve CSV procedure sequences.
-        # normalized strips [.,;:] so "bingo, scout, bingo" becomes "bingo scout bingo".
-        _raw_m = re.match(
-            r"^(?:remember|teach|define)\s+(.+?)\s+(?:means|as|is shorthand for)\s+(.+)$",
-            text,
-            re.IGNORECASE,
-        )
-        cutterance = (
-            _raw_m.group(2).strip().strip("'\"")
-            if _raw_m is not None
-            else _concept_teach_m.group(2).strip().strip("'\"")
-        )
-        return _approved("concept_teach", text, payload={"name": cname, "utterance": cutterance})
-
-
-    # Natural-language concept teach patterns ("when I say X, Y" / "X means Y") are
-    # intentionally omitted here — they route through the LLM / SmokeTestCompiler which
-    # now emit concept_teach as a first-class intent type (Phase 8.4.5).
-
-    # Concept forget: "forget concept X" / "forget X"
-    _concept_forget_m = re.match(r"^forget(?:\s+concept)?\s+(.+)$", normalized)
-    if _concept_forget_m:
-        cname = _concept_forget_m.group(1).strip().strip("'\"")
-        return _approved("concept_forget", text, payload={"name": cname})
 
 
     # Concept list
@@ -484,11 +343,6 @@ class OperatorStationSession:
         self.substrate: SubstrateAdapter = self.runtime_package.substrate
         self.capability_registry = self.runtime_package.resolve_capability_registry()
         self._classify_utterance = _make_classify_utterance(self.capability_registry)
-        self.turn_orchestrator = TurnOrchestrator(
-            classify_utterance=self._classify_utterance,
-            normalize_utterance=_normalize_utterance,
-            looks_like_bare_label=_looks_like_bare_label,
-        )
         self.mission_cortex = MissionCortex(
             planning_semantics=self.planning_semantics,
             registry=self.capability_registry,
@@ -496,6 +350,16 @@ class OperatorStationSession:
         self.cortex_session = CortexSession(
             registry=self.capability_registry,
             planning_semantics=self.planning_semantics,
+        )
+        self.intent_cache = IntentCache()
+        seed_intent_cache(self.intent_cache, self.capability_registry)
+        self.turn_orchestrator = TurnOrchestrator(
+            classify_utterance=self._classify_utterance,
+            normalize_utterance=_normalize_utterance,
+            looks_like_bare_label=_looks_like_bare_label,
+            cortex_session=self.cortex_session,
+            mission_cortex=self.mission_cortex,
+            intent_cache=self.intent_cache,
         )
         # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
         self.knowledge_base = KnowledgeBase(
@@ -757,429 +621,7 @@ class OperatorStationSession:
             f"type={intent.intent_type} confidence={intent.confidence:.2f} "
             f"reason={intent.reason}"
         )
-        return self.command_from_operator_intent(intent, utterance)
-
-    def command_from_operator_intent(
-        self,
-        intent: OperatorIntent,
-        utterance: str,
-    ) -> ApprovedCommand:
-        # Reset per-turn so stale values from previous turns are never observed.
-        self.last_readiness_graph = None
-        self.last_repair_events = []
-        self.last_operational_mismatches = []
-
-        # ── Proactive Intent Signal Verification (Phase 7.595) ───────────────
-        # Runs unconditionally on ALL LLM outputs before any routing.
-        # Blueprint Rule 9: deterministic gate between compiler output and
-        # CapabilityMatcher — regardless of what the LLM declared.
-        intent, verif_result = self.intent_verifier.enrich(utterance, intent)
-        promoted_intent = self._promote_verified_query_intent(
-            utterance,
-            intent,
-            verif_result,
-        )
-        if promoted_intent is not intent:
-            self.log(
-                "intent verifier promoted unresolved utterance to "
-                f"{promoted_intent.intent_type}"
-            )
-            intent = promoted_intent
-        self.last_operator_intent = intent
-        if verif_result.injected_handles:
-            self.log(f"intent verifier injected: {verif_result.summary()}")
-        if verif_result.inversion_detected:
-            self.log(f"intent verifier blocked inversion: {verif_result.inversion_reason}")
-            return _approved("ambiguous", utterance, (
-                    "Semantic inversion detected in compiled plan: "
-                    f"{verif_result.inversion_reason} "
-                    "Please rephrase."
-                ))
-
-
-        # concept_teach must bypass composition/cap-matching; teach_concept sets its own plan.
-        if intent.intent_type == "concept_teach":
-            name = (intent.concept_name or "").strip()
-            expansion = (intent.concept_utterance or "").strip()
-            if not name or not expansion:
-                return _approved("clarification", utterance, "Please specify both a name and an instruction for the concept.")
-            return _approved("concept_teach", utterance, payload={"name": name, "utterance": expansion})
-
-        request_plan_recorded = False
-        if intent.grounding_query_plan is not None:
-            self._record_request_plan(utterance, intent)
-            request_plan_recorded = True
-            plan_command = self._command_from_grounding_query_plan(utterance, intent)
-            if plan_command is not None:
-                return plan_command
-
-        if not request_plan_recorded:
-            self._record_request_plan(utterance, intent)
-
-        # ── Intent Readiness Requirement Matching (Phase 7.59) ────────────────
-        # Runs every turn, deterministically. Matcher verdict overrides LLM's
-        # capability_status when required_capabilities are declared. No weakening.
-        cap_match = default_matcher.match(intent, self.capability_registry)
-        composition_command = self._try_compose_grounding_result(
-            utterance,
-            intent,
-            cap_match,
-            verif_result,
-        )
-        if composition_command is not None:
-            return composition_command
-        if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
-            return self._arbitrate_gap(utterance, intent, cap_match)
-
-        if intent.target_selector is not None and intent.capability_status in {
-            "needs_clarification",
-            "missing_skills",
-            "synthesizable",
-        }:
-            if intent.capability_status == "needs_clarification":
-                grounded = self.ground_target_selector(intent.target_selector)
-                clarification = self.maybe_start_selector_clarification(
-                    utterance=utterance,
-                    resume_kind=(
-                        "task_instruction"
-                        if intent.intent_type == "task_instruction"
-                        else "knowledge_update"
-                        if intent.intent_type == "knowledge_update"
-                        else "ground_target_query"
-                    ),
-                    grounded=grounded,
-                )
-                if clarification is not None:
-                    return clarification
-            readiness_command = self.command_from_selector_readiness(
-                intent.target_selector,
-                utterance,
-            )
-            if readiness_command is not None:
-                return readiness_command
-
-        if intent.intent_type in {"accept_proposal", "reject_proposal"}:
-            return ApprovedCommand(command_type=intent.intent_type, utterance=utterance)
-
-        if intent.intent_type == "concept_teach":
-            name = (intent.concept_name or "").strip()
-            expansion = (intent.concept_utterance or "").strip()
-            if not name or not expansion:
-                return _approved("clarification", utterance, "Please specify both a name and an instruction for the concept.")
-
-            return _approved("concept_teach", utterance, payload={"name": name, "utterance": expansion})
-
-
-        if intent.intent_type == "concept_recall":
-            name = (intent.concept_name or "").strip()
-            if not name:
-                return _approved("clarification", utterance, "Please specify the concept name to recall.")
-
-            concept = self.knowledge_base.recall(name)
-            if concept is None:
-                return ApprovedCommand(
-                    kind="clarification",
-                    utterance=utterance,
-                    payload={
-                        "message": (
-                            f"I don't know a concept named '{name}'.\n"
-                            f"To teach it, say: remember {name} means <full instruction>"
-                        )
-                    },
-                )
-            # Procedure-type concepts route to _run_procedure, not task_instruction
-            if concept.concept_type == "procedure":
-                return _approved("procedure_execute", utterance, payload={"steps": list(concept.steps)})
-
-            expanded = concept.utterance
-            self.log(f"concept_recall: '{name}' → '{expanded}'")
-            return ApprovedCommand(command_type="task_instruction", utterance=expanded)
-
-        if intent.intent_type == "procedure_recall":
-            steps = list(intent.concept_steps or [])
-            if not steps:
-                return _approved("clarification", utterance, "Please specify the concept names to execute in sequence.")
-
-            self.log(f"procedure_recall: steps={steps}")
-            return _approved("procedure_execute", utterance, payload={"steps": steps})
-
-
-        if intent.intent_type == "sequence_instruction":
-            usteps = list(intent.utterance_steps or [])
-            if not usteps:
-                return _approved("clarification", utterance, "Please specify the task steps to execute in sequence.")
-
-            self.log(f"sequence_instruction: steps={usteps}")
-            return _approved("sequence_execute", utterance, payload={"steps": usteps})
-
-
-        if intent.intent_type == "motor_command":
-            action = (intent.action_name or "").strip()
-            count = max(1, intent.repeat_count or 1)
-            if not action:
-                return _approved("clarification", utterance, "Please specify which motor action to perform.")
-
-            self.log(f"motor_command: action={action} count={count}")
-            return _approved("motor_execute", utterance, payload={"action": action, "count": count})
-
-
-        if intent.intent_type == "motor_sequence":
-            sequence: list[dict[str, Any]] = []
-            for step in (intent.utterance_steps or []):
-                parts = step.split(":", 1)
-                if len(parts) != 2:
-                    continue
-                action_name, count_str = parts
-                try:
-                    action_count = max(1, int(count_str))
-                except ValueError:
-                    continue
-                sequence.append({"action": action_name, "count": action_count})
-            if len(sequence) < 2:
-                return _approved("clarification", utterance, "Could not parse motor sequence steps.")
-
-            self.log(f"motor_sequence: {len(sequence)} actions")
-            return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
-
-        if intent.intent_type == "define_metric":
-            parsed = _parse_primitive_definition_request(utterance, self.capability_registry)
-            if parsed is None:
-                return _approved(
-                    "clarification",
-                    utterance,
-                    "I understood you want to define a new distance metric, but I could not "
-                    "parse the name or formula. Try: 'create a metric called NAME which is FORMULA'.",
-                )
-            if isinstance(parsed, str):
-                return _approved("clarification", utterance, parsed)
-            self.log(f"define_metric: routed to propose_primitive_definition for '{parsed.name}'")
-            return _approved("primitive_definition", utterance, payload={"definition": parsed.as_dict()})
-
-
-        if intent.intent_type == "conditional_sense_motor":
-            import uuid
-            cond_plan = RequestPlan(
-                request_id=f"conditional_sense_motor:{str(uuid.uuid4())[:8]}",
-                original_utterance=utterance,
-                objective_type="control",
-                objective_summary="Conditional motor: sense environment before actuation.",
-                steps=[
-                    RequestPlanStep(
-                        step_id="sense_condition",
-                        layer="sensing",
-                        operation="execute",
-                        inputs={"query": "scene"},
-                        outputs=["sense.front_cell"],
-                    ),
-                    RequestPlanStep(
-                        step_id="conditional_execute_motor",
-                        layer="action",
-                        operation="refuse",
-                        depends_on=["sense_condition"],
-                        inputs={"condition": utterance},
-                    ),
-                ],
-                expected_response="ask_clarification",
-            )
-            cond_graph = self.cortex_session.evaluate(
-                cond_plan,
-                active_claims=self.active_claims,
-                claims_valid=self._claims_valid_for_current_environment(),
-                environment_identity=self.current_environment_identity,
-            )
-            self.last_request_plan = cond_plan
-            self.last_readiness_graph = cond_graph
-            return _approved(
-                "clarification",
-                utterance,
-                "Conditional motor command requires Sense evidence before actuation. "
-                "Please confirm the condition and the fallback action.",
-            )
-
-        if intent.intent_type == "mission_contract":
-            steps = list(intent.mission_steps or [])
-            if len(steps) < 2:
-                return _approved("clarification", utterance, "A mission requires at least 2 task steps.")
-
-            self.log(f"mission_contract: {len(steps)} steps")
-            return _approved("mission_execute", utterance, payload={"steps": steps})
-
-
-        if intent.intent_type == "claim_reference":
-            if intent.claim_reference == "threshold_filter":
-                # Route through capability matching → arbitration → synthesis pipeline.
-                # The plan carries threshold, comparison, and metric for execution.
-                if cap_match.verdict in {"synthesizable", "missing_skills"}:
-                    return self._arbitrate_gap(utterance, intent, cap_match)
-                # Already registered — execute directly.
-                return self._dispatch_claims_filter(utterance, intent, cap_match)
-            return _approved("claim_reference", utterance, payload={"ref_type": intent.claim_reference or ""})
-
-
-        if intent.intent_type in {"unsupported", "ambiguous"}:
-            # Pure semantic/schema failure (no declared capabilities) → plain error.
-            # Reserve arbitration for intents where the LLM identified a capability but
-            # the registry says it is missing or synthesizable.
-            if not intent.required_capabilities and not cap_match.missing:
-                reason = intent.reason or "I could not understand that request."
-                if intent.intent_type == "unsupported" and "unsupported" in reason.lower():
-                    return ApprovedCommand(
-                        kind="unsupported",
-                        utterance=utterance,
-                        payload={
-                            "message": (
-                                "I cannot safely execute that capability yet. "
-                                f"{reason}"
-                            )
-                        },
-                    )
-                reason = intent.reason or "I could not understand that request."
-                return _approved("clarification", utterance, f"I didn't understand that: {reason}")
-
-            # Route through the arbitrator — it has access to the full capability manifest
-            # and SceneModel API surface, so it can recognise synthesisable spatial
-            # computations (e.g. threshold filtering) that the LLM compiler missed.
-            return self._arbitrate_gap(utterance, intent, cap_match)
-
-        if intent.intent_type == "quit":
-            return ApprovedCommand(command_type="quit", utterance=utterance)
-
-        if intent.intent_type == "reset":
-            return _approved("reset", utterance, payload={"clear_memory": bool(intent.clear_memory)})
-
-
-        if intent.intent_type == "cache_query":
-            return ApprovedCommand(command_type="cache_query", utterance=utterance)
-
-        if intent.intent_type == "status_query":
-            if intent.status_query == "ground_target" and intent.target_selector is not None:
-                return _approved("ground_target_query", utterance, payload={"target_selector": intent.target_selector})
-
-            return _approved("status_query", utterance, payload={"query": intent.status_query or "status"})
-
-
-        if intent.intent_type == "knowledge_update":
-            question_command = self._question_override_command(utterance)
-            if question_command is not None:
-                self.log("question-shaped utterance overrode knowledge_update intent")
-                return question_command
-            update = intent.knowledge_update or {}
-            delivery_target = update.get("delivery_target")
-            if delivery_target is None and intent.target_selector is not None:
-                readiness_command = self.command_from_selector_readiness(
-                    intent.target_selector,
-                    utterance,
-                )
-                if readiness_command is not None:
-                    return readiness_command
-                grounded = self.ground_target_selector(intent.target_selector)
-                if not grounded["ok"]:
-                    clarification = self.maybe_start_selector_clarification(
-                        utterance=utterance,
-                        resume_kind="knowledge_update",
-                        grounded=grounded,
-                    )
-                    if clarification is not None:
-                        return clarification
-                    return _approved("ambiguous", utterance, grounded["message"])
-
-                target = grounded["target"]
-                return ApprovedCommand(
-                    kind="knowledge_update",
-                    utterance=utterance,
-                    payload={
-                        "target_color": target["color"],
-                        "target_type": target["type"],
-                        "delivery_target": {
-                            "color": target["color"],
-                            "object_type": target["type"],
-                        },
-                    },
-                )
-            if delivery_target is None and intent.knowledge_update is not None:
-                return ApprovedCommand(
-                    kind="knowledge_update",
-                    utterance=utterance,
-                    payload={
-                        "target_color": None,
-                        "target_type": None,
-                        "delivery_target": None,
-                    },
-                )
-            if not isinstance(delivery_target, dict):
-                return ApprovedCommand(command_type="unsupported", utterance=utterance)
-            return ApprovedCommand(
-                kind="knowledge_update",
-                utterance=utterance,
-                payload={
-                    "target_color": delivery_target["color"],
-                    "target_type": delivery_target["object_type"],
-                    "delivery_target": {
-                        "color": delivery_target["color"],
-                        "object_type": delivery_target["object_type"],
-                    },
-                },
-            )
-
-        if intent.intent_type == "task_instruction":
-            if intent.reference == "delivery_target":
-                instruction = "go to the delivery target"
-            elif intent.reference == "last_target":
-                instruction = "go there again"
-            elif intent.reference == "last_task":
-                instruction = "repeat the last task"
-            elif intent.target_selector is not None:
-                readiness_command = self.command_from_selector_readiness(
-                    intent.target_selector,
-                    utterance,
-                )
-                if readiness_command is not None:
-                    return readiness_command
-                grounded = self.ground_target_selector(intent.target_selector)
-                if not grounded["ok"]:
-                    # Before asking the operator to disambiguate, let the arbitrator
-                    # decide whether the unresolved constraint can be synthesised.
-                    # This fires when the operator specifies a condition (e.g. a
-                    # distance threshold) that the current primitives cannot handle.
-                    if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
-                        arb_command = self._arbitrate_gap(utterance, intent, cap_match)
-                        if arb_command.kind in {
-                            "synthesis_proposal", "missing_skills", "synthesizable",
-                        }:
-                            return arb_command
-                    clarification = self.maybe_start_selector_clarification(
-                        utterance=utterance,
-                        resume_kind="task_instruction",
-                        grounded=grounded,
-                    )
-                    if clarification is not None:
-                        return clarification
-                    return _approved("ambiguous", utterance, grounded["message"])
-
-                target = grounded["target"]
-                instruction = f"go to the {target['color']} {target['type']}"
-            elif isinstance(intent.target, dict):
-                if "closest" in _normalize_utterance(utterance):
-                    return ApprovedCommand(
-                        kind="ambiguous",
-                        utterance=utterance,
-                        payload={
-                            "message": (
-                                "I need a valid target selector to ground closest. "
-                                "I did not execute."
-                            )
-                        },
-                    )
-                color = intent.target.get("color")
-                object_type = intent.target.get("object_type")
-                if not color or object_type != "door" or intent.task_type != "go_to_object":
-                    return ApprovedCommand(command_type="unsupported", utterance=utterance)
-                instruction = intent.canonical_instruction or f"go to the {color} {object_type}"
-            else:
-                return ApprovedCommand(command_type="unsupported", utterance=utterance)
-            return ApprovedCommand(command_type="task_instruction", utterance=instruction)
-
-        return ApprovedCommand(command_type="unsupported", utterance=utterance)
+        return self.turn_orchestrator.dispatch(self, intent, utterance)
 
     def _record_request_state(
         self,
@@ -1761,7 +1203,7 @@ class OperatorStationSession:
             raise RuntimeError("Approved mission plan requires continuation_intent")
         utterance = mission_plan.provenance.get("original_utterance", mission_plan.description)
         intent = mission_plan.continuation_intent
-        command = self.command_from_operator_intent(intent, utterance)
+        command = self.turn_orchestrator.dispatch(self, intent, utterance)
         if command.kind == "task_instruction":
             instruction = self.resolve_task_instruction(command.utterance)
             if instruction is None:
@@ -2109,7 +1551,7 @@ class OperatorStationSession:
             confidence=1.0,
             reason=f"Operator requested ranked doors by custom metric {metric}.",
         )
-        result = self.command_from_operator_intent(intent, command.utterance)
+        result = self.turn_orchestrator.dispatch(self, intent, command.utterance)
         return self.execute_command(result)
 
     def _command_from_grounding_query_plan(
@@ -3822,6 +3264,17 @@ class OperatorStationSession:
             return None
         if infer_direction_from_utterance(normalized) is not None:
             return None
+        # Threshold filter requests ("above 7", "within 5", etc.) must reach the compiler,
+        # not be re-dispatched as a grounding re-rank.
+        _THRESHOLD_COMPARISONS = (
+            "above", "greater than", "more than", "over", "exceeds",
+            "at least", "below", "less than", "under", "at most", "within",
+        )
+        if (
+            any(term in normalized for term in _THRESHOLD_COMPARISONS)
+            and re.search(r"\b\d+", normalized)
+        ):
+            return None
 
         metric = next(
             (
@@ -3875,7 +3328,7 @@ class OperatorStationSession:
             "grounding follow-up resolved: "
             f"object_type={object_type} metric={metric} handle={handle}"
         )
-        return self.command_from_operator_intent(intent, utterance)
+        return self.turn_orchestrator.dispatch(self, intent, utterance)
 
     def _utterance_requests_navigation(self, normalized: str) -> bool:
         return bool(
@@ -3891,7 +3344,7 @@ class OperatorStationSession:
             return None
         return int(match.group(1))
 
-    def _task_command_for_entry(self, entry: GroundedDoorEntry, utterance: str) -> ApprovedCommand:
+    def _task_command_for_entry(self, entry: GroundedObjectEntry, utterance: str) -> ApprovedCommand:
         return _approved("task_instruction", self.domain_helper.task_utterance_for_entry(entry))
 
 
@@ -3899,7 +3352,7 @@ class OperatorStationSession:
         self,
         *,
         utterance: str,
-        entries: list[GroundedDoorEntry],
+        entries: list[GroundedObjectEntry],
         resume_kind: str,
         message: str,
     ) -> ApprovedCommand:
@@ -4120,7 +3573,7 @@ class OperatorStationSession:
 
     def _set_last_grounded_claim(
         self,
-        entry: GroundedDoorEntry,
+        entry: GroundedObjectEntry,
         claims: StationActiveClaims,
     ) -> None:
         for i, candidate in enumerate(claims.ranked_scene_doors):
@@ -4210,7 +3663,7 @@ class OperatorStationSession:
         }
         lines = ["GROUNDING ANSWER"]
 
-        def append_extreme(label: str, ranked: list[GroundedDoorEntry]) -> None:
+        def append_extreme(label: str, ranked: list[GroundedObjectEntry]) -> None:
             if not ranked:
                 return
             distance = ranked[0].distance
@@ -4227,7 +3680,7 @@ class OperatorStationSession:
                     + ", ".join(self.domain_helper.entry_label(entry) for entry in tied)
                 )
 
-        def append_ordinal(label: str, ranked: list[GroundedDoorEntry], ordinal: int) -> None:
+        def append_ordinal(label: str, ranked: list[GroundedObjectEntry], ordinal: int) -> None:
             if ordinal >= len(ranked):
                 lines.append(f"{label}=none")
                 return
@@ -5104,9 +4557,9 @@ class OperatorStationSession:
         metric = selector.get("distance_metric") or selector.get("metric")
         provenance = selector.get("primitive")
         entries = [
-            GroundedDoorEntry(
+            GroundedObjectEntry(
                 color=obj.color, x=obj.x, y=obj.y, distance=dist,
-                metric=metric, provenance=provenance,
+                object_type=obj.object_type, metric=metric, provenance=provenance,
             )
             for dist, obj in ranked_pairs
         ]
@@ -5541,8 +4994,8 @@ class OperatorStationSession:
         parts = re.split(r"\b(?:and\s+then|then|followed\s+by)\b", normalized)
         if len(parts) < 2:
             return None
-        _pre = re.compile(r"^\s*(?:(?:do|execute|run|perform|also)\s+)?(?:a\s+|the\s+|an\s+)?(?:first\s+)?")
-        _suf = re.compile(r"\s+(?:first|next|also|too)\s*$")
+        _pre = SEQUENCE_STEP_PREFIX
+        _suf = SEQUENCE_STEP_SUFFIX
         cleaned = [_suf.sub("", _pre.sub("", p)).strip() for p in parts]
         cleaned = [p for p in cleaned if p]
         if len(cleaned) < 2:

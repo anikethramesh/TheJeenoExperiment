@@ -36,7 +36,7 @@ from jeenom.primitive_library import (
     SENSING_PRIMITIVES,
     TASK_PRIMITIVES,
 )
-from jeenom.schemas import GroundedDoorEntry, SceneModel, StationActiveClaims
+from jeenom.schemas import GroundedObjectEntry, SceneModel, StationActiveClaims
 
 
 
@@ -224,7 +224,7 @@ def _check_active_claims(checks: dict[str, bool]) -> None:
     )
     checks["last_grounded_target_is_entry"] = (
         s2.active_claims is not None
-        and isinstance(s2.active_claims.last_grounded_target, GroundedDoorEntry)
+        and isinstance(s2.active_claims.last_grounded_target, GroundedObjectEntry)
     )
     checks["last_grounded_rank_is_zero"] = (
         s2.active_claims is not None and s2.active_claims.last_grounded_rank == 0

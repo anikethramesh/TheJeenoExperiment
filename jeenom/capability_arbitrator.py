@@ -283,10 +283,10 @@ class LLMArbitrator(ArbitratorBackend):
             "  selector is a dict with keys: object_type, color, exclude_colors, relation, etc.\n"
             "\n"
             "Claims-filter API available when scene_summary.active_claims is present:\n"
-            "  entries = active_claims.ranked_doors — typed GroundedDoorEntry list\n"
-            "  GroundedDoorEntry: .color, .object_type, .x, .y, .distance, .metric\n"
+            "  entries = active_claims.ranked_doors — typed GroundedObjectEntry list\n"
+            "  GroundedObjectEntry: .color, .object_type, .x, .y, .distance, .metric\n"
             "  condition is a dict with keys: threshold, comparison, metric\n"
-            "  Signature: fn(entries, condition) → list[GroundedDoorEntry]\n"
+            "  Signature: fn(entries, condition) → list[GroundedObjectEntry]\n"
             "  Claims filters must preserve entry objects and order; they never access scene/env.\n"
         )
         system_prompt = (

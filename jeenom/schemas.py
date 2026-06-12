@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, ClassVar, Literal, Mapping
 
 
 SENSE_TEMPLATE_ALLOWED_INPUTS = (
@@ -48,17 +48,18 @@ OPERATOR_INTENT_TYPES = (
     "knowledge_update",
     "status_query",
     "primitive_definition",
-    "define_metric",
     "claim_reference",
     "cache_query",
     "concept_teach",
     "concept_recall",
+    "concept_forget",
     "procedure_recall",
     "sequence_instruction",
     "motor_command",
     "motor_sequence",
     "conditional_sense_motor",
     "mission_contract",
+    "metric_query",
     "reset",
     "quit",
     "accept_proposal",
@@ -98,8 +99,34 @@ CLAIM_FRESHNESS = ("current", "stale", "unknown")
 CLAIM_AUTHORITIES = ("operator", "runtime", "system", "compiler", "sense", "spine")
 GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
-OPERATOR_OBJECT_TYPES = ("door",)
 OPERATOR_COLORS = ("red", "green", "blue", "yellow", "purple", "grey")
+
+# Domain vocabulary registry — populated by the domain adapter at init, never hardcoded here.
+_REGISTERED_OBJECT_TYPES: tuple[str, ...] | None = None
+
+
+def register_domain_vocabulary(object_types: tuple[str, ...]) -> None:
+    global _REGISTERED_OBJECT_TYPES
+    _REGISTERED_OBJECT_TYPES = object_types
+
+
+def clear_registered_vocabulary() -> None:
+    global _REGISTERED_OBJECT_TYPES
+    _REGISTERED_OBJECT_TYPES = None
+
+
+def get_registered_object_types() -> tuple[str, ...]:
+    return _REGISTERED_OBJECT_TYPES if _REGISTERED_OBJECT_TYPES is not None else ()
+
+
+def _validate_object_type(value: str | None, label: str) -> None:
+    if value is None:
+        return
+    if _REGISTERED_OBJECT_TYPES is not None and value not in _REGISTERED_OBJECT_TYPES:
+        raise SchemaValidationError(
+            f"{label} object_type '{value}' is not in registered vocabulary: "
+            f"{', '.join(_REGISTERED_OBJECT_TYPES)}"
+        )
 OPERATOR_REFERENCES = ("delivery_target", "last_target", "last_task")
 OPERATOR_SELECTOR_RELATIONS = ("closest", "unique")
 OPERATOR_DISTANCE_METRICS = ("manhattan", "euclidean")
@@ -352,13 +379,11 @@ def _ensure_operator_target(value: Any, label: str) -> dict[str, Any] | None:
         return None
     target = _ensure_dict(value, label)
     _check_keys(target, ("color", "object_type"), label)
+    obj_type = _ensure_optional_str(target.get("object_type"), f"{label}.object_type")
+    _validate_object_type(obj_type, label)
     return {
         "color": _ensure_optional_str_enum(target.get("color"), OPERATOR_COLORS, f"{label}.color"),
-        "object_type": _ensure_optional_str_enum(
-            target.get("object_type"),
-            OPERATOR_OBJECT_TYPES,
-            f"{label}.object_type",
-        ),
+        "object_type": obj_type,
     }
 
 
@@ -540,12 +565,10 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
         if validated:
             validated_exclude.append(validated)
 
+    sel_obj_type = _ensure_optional_str(selector.get("object_type"), f"{label}.object_type")
+    _validate_object_type(sel_obj_type, label)
     result = {
-        "object_type": _ensure_optional_str_enum(
-            selector.get("object_type"),
-            OPERATOR_OBJECT_TYPES,
-            f"{label}.object_type",
-        ),
+        "object_type": sel_obj_type,
         "color": _ensure_optional_str_enum(
             selector.get("color"),
             OPERATOR_COLORS,
@@ -567,8 +590,7 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
             f"{label}.distance_reference",
         ),
     }
-    if result["object_type"] != "door":
-        raise SchemaValidationError(f"{label}.object_type must be door")
+    _validate_object_type(result["object_type"], label)
     return result
 
 
@@ -612,12 +634,10 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
     if primitive_handle is not None:
         primitive_handle = _ensure_str(primitive_handle, f"{label}.primitive_handle")
 
+    plan_obj_type = _ensure_optional_str(plan.get("object_type"), f"{label}.object_type")
+    _validate_object_type(plan_obj_type, label)
     result = {
-        "object_type": _ensure_optional_str_enum(
-            plan.get("object_type"),
-            OPERATOR_OBJECT_TYPES,
-            f"{label}.object_type",
-        ),
+        "object_type": plan_obj_type,
         "operation": _ensure_optional_str_enum(
             plan.get("operation"),
             GROUNDING_QUERY_OPERATIONS,
@@ -672,8 +692,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
             f"{label}.preserved_constraints",
         ),
     }
-    if result["object_type"] != "door":
-        raise SchemaValidationError(f"{label}.object_type must be door")
+    _validate_object_type(result["object_type"], label)
     if result["operation"] is None:
         raise SchemaValidationError(f"{label}.operation must not be null")
     ordinal = result["ordinal"]
@@ -1129,6 +1148,7 @@ class PrimitiveSpec:
     failure_modes: list[str] = field(default_factory=list)
     validation_hooks: list[str] = field(default_factory=list)
     substrate_fingerprint: str | None = None
+    postcondition_primitive: str | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> PrimitiveSpec:
@@ -1330,6 +1350,35 @@ class OperatorIntent:
     # structured distillation of the selection objective; drives objective-based validation
     selection_objective: SelectionObjective | None = None
 
+    _KNOWLEDGE_TYPE_MAP: ClassVar[dict[str, str]] = {
+        "status_query": "claim",
+        "claim_reference": "claim",
+        "cache_query": "claim",
+        "concept_teach": "procedure",
+        "concept_recall": "procedure",
+        "concept_forget": "control",
+        "procedure_recall": "procedure",
+        "sequence_instruction": "procedure",
+        "primitive_definition": "provenance",
+        "knowledge_update": "provenance",
+        "task_instruction": "action",
+        "motor_command": "action",
+        "motor_sequence": "action",
+        "conditional_sense_motor": "action",
+        "mission_contract": "action",
+        "metric_query": "claim",
+        "reset": "control",
+        "quit": "control",
+        "accept_proposal": "control",
+        "reject_proposal": "control",
+        "unsupported": "control",
+        "ambiguous": "control",
+    }
+
+    @property
+    def knowledge_type(self) -> str:
+        return self._KNOWLEDGE_TYPE_MAP.get(self.intent_type, "control")
+
     @classmethod
     def from_dict(cls, data: Any) -> OperatorIntent:
         mapping = _ensure_mapping(data, "OperatorIntent")
@@ -1490,7 +1539,7 @@ class OperatorIntent:
             has_target = (
                 isinstance(self.target, dict)
                 and self.target.get("color") is not None
-                and self.target.get("object_type") == "door"
+                and self.target.get("object_type") is not None
             )
             if (
                 not has_target
@@ -1520,8 +1569,6 @@ class OperatorIntent:
                 raise SchemaValidationError(
                     "primitive_definition requires primitive_definition payload"
                 )
-        elif self.intent_type == "define_metric":
-            pass  # routing-only: station parses the utterance into PrimitiveDefinitionRequest
         elif self.intent_type == "cache_query":
             if self.status_query not in {None, "cache"}:
                 raise SchemaValidationError("cache_query status_query must be cache or null")
@@ -1745,12 +1792,12 @@ class SceneModel:
 
 
 @dataclass
-class GroundedDoorEntry:
+class GroundedObjectEntry:
     color: str | None
     x: int
     y: int
     distance: float  # float for Euclidean and other non-integer metrics
-    object_type: str = "door"
+    object_type: str = "unknown"
     metric: str | None = None       # e.g. "manhattan", "euclidean"
     provenance: str | None = None   # primitive handle that produced this entry
 
@@ -2026,8 +2073,8 @@ class StationActiveClaims:
     """
 
     scene_fingerprint: tuple[int, int, int]  # (agent_x, agent_y, step_count)
-    ranked_scene_doors: list[GroundedDoorEntry]
-    last_grounded_target: GroundedDoorEntry
+    ranked_scene_doors: list[GroundedObjectEntry]
+    last_grounded_target: GroundedObjectEntry
     last_grounded_rank: int
     last_grounding_query: dict[str, Any]
     environment_fingerprint: str | None = None
@@ -2051,13 +2098,13 @@ class StationActiveClaims:
             return False
         return self.environment_fingerprint == environment_identity.fingerprint()
 
-    def next_ranked(self) -> tuple[GroundedDoorEntry, int] | tuple[None, None]:
+    def next_ranked(self) -> tuple[GroundedObjectEntry, int] | tuple[None, None]:
         rank = self.last_grounded_rank + 1
         if rank < len(self.ranked_scene_doors):
             return self.ranked_scene_doors[rank], rank
         return None, None
 
-    def other_doors(self) -> list[GroundedDoorEntry]:
+    def other_doors(self) -> list[GroundedObjectEntry]:
         t = self.last_grounded_target
         return [
             d for d in self.ranked_scene_doors
@@ -2183,6 +2230,7 @@ class ClaimRecord:
     authority: str
     source: str
     confidence: float = 1.0
+    valid_until: float | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
     freshness: str = "current"
     invalidation: dict[str, Any] = field(default_factory=dict)
@@ -2385,6 +2433,8 @@ class MissionContract:
     task_sequence: list[str]          # ordered raw task utterances
     success_condition: str = "all_complete"
     abort_on_failure: bool = True
+    risk_tier: str = "low"
+    cadence: str | None = None
 
 
 @dataclass
@@ -2597,6 +2647,19 @@ class MissionExecutionPlan:
     child_tickets: list[ExecutionTicket] = field(default_factory=list)
 
 
+@dataclass
+class FailureOutcome:
+    """Typed failure descriptor attached to CommandResult when a command fails.
+
+    Makes traces trainable: a string label does not carry enough structure for
+    downstream learning systems to distinguish stuck/progress/blocking/timeout.
+    """
+
+    category: str  # "stuck" | "progress" | "blocking_claim" | "timeout"
+    detail: str | None = None
+    blocking_claim_handle: str | None = None
+
+
 class CommandResult(str):
     """Typed user-visible result from a station command."""
 
@@ -2605,6 +2668,7 @@ class CommandResult(str):
     command: ApprovedCommand | None
     ticket: ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None
     result: dict[str, Any]
+    failure_outcome: FailureOutcome | None
 
     def __new__(
         cls,
@@ -2614,6 +2678,7 @@ class CommandResult(str):
         command: ApprovedCommand | None = None,
         ticket: ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None = None,
         result: dict[str, Any] | None = None,
+        failure_outcome: FailureOutcome | None = None,
     ) -> CommandResult:
         obj = str.__new__(cls, message)
         obj.message = message
@@ -2621,6 +2686,7 @@ class CommandResult(str):
         obj.command = command
         obj.ticket = ticket
         obj.result = dict(result or {})
+        obj.failure_outcome = failure_outcome
         return obj
 
 
@@ -2810,7 +2876,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
         "type": ["object", "null"],
         "properties": {
             "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
-            "object_type": {"type": ["string", "null"], "enum": [*OPERATOR_OBJECT_TYPES, None]},
+            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
         },
         "required": ["color", "object_type"],
         "additionalProperties": False,
@@ -2818,7 +2884,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
     target_selector_schema = {
         "type": ["object", "null"],
         "properties": {
-            "object_type": {"type": ["string", "null"], "enum": [*OPERATOR_OBJECT_TYPES, None]},
+            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
             "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
             "exclude_colors": {
                 "type": "array",
@@ -2848,7 +2914,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
     grounding_query_plan_schema = {
         "type": ["object", "null"],
         "properties": {
-            "object_type": {"type": ["string", "null"], "enum": [*OPERATOR_OBJECT_TYPES, None]},
+            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
             "operation": {"type": ["string", "null"], "enum": [*GROUNDING_QUERY_OPERATIONS, None]},
             "primitive_handle": {"type": ["string", "null"]},
             "metric": {

@@ -202,7 +202,7 @@ def main() -> int:
         confidence=0.9,
     )
     from jeenom.operator_station import ApprovedCommand
-    cmd = _run(lambda: session.command_from_operator_intent(intent_override, "test"))
+    cmd = _run(lambda: session.turn_orchestrator.dispatch(session, intent_override, "test"))
     checks["matcher_overrides_llm_executable"] = cmd.kind == "missing_skills"
     checks["matcher_result_on_command"] = cmd.capability_match is not None
 

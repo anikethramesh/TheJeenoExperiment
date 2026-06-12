@@ -144,7 +144,7 @@ def main() -> int:
         sess.handle_utterance("remember scout means go to the green door")
 
         from jeenom.operator_station import ApprovedCommand
-        cmd = sess.command_from_operator_intent(
+        cmd = sess.turn_orchestrator.dispatch(sess, 
             OperatorIntent.from_dict(dict(raw, reason="test dispatch")),
             "do bingo then scout",
         )

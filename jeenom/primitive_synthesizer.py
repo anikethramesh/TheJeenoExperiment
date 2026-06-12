@@ -39,12 +39,12 @@ GROUNDING_FUNCTION_SIGNATURE = (
 
 CLAIMS_FILTER_FUNCTION_SIGNATURE = (
     "def {function_name}(entries, condition):\n"
-    "    # entries: list[GroundedDoorEntry] — typed ActiveClaims entries with fields:\n"
+    "    # entries: list[GroundedObjectEntry] — typed ActiveClaims entries with fields:\n"
     "    #   .color (str|None), .x (int), .y (int), .distance (float),\n"
     "    #   .object_type (str), .metric (str|None), .provenance (str|None)\n"
     "    # condition: dict — threshold (float), comparison (str)\n"
     "    #   comparison values: 'above', 'below', 'within', 'at_least', 'at_most'\n"
-    "    # Returns: list[GroundedDoorEntry] — filtered subset, order preserved\n"
+    "    # Returns: list[GroundedObjectEntry] — filtered subset, order preserved\n"
     "    # MUST NOT access scene, env, filesystem, or network. MUST NOT import anything.\n"
 )
 
@@ -207,7 +207,7 @@ class LLMSynthesizer(SynthesizerBackend):
                 "  - Do NOT access SceneModel, env, filesystem, or network.\n"
                 "  - Do NOT call env.step() or any robot action.\n"
                 "  - The function must be pure and deterministic.\n"
-                "  - Return a list[GroundedDoorEntry] — filtered subset, order preserved.\n"
+                "  - Return a list[GroundedObjectEntry] — filtered subset, order preserved.\n"
                 "  - entries may be empty — return [] in that case.\n\n"
                 f"Function signature to implement:\n{signature}\n\n"
                 f"Reference implementation:\n{example}\n\n"

@@ -11,7 +11,7 @@ from .primitive_library import (
     TASK_PRIMITIVES,
     PrimitiveSpec as RuntimePrimitiveSpec,
 )
-from .schemas import PrimitiveManifest, PrimitiveSpec, TargetSelector
+from .schemas import PrimitiveManifest, PrimitiveSpec, TargetSelector, get_registered_object_types
 
 
 _SYNTHESIZED_ALIASES = {
@@ -353,12 +353,12 @@ class CapabilityRegistry:
                 "reason": "No target selector was provided.",
             }
         target_selector = TargetSelector.from_dict(selector)
-        if target_selector.object_type != "door":
+        if target_selector.object_type not in get_registered_object_types():
             return {
                 "status": "unsupported",
                 "layer": "grounding",
                 "primitive": None,
-                "reason": "Only door target selectors are currently supported.",
+                "reason": f"Object type '{target_selector.object_type}' is not in registered vocabulary.",
             }
         primitive_name = self._primitive_name_for_selector(target_selector)
         if primitive_name is None:
@@ -376,12 +376,13 @@ class CapabilityRegistry:
         task_type: str | None,
         object_type: str | None,
     ) -> dict[str, Any]:
-        if task_type == "go_to_object" and object_type == "door":
-            return self._readiness_for_primitive("task.go_to_object.door")
+        registered = get_registered_object_types()
+        if task_type == "go_to_object" and object_type in registered:
+            return self._readiness_for_primitive(f"task.go_to_object.{object_type}")
         if task_type == "pickup" and object_type == "key":
             return self._readiness_for_primitive("task.pickup.key")
-        if task_type in {"open", "unlock", "open_or_unlock"} and object_type == "door":
-            return self._readiness_for_primitive("task.open_or_unlock.door")
+        if task_type in {"open", "unlock", "open_or_unlock"} and object_type in registered:
+            return self._readiness_for_primitive(f"task.open_or_unlock.{object_type}")
         return {
             "status": "unsupported",
             "layer": "task",

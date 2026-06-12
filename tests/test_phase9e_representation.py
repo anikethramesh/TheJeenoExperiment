@@ -10,7 +10,7 @@ from jeenom.memory import OperationalMemory
 from jeenom.readiness_graph import evaluate_request_plan
 from jeenom.schemas import (
     ClaimRecord,
-    GroundedDoorEntry,
+    GroundedObjectEntry,
     KnowledgeSnapshot,
     RequestPlan,
     RequestPlanStep,
@@ -75,7 +75,7 @@ class TestPhase9ERepresentation(unittest.TestCase):
 
     def test_readiness_can_use_knowledge_snapshot(self):
         store = self.make_store()
-        claim = GroundedDoorEntry(
+        claim = GroundedObjectEntry(
             color="red",
             x=2,
             y=2,

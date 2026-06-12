@@ -16,8 +16,12 @@ flowchart TD
   Start["Operator utterance"]
   Station["OperatorStation<br>wrap as CorticalEnvelope"]
   SchemaIn["Schema gate<br>validate typed input"]
-  Intent["Cortex<br>compile + verify OperatorIntent"]
-  Mission["Cortex<br>MissionContract / MissionExecutionPlan if compound"]
+  Orch["TurnOrchestrator<br>pending-state check → route intent"]
+  IntentCache["IntentCache<br>precompiled fast-path NLU<br>(prim_def / concept_teach / concept_forget)"]
+  LLM["LLM compiler + IntentVerifier<br>slow path for unresolved utterances"]
+  Intent["OperatorIntent<br>fast or slow path merge here"]
+  Dispatch["TurnOrchestrator.dispatch<br>5 knowledge_type paths<br>claim / procedure / provenance / action / control"]
+  Mission["MissionCortex<br>MissionContract / MissionExecutionPlan if compound"]
   Plan["Cortex<br>build RequestPlan"]
   Snapshot["KnowledgeBase<br>claim/procedure snapshot"]
   Ready["ReadinessGraph<br>context + contracts + claims + authority"]
@@ -32,11 +36,15 @@ flowchart TD
   Fingerprint --> Cache
   Context --> Slice
 
-  Start --> Station --> SchemaIn --> Intent
-  Intent --> Mission
-  Intent --> Plan
-  Mission --> Plan
-  Slice -. "compact LLM context if needed" .-> Intent
+  Start --> Station --> SchemaIn --> Orch
+  Orch -->|fast path| IntentCache --> Intent
+  Orch -->|slow path| LLM --> Intent
+  Slice -. "compact LLM context if needed" .-> LLM
+  Intent --> Dispatch
+  Dispatch -->|knowledge_type=procedure/provenance| Plan
+  Dispatch -->|knowledge_type=action + compound| Mission --> Plan
+  Dispatch -->|knowledge_type=action simple| Plan
+  Dispatch -->|knowledge_type=claim/control| Gate
   Plan --> Ready
   Registry --> Ready
   Fingerprint --> Ready

@@ -1,6 +1,23 @@
 from __future__ import annotations
 
-from .schemas import OperationalContext
+from minigrid.core.constants import IDX_TO_COLOR, IDX_TO_OBJECT
+
+from .planning_semantics import PlanningSemantics, register_default_planning_semantics
+from .schemas import OperationalContext, register_domain_vocabulary
+from .sense import (
+    register_domain_index_maps,
+    register_open_state_passable,
+    register_traverse_to_adjacent,
+)
+
+# Register MiniGrid domain vocabulary and behavioural rules when this module is imported.
+register_domain_vocabulary(("door",))
+register_domain_index_maps(
+    object_index=dict(IDX_TO_OBJECT),
+    color_index=dict(IDX_TO_COLOR),
+)
+register_open_state_passable(frozenset({"door"}))
+register_traverse_to_adjacent(frozenset({"door"}))
 
 
 class MiniGridOperationalContext(OperationalContext):
@@ -104,3 +121,8 @@ class MiniGridOperationalContext(OperationalContext):
                 "description": "MiniGrid GoToDoor operational context.",
             },
         )
+
+
+register_default_planning_semantics(
+    lambda: PlanningSemantics(MiniGridOperationalContext.default())
+)

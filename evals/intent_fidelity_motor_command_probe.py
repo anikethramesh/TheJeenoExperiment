@@ -139,7 +139,7 @@ def main() -> int:
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         sess = _make_session()
         from jeenom.operator_station import ApprovedCommand
-        cmd = sess.command_from_operator_intent(
+        cmd = sess.turn_orchestrator.dispatch(sess, 
             OperatorIntent.from_dict(raw),
             "go straight for 3 steps",
         )

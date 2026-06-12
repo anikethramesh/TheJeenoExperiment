@@ -341,7 +341,7 @@ def _check_claims_filter(checks: dict[str, bool]) -> None:
         ranked = session.handle_utterance("rank all the doors by manhattan distance")
         checks["ranked_claims_written"] = session.active_claims is not None
 
-        proposal = session.command_from_operator_intent(
+        proposal = session.turn_orchestrator.dispatch(session, 
             OperatorIntent(
                 intent_type="unsupported",
                 capability_status="synthesizable",
@@ -386,6 +386,73 @@ def _check_claims_filter(checks: dict[str, bool]) -> None:
         )
 
 
+def _check_claims_filter_nlu(checks: dict[str, bool]) -> None:
+    """Verify threshold filter triggered by natural-language utterance (no intent injection).
+
+    The gap this closes: _check_claims_filter bypasses the NLU by calling
+    turn_orchestrator.dispatch() directly with a pre-built synthesizable intent.
+    This function tests the full path:
+      handle_utterance(threshold phrase) → classify_utterance regex →
+      OperatorIntent(claim_reference=threshold_filter) → dispatch →
+      synthesis proposal response.
+    """
+
+    class ThresholdSynthesizer:
+        def synthesize(self, handle, description, consumes, produces,
+                       existing_example=None, previous_code=None, validation_error=None):
+            from jeenom.primitive_synthesizer import SynthesisResult
+            function_name = handle.replace(".", "_")
+            code = (
+                f"def {function_name}(entries, condition):\n"
+                "    threshold = float(condition.get('threshold', 0))\n"
+                "    comparison = condition.get('comparison', 'above')\n"
+                "    if comparison == 'above':\n"
+                "        return [e for e in entries if e.distance > threshold]\n"
+                "    if comparison == 'below':\n"
+                "        return [e for e in entries if e.distance < threshold]\n"
+                "    if comparison == 'at_least':\n"
+                "        return [e for e in entries if e.distance >= threshold]\n"
+                "    if comparison in ('at_most', 'within'):\n"
+                "        return [e for e in entries if e.distance <= threshold]\n"
+                "    return [e for e in entries if e.distance > threshold]\n"
+            )
+            return SynthesisResult(handle=handle, function_name=function_name,
+                                   code=code, status="success")
+
+    session = _make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8, max_loops=512)
+    session.synthesizer = ThresholdSynthesizer()
+
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        # Seed ranked manhattan claims so the threshold filter has data to operate on
+        session.handle_utterance("rank all the doors by manhattan distance")
+
+        # NLU path: utterance → classify_utterance threshold regex → synthesizable → proposal
+        proposal_resp = session.handle_utterance(
+            "show me doors where manhattan distance is above 7"
+        )
+        checks["cf_nlu_utterance_produces_proposal"] = (
+            "SYNTHESIS" in proposal_resp.upper()
+            and session.pending_synthesis_proposal is not None
+        )
+        checks["cf_nlu_proposal_has_threshold_handle"] = (
+            session.pending_synthesis_proposal is not None
+            and "claims.filter.threshold.manhattan"
+            in (session.pending_synthesis_proposal.handle or "")
+        )
+
+        # Approve and verify filter executes and produces results
+        approved_resp = session.handle_utterance("yes")
+        checks["cf_nlu_approval_executes_filter"] = (
+            "ABOVE 7" in approved_resp.upper()
+            or "ABOVE 7.0" in approved_resp.upper()
+            or "FILTER" in approved_resp.upper()
+            or "MANHATTAN" in approved_resp.upper()
+        )
+        checks["cf_nlu_filter_registered_after_approval"] = (
+            session.capability_registry.lookup("claims.filter.threshold.manhattan") is not None
+        )
+
+
 def main() -> int:
     checks: dict[str, bool] = {}
 
@@ -399,6 +466,9 @@ def main() -> int:
 
     print("── Phase 7.9: Claims-Filter Synthesis ──")
     _check_claims_filter(checks)
+
+    print("── Phase 7.9: Claims-Filter NLU path ──")
+    _check_claims_filter_nlu(checks)
 
     print("\nCHECKS")
     for name, passed in checks.items():

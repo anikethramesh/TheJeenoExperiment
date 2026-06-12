@@ -18,8 +18,10 @@ flowchart LR
   TEST["Phase 11B hostile eval ladder<br>same flow under paraphrases"]
 
   subgraph ARCH["JEENOM WHAT"]
-    CX["Cortex<br>intent, plan, repair, synthesize, ask"]
-    MC["MissionContract / MissionExecutionPlan<br>compound mission lineage"]
+    TO["TurnOrchestrator<br>dispatch: 5 knowledge_type paths"]
+    IC["IntentCache<br>fast-path NLU (prim_def / concept_teach / forget)"]
+    CX["Cortex / LLM compiler + IntentVerifier<br>slow path: plan, repair, synthesize, ask"]
+    MC["MissionCortex<br>MissionContract / MissionExecutionPlan<br>compound mission lineage"]
     RG["ReadinessGraph<br>execute / ask / refuse / gather evidence"]
     KB["KnowledgeBase<br>claims + procedures + provenance"]
     SE["Sense<br>evidence requests -> observation claims"]
@@ -33,14 +35,17 @@ flowchart LR
   CTX --> SLICE
 
   OP -->|CorticalEnvelope| MSG
-  MSG -->|OperatorIntent / steering| CX
+  MSG --> TO
+  TO -->|fast path hit| IC --> TO
+  TO -->|slow path miss| CX --> TO
   SLICE -. "only for compile / repair / synthesis" .-> CX
-  CX -->|MissionContract when compound| MC
-  CX -->|RequestPlan when simple| RG
+  TO -->|knowledge_type=action + compound| MC
+  TO -->|knowledge_type=action simple / procedure / provenance| RG
   MC -->|RequestPlan + provenance| RG
   REG --> RG
   FP --> RG
   KB -->|claim/procedure snapshot| RG
+  TO -->|knowledge_type=claim/control (no plan needed)| MSG
   RG -->|ApprovedCommand + verdict| MSG
   MSG -->|CommandResult / clarification| OP
 

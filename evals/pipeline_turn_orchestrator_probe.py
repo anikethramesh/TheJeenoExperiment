@@ -76,6 +76,41 @@ def main() -> int:
         )
     )
 
+    # ── Op 3a: god-method extraction invariants ──────────────────────────────
+    import ast as _ast
+    from jeenom import operator_station as _os_mod
+
+    # 3a-1: command_from_operator_intent must not exist on OperatorStationSession
+    metrics["op3a_command_from_operator_intent_removed"] = not hasattr(
+        _os_mod.OperatorStationSession, "command_from_operator_intent"
+    )
+
+    # 3a-2: station AST has no direct calls to build_request_plan / evaluate_request_plan
+    station_tree = _ast.parse(station_source)
+    planner_calls = [
+        node.lineno
+        for node in _ast.walk(station_tree)
+        if isinstance(node, _ast.Call)
+        and isinstance(node.func, _ast.Attribute)
+        and node.func.attr in {"build_request_plan", "evaluate_request_plan"}
+    ]
+    metrics["op3a_station_has_no_direct_planner_calls"] = not planner_calls
+    details["op3a_station_planner_calls"] = planner_calls
+
+    # 3a-3: TurnOrchestrator has a dispatch method
+    from jeenom.turn_orchestrator import TurnOrchestrator as _TO
+    metrics["op3a_turn_orchestrator_has_dispatch"] = callable(
+        getattr(_TO, "dispatch", None)
+    )
+
+    # 3a-4: TurnOrchestrator holds cortex_session (dataclass field check)
+    import dataclasses as _dc
+    to_field_names = {f.name for f in _dc.fields(_TO)} if _dc.is_dataclass(_TO) else set()
+    metrics["op3a_turn_orchestrator_holds_cortex_session"] = (
+        "cortex_session" in to_field_names
+    )
+    details["op3a_turn_orchestrator_fields"] = sorted(to_field_names)
+
     metrics["phase10_turn_orchestrator_holds"] = all(metrics.values())
     return emit_result(metrics, details, pass_metric="phase10_turn_orchestrator_holds")
 

@@ -1502,22 +1502,6 @@ class SmokeTestCompiler(CompilerBackend):
                 reason=f"Deterministic motor command: {action_name} × {count}.",
             )
 
-        # Metric-definition pattern — before final unsupported fallback.
-        # Any utterance that looks like defining a named distance metric routes here.
-        _define_metric_pattern = re.compile(
-            r"(?:i\s+(?:want\s+to|would\s+like\s+to|need\s+to|'d\s+like\s+to)\s+)?"
-            r"(?:please\s+)?(?:define|make|create|synthesize|build)\s+"
-            r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric",
-            re.IGNORECASE,
-        )
-        if _define_metric_pattern.search(normalized):
-            return OperatorIntent(
-                intent_type="define_metric",
-                required_capabilities=[],
-                confidence=0.85,
-                reason="Deterministic fallback detected metric-definition request.",
-            )
-
         return OperatorIntent(
             intent_type="unsupported",
             target_selector=None,
@@ -1665,7 +1649,6 @@ class LLMCompiler(CompilerBackend):
                     "quit",
                     "accept_proposal",
                     "reject_proposal",
-                    "define_metric",
                     "unsupported",
                     "ambiguous",
                 ],
@@ -1880,15 +1863,6 @@ class LLMCompiler(CompilerBackend):
                 "'what do you remember' maps to status_query=concepts. "
                 "For status queries and claim references with no grounding or task "
                 "requirements, emit required_capabilities=[]. "
-                "DEFINE METRIC: When the operator wants to create, define, or build a new "
-                "named distance metric from a formula — for example: 'create a distance "
-                "metric called blagian which is euclidean plus manhattan', 'define a metric "
-                "called cityblock as euclidean plus manhattan', 'I want to make a new "
-                "metric named hyprid using euclidean and manhattan', 'build a metric called "
-                "X that combines euclidean and manhattan' — emit intent_type='define_metric' "
-                "with required_capabilities=[]. Do NOT populate primitive_definition; "
-                "the station will parse the formula from the original utterance. "
-                "Do NOT classify metric definitions as unsupported or task_instruction."
                 + (
                     " PENDING SYNTHESIS PROPOSAL: The station has proposed building a new "
                     "primitive and is awaiting operator approval. The pending proposal is in "

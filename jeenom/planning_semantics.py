@@ -4,7 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .minigrid_operational_context import MiniGridOperationalContext
+from typing import Callable
+
 from .schemas import OperationalContext, OperatorIntent
 
 
@@ -183,5 +184,19 @@ class PlanningSemantics:
         return signals
 
 
-def default_planning_semantics() -> PlanningSemantics:
-    return PlanningSemantics(MiniGridOperationalContext.default())
+# Domain factory registry — registered by the domain adapter at init.
+_DEFAULT_SEMANTICS_FACTORY: Callable[[], "PlanningSemantics"] | None = None
+
+
+def register_default_planning_semantics(factory: Callable[[], "PlanningSemantics"]) -> None:
+    global _DEFAULT_SEMANTICS_FACTORY
+    _DEFAULT_SEMANTICS_FACTORY = factory
+
+
+def default_planning_semantics() -> "PlanningSemantics":
+    if _DEFAULT_SEMANTICS_FACTORY is None:
+        raise RuntimeError(
+            "No default planning semantics registered. "
+            "Call register_default_planning_semantics() before using the planner."
+        )
+    return _DEFAULT_SEMANTICS_FACTORY()

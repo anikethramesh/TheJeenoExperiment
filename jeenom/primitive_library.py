@@ -338,7 +338,7 @@ CLAIMS_FILTER_PRIMITIVES: dict[str, PrimitiveSpec] = {
         consumes=("active_claims.ranked_scene_doors", "condition"),
         produces=("filtered_entries",),
         description=(
-            "Filter euclidean-ranked GroundedDoorEntry claims by a distance threshold. "
+            "Filter euclidean-ranked GroundedObjectEntry claims by a distance threshold. "
             "Parametric: fn(entries, condition) where condition carries threshold (float) "
             "and comparison ('above'|'below'|'within'|'at_least'|'at_most'). "
             "Only operates on typed ActiveClaims entries — never accesses SceneModel or env."
@@ -351,7 +351,7 @@ CLAIMS_FILTER_PRIMITIVES: dict[str, PrimitiveSpec] = {
         consumes=("active_claims.ranked_scene_doors", "condition"),
         produces=("filtered_entries",),
         description=(
-            "Filter manhattan-ranked GroundedDoorEntry claims by a distance threshold. "
+            "Filter manhattan-ranked GroundedObjectEntry claims by a distance threshold. "
             "Parametric: fn(entries, condition) where condition carries threshold (float) "
             "and comparison ('above'|'below'|'within'|'at_least'|'at_most'). "
             "Only operates on typed ActiveClaims entries — never accesses SceneModel or env."

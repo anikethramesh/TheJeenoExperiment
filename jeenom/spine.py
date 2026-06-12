@@ -6,6 +6,7 @@ from .command_registry import DIRECT_ACTION_SKILLS, canonical_primitives_for_ski
 from .plan_cache import skill_key
 from .primitive_library import ACTION_PRIMITIVES
 from .schemas import ExecutionContext, ExecutionReport, PrimitiveCall, SkillPlanTemplate
+from .sense import _TRAVERSE_TO_ADJACENT
 
 
 DIR_TO_VEC = {
@@ -271,7 +272,7 @@ class MiniGridSpine:
 
     def _navigation_goals(self, target_location, target_type, passable_positions, grid_size):
         width, height = grid_size
-        if target_type == "door":
+        if target_type in _TRAVERSE_TO_ADJACENT:
             neighbors = []
             tx, ty = target_location
             for dx, dy in DIR_TO_VEC.values():

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from minigrid.core.constants import IDX_TO_COLOR, IDX_TO_OBJECT
-
 from .plan_cache import sense_key
 from .primitive_library import SENSING_PRIMITIVES
 from .schemas import (
@@ -12,6 +10,34 @@ from .schemas import (
     SensePlanTemplate,
     WorldModelSample,
 )
+
+# Domain index maps — registered by the domain adapter at init.
+_IDX_TO_OBJECT: dict[int, str] = {}
+_IDX_TO_COLOR: dict[int, str] = {}
+# Object types whose state==0 means "open and passable" (domain-specific passability rule).
+_OPEN_STATE_PASSABLE: frozenset[str] = frozenset()
+# Object types where adjacency means distance==1 (stand next to, not on) and
+# navigation targets a neighbour cell rather than the object cell itself.
+_TRAVERSE_TO_ADJACENT: frozenset[str] = frozenset()
+
+
+def register_domain_index_maps(
+    object_index: dict[int, str],
+    color_index: dict[int, str],
+) -> None:
+    global _IDX_TO_OBJECT, _IDX_TO_COLOR
+    _IDX_TO_OBJECT = object_index
+    _IDX_TO_COLOR = color_index
+
+
+def register_open_state_passable(types: frozenset[str]) -> None:
+    global _OPEN_STATE_PASSABLE
+    _OPEN_STATE_PASSABLE = types
+
+
+def register_traverse_to_adjacent(types: frozenset[str]) -> None:
+    global _TRAVERSE_TO_ADJACENT
+    _TRAVERSE_TO_ADJACENT = types
 
 
 class MiniGridSense:
@@ -275,8 +301,8 @@ class MiniGridSense:
         for x in range(width):
             for y in range(height):
                 object_idx, color_idx, state_idx = [int(v) for v in image[x][y]]
-                object_type = IDX_TO_OBJECT.get(object_idx, "unknown")
-                color = IDX_TO_COLOR.get(color_idx)
+                object_type = _IDX_TO_OBJECT.get(object_idx, "unknown")
+                color = _IDX_TO_COLOR.get(color_idx)
                 state = state_idx
 
                 if object_type == "agent":
@@ -308,10 +334,10 @@ class MiniGridSense:
         for x in range(width):
             for y in range(height):
                 object_idx, _, state_idx = [int(v) for v in sample.raw_image[x][y]]
-                object_type = IDX_TO_OBJECT.get(object_idx, "unknown")
+                object_type = _IDX_TO_OBJECT.get(object_idx, "unknown")
 
                 passable = object_type in {"empty", "floor", "goal", "agent"}
-                if object_type == "door" and int(state_idx) == 0:
+                if object_type in _OPEN_STATE_PASSABLE and int(state_idx) == 0:
                     passable = True
 
                 occupancy_grid[y][x] = passable
@@ -361,7 +387,7 @@ class MiniGridSense:
         if target_type is None and sample.target_object is not None:
             target_type = sample.target_object.get("type")
 
-        if target_type == "door":
+        if target_type in _TRAVERSE_TO_ADJACENT:
             sample.adjacency_to_target = distance == 1
         else:
             sample.adjacency_to_target = distance == 0

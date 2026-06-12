@@ -33,7 +33,7 @@ from jeenom.schemas import (
     ExecutionContext,
     ExecutionContract,
     ArbitrationDecision,
-    GroundedDoorEntry,
+    GroundedObjectEntry,
     OperatorIntent,
     Percepts,
     PrimitiveCall,
@@ -2504,14 +2504,14 @@ class TestStationActiveClaims(unittest.TestCase):
         self.assertGreater(len(session.active_claims.ranked_scene_doors), 0)
 
     def test_claims_last_grounded_target_is_set(self):
-        """After closest grounding, last_grounded_target must be a GroundedDoorEntry."""
+        """After closest grounding, last_grounded_target must be a GroundedObjectEntry."""
         session = self._make_session()
         self._run_with_env(lambda: session.handle_utterance("go to the red door"))
         self._run_with_env(lambda: session.handle_utterance(
             "which door is closest by manhattan distance"
         ))
         self.assertIsNotNone(session.active_claims)
-        self.assertIsInstance(session.active_claims.last_grounded_target, GroundedDoorEntry)
+        self.assertIsInstance(session.active_claims.last_grounded_target, GroundedObjectEntry)
 
     def test_claims_last_grounded_rank_is_zero(self):
         """The first grounded target must have rank 0."""
@@ -2637,7 +2637,7 @@ class TestStationActiveClaims(unittest.TestCase):
             summary={"objects": []},
         )
         env_b = EnvironmentIdentity.from_dict({**env_a.as_dict(), "seed": 43})
-        entry = GroundedDoorEntry(color="red", x=2, y=2, distance=2)
+        entry = GroundedObjectEntry(color="red", x=2, y=2, distance=2)
         claims = StationActiveClaims(
             scene_fingerprint=(1, 1, 0),
             ranked_scene_doors=[entry],
@@ -2670,7 +2670,7 @@ class TestStationActiveClaims(unittest.TestCase):
             task_family="go_to_object",
             summary={"objects": []},
         )
-        entry = GroundedDoorEntry(color="red", x=2, y=2, distance=2)
+        entry = GroundedObjectEntry(color="red", x=2, y=2, distance=2)
         claims = StationActiveClaims(
             scene_fingerprint=(1, 1, 0),
             ranked_scene_doors=[entry],
@@ -3008,7 +3008,7 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
         self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT", ranked)
         self.assertIsNotNone(session.active_claims)
 
-        proposal = session.command_from_operator_intent(
+        proposal = session.turn_orchestrator.dispatch(session, 
             self._threshold_intent(),
             "go to the door where manhattan distance is above 7",
         )
@@ -3045,7 +3045,7 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
             reason="Arbitrator must recover threshold condition.",
             required_capabilities=["claims.filter.threshold.manhattan"],
         )
-        proposal = session.command_from_operator_intent(
+        proposal = session.turn_orchestrator.dispatch(session, 
             intent,
             "go to a door which has a manhattan distance above 7",
         )
@@ -3070,7 +3070,7 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
         )
         self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT", ranked)
 
-        proposal = session.command_from_operator_intent(
+        proposal = session.turn_orchestrator.dispatch(session, 
             self._threshold_intent(
                 distance_value=8,
                 comparison="below",
@@ -3118,7 +3118,7 @@ class TestClaimsFilterPrimitiveSynthesis(unittest.TestCase):
             required_capabilities=["grounding.all_doors.ranked.euclidean.agent"],
         )
 
-        command = session.command_from_operator_intent(
+        command = session.turn_orchestrator.dispatch(session, 
             intent,
             "can you rank the distances based on euclidean distance",
         )
@@ -3537,7 +3537,7 @@ class JeenomPhase795RequestPlanTests(unittest.TestCase):
             verbose=False,
         )
         intent = self._threshold_intent()
-        _ = session.command_from_operator_intent(
+        _ = session.turn_orchestrator.dispatch(session, 
             intent,
             "go to the door with the highest Euclidean distance below 10",
         )
@@ -3617,7 +3617,7 @@ class JeenomPhase795RequestPlanTests(unittest.TestCase):
             verbose=False,
         )
         session.current_environment_identity = self._environment_identity()
-        _ = session.command_from_operator_intent(
+        _ = session.turn_orchestrator.dispatch(session, 
             self._direct_red_door_intent(),
             "go to the red door",
         )
@@ -3695,7 +3695,7 @@ class JeenomPhase9BSubstrateContractTests(unittest.TestCase):
         )
 
     def _claims(self, *, confidence=1.0, frame_id="map"):
-        entry = GroundedDoorEntry(color="red", object_type="door", x=1, y=1, distance=1)
+        entry = GroundedObjectEntry(color="red", object_type="door", x=1, y=1, distance=1)
         return StationActiveClaims(
             scene_fingerprint=(0, 0, 0),
             ranked_scene_doors=[entry],

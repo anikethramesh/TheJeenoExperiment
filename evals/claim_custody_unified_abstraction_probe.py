@@ -54,7 +54,7 @@ from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.operator_station import OperatorStationSession
 from jeenom.schemas import (
     CLAIM_SCOPES,
-    GroundedDoorEntry,
+    GroundedObjectEntry,
     SceneModel,
     SceneObject,
     StationActiveClaims,
@@ -70,7 +70,7 @@ def _make_kb() -> KnowledgeBase:
 
 
 def _make_dummy_active_claims(agent_x: int = 1, agent_y: int = 1, step_count: int = 0) -> StationActiveClaims:
-    door = GroundedDoorEntry(color="red", x=3, y=3, distance=4.0, metric="manhattan")
+    door = GroundedObjectEntry(color="red", x=3, y=3, distance=4.0, metric="manhattan")
     return StationActiveClaims(
         scene_fingerprint=(agent_x, agent_y, step_count),
         ranked_scene_doors=[door],

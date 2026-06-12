@@ -104,14 +104,14 @@ def _plan_requiring_claims():
 
 
 def _active_claims():
-    from jeenom.schemas import GroundedDoorEntry, StationActiveClaims
+    from jeenom.schemas import GroundedObjectEntry, StationActiveClaims
 
     return StationActiveClaims(
         scene_fingerprint=(1, 1, 0),
         ranked_scene_doors=[
-            GroundedDoorEntry(color="red", x=2, y=2, distance=2, metric="manhattan")
+            GroundedObjectEntry(color="red", x=2, y=2, distance=2, metric="manhattan")
         ],
-        last_grounded_target=GroundedDoorEntry(
+        last_grounded_target=GroundedObjectEntry(
             color="red", x=2, y=2, distance=2, metric="manhattan"
         ),
         last_grounded_rank=0,

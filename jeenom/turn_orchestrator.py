@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .capability_matcher import default_matcher
 from .schemas import (
     ApprovedCommand,
     CorticalEnvelope,
@@ -10,7 +12,35 @@ from .schemas import (
     PrimitiveDefinitionRequest,
     ReadinessGraph,
     RequestPlan,
+    RequestPlanStep,
 )
+
+
+def _approved(
+    command_type: str,
+    utterance: str = "",
+    message: str | None = None,
+    payload: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> ApprovedCommand:
+    p = payload if payload is not None else ({"message": message} if message is not None else {})
+    return ApprovedCommand(command_type=command_type, utterance=utterance, payload=p, **kwargs)
+
+
+def _normalize_utterance(utterance: str) -> str:
+    text = " ".join(utterance.lower().strip().split())
+    text = re.sub(r"[?!]+$", "", text)
+    text = re.sub(r"[.,;:]+", " ", text)
+    text = " ".join(text.split())
+    while True:
+        stripped = re.sub(
+            r"^(?:ok|okay|alright|right|so|well|now|first|then)\s+",
+            "",
+            text,
+        )
+        if stripped == text:
+            return text
+        text = stripped
 
 
 @dataclass
@@ -57,13 +87,455 @@ class TurnOrchestrator:
     classify_utterance: Callable[[str], ApprovedCommand]
     normalize_utterance: Callable[[str], str]
     looks_like_bare_label: Callable[[str], bool]
+    cortex_session: Any = None
+    mission_cortex: Any = None
+    intent_cache: Any = None
     pending_clarification: PendingClarification | None = None
     pending_synthesis_proposal: PendingSynthesisProposal | None = None
     pending_primitive_definition: PendingPrimitiveDefinition | None = None
 
-    def handle_utterance_text(self, station: Any, utterance: str) -> str:
+    def dispatch(self, station: Any, intent: Any, utterance: str) -> ApprovedCommand:
+        # Reset per-turn so stale values from previous turns are never observed.
+        station.last_readiness_graph = None
         station.last_repair_events = []
         station.last_operational_mismatches = []
+
+        # ── Proactive Intent Signal Verification (Phase 7.595) ───────────────
+        # Runs unconditionally on ALL LLM outputs before any routing.
+        # Blueprint Rule 9: deterministic gate between compiler output and
+        # CapabilityMatcher — regardless of what the LLM declared.
+        intent, verif_result = station.intent_verifier.enrich(utterance, intent)
+        promoted_intent = station._promote_verified_query_intent(
+            utterance,
+            intent,
+            verif_result,
+        )
+        if promoted_intent is not intent:
+            station.log(
+                "intent verifier promoted unresolved utterance to "
+                f"{promoted_intent.intent_type}"
+            )
+            intent = promoted_intent
+        station.last_operator_intent = intent
+        if verif_result.injected_handles:
+            station.log(f"intent verifier injected: {verif_result.summary()}")
+        if verif_result.inversion_detected:
+            station.log(f"intent verifier blocked inversion: {verif_result.inversion_reason}")
+            return _approved("ambiguous", utterance, (
+                    "Semantic inversion detected in compiled plan: "
+                    f"{verif_result.inversion_reason} "
+                    "Please rephrase."
+                ))
+
+        # ── Request plan recording (all non-control intents) ─────────────────
+        request_plan_recorded = False
+        if intent.grounding_query_plan is not None:
+            station._record_request_plan(utterance, intent)
+            request_plan_recorded = True
+            plan_command = station._command_from_grounding_query_plan(utterance, intent)
+            if plan_command is not None:
+                return plan_command
+
+        if not request_plan_recorded:
+            station._record_request_plan(utterance, intent)
+
+        # ── Intent Readiness Requirement Matching (Phase 7.59) ────────────────
+        # Runs for claim/provenance/action; skipped for procedure/control which own
+        # their own readiness semantics (knowledge ops need no capability gate).
+        knowledge_type = intent.knowledge_type
+        cap_match = default_matcher.match(intent, station.capability_registry)
+        if knowledge_type not in {"procedure", "control"}:
+            composition_command = station._try_compose_grounding_result(
+                utterance,
+                intent,
+                cap_match,
+                verif_result,
+            )
+            if composition_command is not None:
+                return composition_command
+            if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
+                return station._arbitrate_gap(utterance, intent, cap_match)
+
+            if intent.target_selector is not None and intent.capability_status in {
+                "needs_clarification",
+                "missing_skills",
+                "synthesizable",
+            }:
+                if intent.capability_status == "needs_clarification":
+                    grounded = station.ground_target_selector(intent.target_selector)
+                    # resume_kind derived from knowledge_type — no intent_type comparison needed
+                    resume_kind = (
+                        "task_instruction" if knowledge_type == "action"
+                        else "knowledge_update" if knowledge_type == "provenance"
+                        else "ground_target_query"
+                    )
+                    clarification = station.maybe_start_selector_clarification(
+                        utterance=utterance,
+                        resume_kind=resume_kind,
+                        grounded=grounded,
+                    )
+                    if clarification is not None:
+                        return clarification
+                readiness_command = station.command_from_selector_readiness(
+                    intent.target_selector,
+                    utterance,
+                )
+                if readiness_command is not None:
+                    return readiness_command
+
+        # ── Knowledge-type dispatch (5 paths, no intent_type comparisons) ────
+        if knowledge_type == "claim":
+            return self._handle_claim(station, intent, utterance, cap_match)
+        if knowledge_type == "procedure":
+            return self._handle_procedure(station, intent, utterance)
+        if knowledge_type == "provenance":
+            return self._handle_provenance(station, intent, utterance)
+        if knowledge_type == "action":
+            return self._handle_action(station, intent, utterance, cap_match)
+        return self._handle_control(station, intent, utterance, cap_match)
+
+    # ── Knowledge-type sub-handlers ──────────────────────────────────────────
+
+    def _handle_claim(
+        self, station: Any, intent: Any, utterance: str, cap_match: Any
+    ) -> ApprovedCommand:
+        if intent.intent_type == "cache_query":
+            return ApprovedCommand(command_type="cache_query", utterance=utterance)
+
+        if intent.intent_type == "status_query":
+            if intent.status_query == "ground_target" and intent.target_selector is not None:
+                return _approved("ground_target_query", utterance, payload={"target_selector": intent.target_selector})
+            return _approved("status_query", utterance, payload={"query": intent.status_query or "status"})
+
+        if intent.intent_type == "claim_reference":
+            if intent.claim_reference == "threshold_filter":
+                # Route through capability matching → arbitration → synthesis pipeline.
+                if cap_match.verdict in {"synthesizable", "missing_skills"}:
+                    return station._arbitrate_gap(utterance, intent, cap_match)
+                return station._dispatch_claims_filter(utterance, intent, cap_match)
+            return _approved("claim_reference", utterance, payload={"ref_type": intent.claim_reference or ""})
+
+        if intent.intent_type == "metric_query":
+            metric = (intent.status_query or "").strip()
+            if not metric:
+                return ApprovedCommand(command_type="unsupported", utterance=utterance)
+            return _approved("metric_query", utterance, payload={"metric": metric})
+
+        return ApprovedCommand(command_type="unsupported", utterance=utterance)
+
+    def _handle_procedure(
+        self, station: Any, intent: Any, utterance: str
+    ) -> ApprovedCommand:
+        if intent.intent_type == "concept_teach":
+            name = (intent.concept_name or "").strip()
+            expansion = (intent.concept_utterance or "").strip()
+            if not name or not expansion:
+                return _approved("clarification", utterance, "Please specify both a name and an instruction for the concept.")
+            return _approved("concept_teach", utterance, payload={"name": name, "utterance": expansion})
+
+        if intent.intent_type == "concept_recall":
+            name = (intent.concept_name or "").strip()
+            if not name:
+                return _approved("clarification", utterance, "Please specify the concept name to recall.")
+            concept = station.knowledge_base.recall(name)
+            if concept is None:
+                return ApprovedCommand(
+                    kind="clarification",
+                    utterance=utterance,
+                    payload={
+                        "message": (
+                            f"I don't know a concept named '{name}'.\n"
+                            f"To teach it, say: remember {name} means <full instruction>"
+                        )
+                    },
+                )
+            if concept.concept_type == "procedure":
+                return _approved("procedure_execute", utterance, payload={"steps": list(concept.steps)})
+            expanded = concept.utterance
+            station.log(f"concept_recall: '{name}' → '{expanded}'")
+            return ApprovedCommand(command_type="task_instruction", utterance=expanded)
+
+        if intent.intent_type == "procedure_recall":
+            steps = list(intent.concept_steps or [])
+            if not steps:
+                return _approved("clarification", utterance, "Please specify the concept names to execute in sequence.")
+            station.log(f"procedure_recall: steps={steps}")
+            return _approved("procedure_execute", utterance, payload={"steps": steps})
+
+        if intent.intent_type == "sequence_instruction":
+            usteps = list(intent.utterance_steps or [])
+            if not usteps:
+                return _approved("clarification", utterance, "Please specify the task steps to execute in sequence.")
+            station.log(f"sequence_instruction: steps={usteps}")
+            return _approved("sequence_execute", utterance, payload={"steps": usteps})
+
+        return ApprovedCommand(command_type="unsupported", utterance=utterance)
+
+    def _handle_provenance(
+        self, station: Any, intent: Any, utterance: str
+    ) -> ApprovedCommand:
+        if intent.intent_type == "knowledge_update":
+            question_command = station._question_override_command(utterance)
+            if question_command is not None:
+                station.log("question-shaped utterance overrode knowledge_update intent")
+                return question_command
+            update = intent.knowledge_update or {}
+            delivery_target = update.get("delivery_target")
+            if delivery_target is None and intent.target_selector is not None:
+                readiness_command = station.command_from_selector_readiness(
+                    intent.target_selector,
+                    utterance,
+                )
+                if readiness_command is not None:
+                    return readiness_command
+                grounded = station.ground_target_selector(intent.target_selector)
+                if not grounded["ok"]:
+                    clarification = station.maybe_start_selector_clarification(
+                        utterance=utterance,
+                        resume_kind="knowledge_update",
+                        grounded=grounded,
+                    )
+                    if clarification is not None:
+                        return clarification
+                    return _approved("ambiguous", utterance, grounded["message"])
+                target = grounded["target"]
+                return ApprovedCommand(
+                    kind="knowledge_update",
+                    utterance=utterance,
+                    payload={
+                        "target_color": target["color"],
+                        "target_type": target["type"],
+                        "delivery_target": {
+                            "color": target["color"],
+                            "object_type": target["type"],
+                        },
+                    },
+                )
+            if delivery_target is None and intent.knowledge_update is not None:
+                return ApprovedCommand(
+                    kind="knowledge_update",
+                    utterance=utterance,
+                    payload={
+                        "target_color": None,
+                        "target_type": None,
+                        "delivery_target": None,
+                    },
+                )
+            if not isinstance(delivery_target, dict):
+                return ApprovedCommand(command_type="unsupported", utterance=utterance)
+            return ApprovedCommand(
+                kind="knowledge_update",
+                utterance=utterance,
+                payload={
+                    "target_color": delivery_target["color"],
+                    "target_type": delivery_target["object_type"],
+                    "delivery_target": {
+                        "color": delivery_target["color"],
+                        "object_type": delivery_target["object_type"],
+                    },
+                },
+            )
+
+        if intent.intent_type == "primitive_definition":
+            if intent.primitive_definition is None:
+                return ApprovedCommand(command_type="unsupported", utterance=utterance)
+            return _approved(
+                "primitive_definition",
+                utterance,
+                payload={"definition": intent.primitive_definition.as_dict()},
+            )
+
+        return ApprovedCommand(command_type="unsupported", utterance=utterance)
+
+    def _handle_action(
+        self, station: Any, intent: Any, utterance: str, cap_match: Any
+    ) -> ApprovedCommand:
+        if intent.intent_type == "motor_command":
+            action = (intent.action_name or "").strip()
+            count = max(1, intent.repeat_count or 1)
+            if not action:
+                return _approved("clarification", utterance, "Please specify which motor action to perform.")
+            station.log(f"motor_command: action={action} count={count}")
+            return _approved("motor_execute", utterance, payload={"action": action, "count": count})
+
+        if intent.intent_type == "motor_sequence":
+            sequence: list[dict[str, Any]] = []
+            for step in (intent.utterance_steps or []):
+                parts = step.split(":", 1)
+                if len(parts) != 2:
+                    continue
+                action_name, count_str = parts
+                try:
+                    action_count = max(1, int(count_str))
+                except ValueError:
+                    continue
+                sequence.append({"action": action_name, "count": action_count})
+            if len(sequence) < 2:
+                return _approved("clarification", utterance, "Could not parse motor sequence steps.")
+            station.log(f"motor_sequence: {len(sequence)} actions")
+            return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
+
+        if intent.intent_type == "conditional_sense_motor":
+            import uuid
+            cond_plan = RequestPlan(
+                request_id=f"conditional_sense_motor:{str(uuid.uuid4())[:8]}",
+                original_utterance=utterance,
+                objective_type="control",
+                objective_summary="Conditional motor: sense environment before actuation.",
+                steps=[
+                    RequestPlanStep(
+                        step_id="sense_condition",
+                        layer="sensing",
+                        operation="execute",
+                        inputs={"query": "scene"},
+                        outputs=["sense.front_cell"],
+                    ),
+                    RequestPlanStep(
+                        step_id="conditional_execute_motor",
+                        layer="action",
+                        operation="refuse",
+                        depends_on=["sense_condition"],
+                        inputs={"condition": utterance},
+                    ),
+                ],
+                expected_response="ask_clarification",
+            )
+            cond_graph = self.cortex_session.evaluate(
+                cond_plan,
+                active_claims=station.active_claims,
+                claims_valid=station._claims_valid_for_current_environment(),
+                environment_identity=station.current_environment_identity,
+            )
+            station.last_request_plan = cond_plan
+            station.last_readiness_graph = cond_graph
+            return _approved(
+                "clarification",
+                utterance,
+                "Conditional motor command requires Sense evidence before actuation. "
+                "Please confirm the condition and the fallback action.",
+            )
+
+        if intent.intent_type == "mission_contract":
+            steps = list(intent.mission_steps or [])
+            if len(steps) < 2:
+                return _approved("clarification", utterance, "A mission requires at least 2 task steps.")
+            station.log(f"mission_contract: {len(steps)} steps")
+            return _approved("mission_execute", utterance, payload={"steps": steps})
+
+        if intent.intent_type == "task_instruction":
+            if intent.reference == "delivery_target":
+                instruction = "go to the delivery target"
+            elif intent.reference == "last_target":
+                instruction = "go there again"
+            elif intent.reference == "last_task":
+                instruction = "repeat the last task"
+            elif intent.target_selector is not None:
+                readiness_command = station.command_from_selector_readiness(
+                    intent.target_selector,
+                    utterance,
+                )
+                if readiness_command is not None:
+                    return readiness_command
+                grounded = station.ground_target_selector(intent.target_selector)
+                if not grounded["ok"]:
+                    if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
+                        arb_command = station._arbitrate_gap(utterance, intent, cap_match)
+                        if arb_command.kind in {
+                            "synthesis_proposal", "missing_skills", "synthesizable",
+                        }:
+                            return arb_command
+                    clarification = station.maybe_start_selector_clarification(
+                        utterance=utterance,
+                        resume_kind="task_instruction",
+                        grounded=grounded,
+                    )
+                    if clarification is not None:
+                        return clarification
+                    return _approved("ambiguous", utterance, grounded["message"])
+                target = grounded["target"]
+                instruction = f"go to the {target['color']} {target['type']}"
+            elif isinstance(intent.target, dict):
+                if "closest" in _normalize_utterance(utterance):
+                    return ApprovedCommand(
+                        kind="ambiguous",
+                        utterance=utterance,
+                        payload={
+                            "message": (
+                                "I need a valid target selector to ground closest. "
+                                "I did not execute."
+                            )
+                        },
+                    )
+                color = intent.target.get("color")
+                object_type = intent.target.get("object_type")
+                if not color or object_type != "door" or intent.task_type != "go_to_object":
+                    return ApprovedCommand(command_type="unsupported", utterance=utterance)
+                instruction = intent.canonical_instruction or f"go to the {color} {object_type}"
+            else:
+                return ApprovedCommand(command_type="unsupported", utterance=utterance)
+            return ApprovedCommand(command_type="task_instruction", utterance=instruction)
+
+        return ApprovedCommand(command_type="unsupported", utterance=utterance)
+
+    def _handle_control(
+        self, station: Any, intent: Any, utterance: str, cap_match: Any
+    ) -> ApprovedCommand:
+        if intent.intent_type in {"accept_proposal", "reject_proposal"}:
+            return ApprovedCommand(command_type=intent.intent_type, utterance=utterance)
+
+        if intent.intent_type == "quit":
+            return ApprovedCommand(command_type="quit", utterance=utterance)
+
+        if intent.intent_type == "reset":
+            return _approved("reset", utterance, payload={"clear_memory": bool(intent.clear_memory)})
+
+        if intent.intent_type == "concept_forget":
+            cname = (intent.concept_name or "").strip().strip("'\"")
+            if not cname:
+                return _approved("clarification", utterance, "Please specify the concept name to forget.")
+            return _approved("concept_forget", utterance, payload={"name": cname})
+
+        if intent.intent_type in {"unsupported", "ambiguous"}:
+            # Pure semantic/schema failure (no declared capabilities) → plain error.
+            # Reserve arbitration for intents where the LLM identified a capability but
+            # the registry says it is missing or synthesizable.
+            if not intent.required_capabilities and not cap_match.missing:
+                reason = intent.reason or "I could not understand that request."
+                if intent.intent_type == "unsupported" and "unsupported" in reason.lower():
+                    return ApprovedCommand(
+                        kind="unsupported",
+                        utterance=utterance,
+                        payload={
+                            "message": (
+                                "I cannot safely execute that capability yet. "
+                                f"{reason}"
+                            )
+                        },
+                    )
+                reason = intent.reason or "I could not understand that request."
+                return _approved("clarification", utterance, f"I didn't understand that: {reason}")
+            return station._arbitrate_gap(utterance, intent, cap_match)
+
+        return ApprovedCommand(command_type="unsupported", utterance=utterance)
+
+    def handle_utterance_text(self, station: Any, utterance: str) -> str:
+        from .schemas import OperatorIntent as _OI
+
+        station.last_repair_events = []
+        station.last_operational_mismatches = []
+
+        # IntentCache fast path: regex patterns that produce OperatorIntent and route
+        # through dispatch (IntentVerifier + knowledge-type routing) just like LLM intents.
+        if self.intent_cache is not None:
+            cached = self.intent_cache.lookup(utterance)
+            if cached is not None:
+                if isinstance(cached, _OI):
+                    station.log(f"intent cache hit: {cached.intent_type}")
+                    command = self.dispatch(station, cached, utterance)
+                else:
+                    # ApprovedCommand from cache (error cases, e.g. unsafe formula)
+                    command = cached
+                return self.execute_command(station, command)
 
         command = self.classify_utterance(utterance)
         if getattr(station, "pending_primitive_definition", None) is not None:

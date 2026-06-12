@@ -136,7 +136,7 @@ def main() -> int:
     # ── Station routing ────────────────────────────────────────────────────────
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         sess = _make_session()
-        cmd = sess.command_from_operator_intent(
+        cmd = sess.turn_orchestrator.dispatch(sess, 
             OperatorIntent.from_dict(raw),
             "mission: go to the red door; go to the blue door",
         )

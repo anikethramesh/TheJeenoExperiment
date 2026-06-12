@@ -180,7 +180,7 @@ def _check_matcher(checks: dict[str, bool]) -> None:
         capability_status="executable",
         confidence=0.9,
     )
-    cmd = _run(lambda: session.command_from_operator_intent(intent_override, "test"))
+    cmd = _run(lambda: session.turn_orchestrator.dispatch(session, intent_override, "test"))
     checks["matcher_overrides_llm_executable"] = cmd.kind == "missing_skills"
 
     # 10. Lookup exact match

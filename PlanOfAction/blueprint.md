@@ -324,11 +324,13 @@ ARC-AGI3:
 - HOW: ARC game-state API, legal action API, state parser, replay/simulation
   tools, scoring/end-state feedback.
 
-## Current Repo Shape After Phase 11A
+## Current Repo Shape After Phase 11C
 
 The implementation now enforces the cortical control-plane objects, the
-block/schema/knowledge boundary gates, the substrate HOW boundary, and the first
-Cortex-owned compound mission flow.
+block/schema/knowledge boundary gates, the substrate HOW boundary, Cortex-owned
+compound mission flow, and the full Phase 11C architecture surgery outcomes.
+
+**Verification:** 60/60 evals passing.
 
 Current enforced gateways:
 
@@ -337,7 +339,9 @@ Current enforced gateways:
 - Task execution requires `ExecutionTicket`.
 - Raw motor execution requires `RawMotorTicket`.
 - Durable knowledge writes require `MemoryWriteTicket`.
-- `ClaimRecord` is the minimal common claim wrapper.
+- `ClaimRecord` is the minimal common claim wrapper (with `confidence`,
+  `valid_until`, `authority`, `scope`, `provenance`, `freshness`,
+  `invalidation`).
 - `KnowledgeSnapshot` lets readiness consume typed knowledge state.
 - `RepresentationStore` wraps existing `OperationalMemory` and `KnowledgeBase`.
 - Station active grounding claims are representation-backed.
@@ -360,6 +364,27 @@ Current enforced gateways:
   continuation intent/plan/graph, provenance, and child execution tickets.
 - `ExecutionTicket` carries optional `mission_id`, `parent_request_id`, and
   provenance so final actuation can explain the full mission lineage.
+- **[11C]** `TurnOrchestrator.dispatch` routes via 5 `knowledge_type` paths
+  (`claim` / `procedure` / `provenance` / `action` / `control`); no
+  `intent_type` if/elif chain.
+- **[11C]** `IntentCache` (`jeenom/intent_cache.py`) holds all fast-path NLU
+  patterns. `classify_utterance` has zero inline `re.compile` calls. Fast-path
+  intents run `IntentVerifier` + dispatch identically to LLM-compiled intents.
+- **[11C]** Domain vocabulary registered at runtime via
+  `register_domain_vocabulary()`; `schemas.py` contains no hardcoded `"door"`
+  comparisons in validator logic.
+- **[11C]** `class Readiness` deleted from `cortex.py`. The sole readiness gate
+  is `ReadinessGraph` via `CortexSession`. `Cortex.onboard_task` returns a
+  minimal always-executable `ReadinessReport` (real gate is upstream).
+- **[11C]** `MissionCortex` is provably one-directional (imports readiness_graph,
+  request_planner, and schemas; does not import Cortex, CortexSession, or
+  TurnOrchestrator).
+- **[11C]** `PrimitiveSpec.postcondition_primitive`, `ClaimRecord.valid_until`,
+  `MissionContract.risk_tier` / `cadence`, `CommandResult.failure_outcome`, and
+  `FailureOutcome` dataclass are in `schemas.py`.
+- **[11C]** Eval naming contract enforced: all 60 probes use capability-based
+  prefixes (`authority_`, `claim_custody_`, `intent_fidelity_`, `pipeline_`,
+  `regression_`, `repair_`, `substrate_`, `synthesis_`).
 
 Current architectural debt:
 
@@ -367,26 +392,22 @@ Current architectural debt:
   - `OperatorStationSession` is still a large facade over orchestration,
     conversation, MiniGrid substrate bindings, query formatting,
     repair/synthesis, memory writes, and task runtime.
-  - Sense, Cortex, ReadinessGraph, and station paths can still see each other's
-    concrete fields in places.
   - Mission flow is now Cortex-owned for inline derived metric tasks, but other
     historical mission/procedure paths still need the same treatment before repo
     liposuction.
-- Eval honesty debt:
-  - Current green evals still overfit known phrases. They do not yet prove that
-    paraphrases like "how far are the doors from you" and "show me the door
-    distances" route to the same ranked-distance query.
-  - Low-level Sense prompts such as "what is in front of me" are not yet guarded
-    by hostile evals.
-  - Low-level Spine paraphrases such as "advance one cell" and "step ahead" are
-    not yet guarded by hostile evals.
-  - Conditional actuation can still look like a raw motor command unless a
-    hostile eval forces Sense evidence before Spine authority.
-  - Multi-action motor/procedure requests can lose parent/child lineage unless a
-    hostile eval requires all child actions and tickets to survive.
-  - Named procedure/macro teaching can still produce false success unless evals
-    require a typed knowledge/procedure update plan and representation
-    provenance.
+- Eval honesty debt (Phase 11B exposed, not yet fully green):
+  - Low-level Sense paraphrases ("what is in front of me") are unsupported.
+  - Some low-level Spine paraphrases ("advance one cell") are unsupported.
+  - Distance-query paraphrases only work when trigger words like "all" or "each"
+    are present.
+  - Named procedure teaching can store a concept without a typed memory-update
+    RequestPlan.
+  - Multi-action motor/procedure prompts can preserve only the final child action
+    in the current plan/ticket state.
+  - Conditional actuation can execute raw motor motion before evidence proves
+    the condition.
+  - Compound mission paraphrases beyond the exact 11A inline sum phrase do not
+    consistently create `MissionExecutionPlan` lineage.
 - Remaining schema/knowledge debt:
   - Existing memory pockets remain internally while the facade stabilizes.
   - More Sense/Cortex/Spine paths should consume representation snapshots during
@@ -398,14 +419,7 @@ Current architectural debt:
   - Contract preflight is represented and gated, but not yet a general executable
     proof system for arbitrary robot stacks.
 
-The next architecture step is Phase 11B hostile primitive and mission eval
-hardening. It tests the same WHY/WHAT/HOW flow at five levels:
-
-- low-level Sense: evidence requests and observation claims
-- low-level Spine: explicit raw motor authority
-- named procedures/macros: stored representation plus RequestPlan expansion
-- conditional Sense + Spine: evidence before actuation
-- compound missions: MissionContract, claims, selection, ticket, provenance
-
-Do not start Phase 12 evidence planning, harder domains, or repo liposuction
-before the Phase 11B hostile ladder is green.
+The next step is Phase 11B green bar: implement the smallest production-code
+fixes needed to make the hostile primitive/mission eval ladder green. Do not
+start Phase 12 evidence planning, harder domains, or repo liposuction before
+the Phase 11B hostile ladder is fully green.
