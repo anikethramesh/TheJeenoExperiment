@@ -25,9 +25,10 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 11 - Architecture Fix - Mission Flow** continues.
-  Phase 11A and 11C are complete. Phase 11B hostile evals exist (red) and need
-  production-code fixes before Phase 12.
+- Current phase: **Phase 13 - Steered Curriculum under Partial Observability**.
+  Phase 11A, 11B, 11C, and Phase 12 are complete for the MiniGrid boundary.
+  MiniGrid is ORPI-v0 conformant and Phase 13 may now build on that stable
+  contract/manifest/trace surface.
 - Phase 9D is complete. Operator turns now route through typed envelopes,
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
@@ -55,18 +56,22 @@ Elon-algorithm rule for this repo:
 - Phase 11A is complete. Inline compound missions now route through
   `MissionCortex`, typed `MissionExecutionPlan`, mission-linked
   `ExecutionTicket` provenance, and hostile mission-flow eval coverage.
-- Phase 11B hostile evals exist and remain red. They expose paraphrase
-  brittleness, false success, unsafe conditional motor leakage, lossy
-  motor/procedure lineage, and mission flattening. Production-code fixes are
-  the next required step.
+- Phase 11B is complete. Hostile primitive/mission evals now prove paraphrase
+  stability, typed procedure teaching, conditional Sense-before-Spine gating,
+  multi-action lineage, and compound mission provenance.
 - Phase 11C is complete. Seven compounding architectural violations resolved
   (import partition, domain purge, TurnOrchestrator dispatch extraction,
   knowledge-type rerouting, IntentCache, Readiness deletion, eval naming
   contract, hardware schema fields). See Phase 11C section below.
+- Phase 12 is complete for MiniGrid ORPI v0: `OrpiContract`, `OrpiManifest`,
+  `LabelledEpisode`, compatibility mapping from legacy primitive layers to
+  `{sense, actuation, meta}`, MiniGrid manifest metadata, JSON-serializable
+  labelled episodes, and the `orpi` eval suite are green.
 - Current verification signal:
-  - `python evals/eval_master.py`: 60/60 passing
+  - `python evals/eval_master.py --suite orpi`: 7/7 passing
+  - `python evals/eval_master.py`: 67/67 passing
   - `python evals/eval_master.py --suite cleanup`: all cleanup probes passing
-  - `python -m pytest -q tests`: 244 passed (last recorded)
+  - `python -m pytest -q tests`: 265 passed, 1 warning, 9 subtests passed
 - Eval naming contract is now enforced: all registered eval files use
   capability-based prefixes. The naming contract probe fails on violation.
 - Whole-repo `pytest` is not the main project signal right now because the local
@@ -1009,7 +1014,7 @@ Measured outcome:
 
 ### Phase 11B - Hostile Primitive And Mission Eval Ladder
 
-Status: current.
+Status: complete.
 
 Goal: stop the eval suite from giving false confidence. The suite must test the
 architecture ladder from low-level primitive invocation through procedure
@@ -1165,37 +1170,32 @@ Required invariant:
 
 Acceptance criteria for 11B:
 
-- The new evals fail on the current repo for named, architecture-level reasons.
+- The hostile evals fail before fixes for named, architecture-level reasons.
 - Failure output is metric-shaped JSON and names the violated invariant.
 - Focused pytest covers the same hostile ladder with clear assertions.
-- No production code is changed in 11B.
+- Production fixes are scoped to the violated invariants and keep the existing
+  eval/test suite green.
 
-Current 11B red-bar findings:
+Resolved 11B red-bar findings:
 
-- Low-level Sense paraphrases are unsupported.
-- Some low-level Spine paraphrases are unsupported.
-- Distance-query paraphrases only work when trigger words like "all" or "each"
-  are present.
-- Stateful references like "the doors" and "their distances" are not reliably
-  bound to the visible set after a scene query.
-- Named procedure teaching can store a concept without a typed memory-update
-  RequestPlan, and "when I say ..." can produce a false query answer instead of
-  storing the procedure.
-- Multi-action motor/procedure prompts can execute while preserving only the
-  final child action in the current plan/ticket state.
-- Conditional actuation can execute raw motor motion before evidence proves the
-  condition.
-- Compound mission paraphrases beyond the exact 11A inline sum phrase do not
-  consistently create `MissionExecutionPlan` lineage.
-- Actuation requests with unsupported policy language can degrade into
+- Low-level Sense paraphrases route to query/evidence plans without motion.
+- Low-level Spine paraphrases issue `RawMotorTicket` authority.
+- Distance-query paraphrases route to ranked-door distance queries, including
+  stateful references after scene queries.
+- Named procedure teaching records typed memory-update plans and representation
+  procedures.
+- Multi-action motor/procedure prompts preserve child action/count lineage.
+- Conditional actuation blocks raw motor movement until evidence/condition flow
+  is represented.
+- Compound mission paraphrases create or reuse `MissionExecutionPlan` lineage.
+- Unsupported actuation policy language blocks instead of degrading to
   answer-only grounding responses.
 
 After Phase 11B:
 
-- Implement the smallest architecture fixes needed to make the hostile ladder
-  green.
-- Do not start Phase 12 (ORPI v0), Phase 13 evidence planning, or repo
-  liposuction until this ladder is green.
+- The hostile ladder is green and Phase 12 proceeded.
+- Phase 12 ORPI contract/manifest/trace boundary is stable for MiniGrid; Phase
+  13 evidence planning may proceed from the ORPI-v0 surface.
 
 ### Phase 11C - Architecture Surgery
 
@@ -1284,13 +1284,14 @@ Measured outcome:
 
 ## Phase 12 - ORPI v0 - Open Robotics Primitive Interface
 
-Status: planned. Authoritative spec: `PlanOfAction/orpi_spec.md`.
+Status: done for MiniGrid ORPI v0. Authoritative spec:
+`PlanOfAction/orpi_spec.md`.
 
 Goal: extract the typed interface standard between the cognition layer (JEENOM)
 and an embodiment - "MCP for robot cognition." This is deliberately a v0: it is
 extracted from n=1 substrate (MiniGrid) and exists to be broken by the second
-substrate during the Phase 15 cross-substrate port. Do not start Phase 12 until
-the Phase 11B hostile ladder is green.
+substrate during the Phase 15 cross-substrate port. Phase 12 started after the
+Phase 11B hostile ladder went green.
 
 ORPI has two halves:
 
@@ -1321,12 +1322,14 @@ composition), never grounding itself.
   typed `failure_modes`, `validation_hooks`, and `substrate_fingerprint`.
   See `orpi_spec.md` §4 for the full field table.
 
-### Taxonomy migration (breaking)
+### Taxonomy migration (compat bridge first)
 
-- Remap `schemas.PrimitiveSpec.primitive_type` allowed values from
+- ORPI contract serialization remaps `schemas.PrimitiveSpec.primitive_type` from
   `{task, grounding, sensing, action, claims}` to `{sense, actuation, meta}`.
   5 -> 3 mapping: `sensing -> sense`, `action -> actuation`, and
   `task | grounding | claims -> meta`.
+- The first implementation keeps legacy layer names valid for registry grouping
+  and prompt summaries while exposing the ORPI taxonomy through `OrpiContract`.
 - Central implementation risk: two `PrimitiveSpec` classes exist - the contract
   type in `schemas.py` and the frozen runtime type in `primitive_library.py`
   (`runtime_kind`/`runtime_value`, used by the
@@ -1334,23 +1337,21 @@ composition), never grounding itself.
   capability registered through a contract" (conformance item 1) requires
   bridging these two, not just renaming a string set.
 
-### Deliverables
+### Implemented Phase 12 surface
 
-1. `jeenom/orpi.py` (or `orpi/` package): serializable `OrpiContract`,
-   `OrpiManifest`, `LabelledEpisode` - thin wrappers/serializers over existing
-   `PrimitiveSpec`, `OperationalContext`, and trace machinery, not parallel types
-   (closure rule applies).
-2. Add the three NEW contract fields (`mode`, `cadence`, `invariant_level`) to
-   `schemas.PrimitiveSpec` with MiniGrid degenerate defaults.
-3. Finish moving MiniGrid symbol mappings into the manifest (`register_domain_
-   index_maps` already moved IDX_TO_OBJECT/IDX_TO_COLOR; complete the Phase 11C
-   partition intent: `symbol_mappings`, `frames`, `units`, `risk_policy`).
-4. Retrofit all MiniGrid sense/cortex/spine primitives to register through the
-   manifest. `CapabilityRegistry.minigrid_default()` graduates into a registered
-   ORPI manifest.
-5. `LabelledEpisode` emission wired into `TurnOrchestrator`; one probe asserting
-   a full turn round-trips to a valid trace.
-6. `PlanOfAction/orpi_spec.md` versioned with the code (created; keep in sync).
+1. `jeenom/orpi.py`: serializable `OrpiContract`, `OrpiManifest`,
+   JSON-serializable `LabelledEpisode`, plus a no-deliberative-meta
+   plan-reference helper.
+2. `schemas.PrimitiveSpec`: `mode`, `cadence`, and `invariant_level` fields with
+   MiniGrid-compatible defaults.
+3. MiniGrid ORPI manifest metadata: `symbol_mappings`, `frames`, `units`, and
+   `risk_policy` are published from `MiniGridOperationalContext`.
+4. `CapabilityRegistry.minigrid_default()` remains the legacy registry source,
+   while `MiniGridSubstrateAdapter.orpi_manifest()` publishes the ORPI contract
+   view over every registered capability.
+5. `LabelledEpisode` emission is attached to every `CommandResult` through
+   `CommandAuthority.record_result`.
+6. `PlanOfAction/orpi_spec.md` remains the versioned ORPI-v0 reference.
 
 ### Conformance
 
@@ -1362,13 +1363,10 @@ declarations are honoured (no deliberation-cadence call on a Spine path); (5)
 every executed turn emits a `LabelledEpisode`; (6) no compiled plan references a
 `deliberative` meta-primitive.
 
-### Red-bar conformance probes (eval-first; spec only this round)
+### ORPI conformance probes
 
-These are specified now and authored before the production code, following the
-Phase 11B red-bar method: each must fail on the current repo for a named,
-architecture-level reason, then be driven green. Names use the capability-prefix
-eval naming contract; register all in `evals/manifest.py` under a new `orpi`
-suite when authored.
+These probes are registered in `evals/manifest.py` under the `orpi` suite and
+pass against the completed MiniGrid ORPI-v0 boundary.
 
 - `substrate_orpi_contract_coverage_probe.py` - conformance 1: every capability
   is registered through a contract; no side-channel capabilities.
@@ -1382,8 +1380,9 @@ suite when authored.
   deliberation-cadence call on a Spine/control path.
 - `substrate_orpi_no_llm_in_loop_probe.py` - conformance 6: AST static check - no
   compiled plan references a `deliberative` meta-primitive.
-- `pipeline_orpi_labelled_episode_probe.py` - conformance 5: a full turn
-  round-trips to a valid `LabelledEpisode`.
+- `pipeline_orpi_labelled_episode_probe.py` - conformance 5: full success,
+  refusal, and task turns round-trip to valid, JSON-serializable
+  `LabelledEpisode` artifacts with verification evidence.
 - `regression_orpi_primitive_type_migration_probe.py` - the taxonomy remap leaves
   the existing eval suite green (migration safety net).
 
@@ -1393,12 +1392,13 @@ suite when authored.
 - The three NEW fields exist with degenerate MiniGrid defaults; no other
   substrate semantics leak into the schema.
 - Every executed turn round-trips to a valid `LabelledEpisode`, failed episodes
-  included with attribution.
+  included with attribution; task episodes include verification/postcondition
+  evidence and serialize as JSON.
 - The taxonomy remap lands with zero regressions on the existing eval suite.
 
 ## Phase 13 - Steered Curriculum under Partial Observability
 
-Status: planned.
+Status: current.
 
 Goal: prove JEENOM can collaborate about uncertainty without building a giant
 ontology, and that it improves with operator steering across a curriculum it has

@@ -5037,6 +5037,15 @@ class OperatorStationSession:
             self.log(f"natural-language sequence detected: kind={nat_cmd.kind} steps={nat_cmd.payload.get('steps')}")
             return nat_cmd
 
+        # Bare adjacent known labels: "bingo bongo" → procedure_execute.
+        # Prefer exact concept recall below when the full phrase is itself a concept.
+        tokens = normalized.split()
+        if len(tokens) >= 2 and self.knowledge_base.recall(normalized) is None:
+            seq = self.knowledge_base._is_sequence(",".join(tokens))
+            if seq is not None:
+                self.log(f"bare-label procedure detected: {seq}")
+                return _approved("procedure_execute", utterance, payload={"steps": seq})
+
         concept = self.knowledge_base.recall(normalized) or self.knowledge_base.recall(utterance.strip())
         if concept is None:
             # Try stripping execution-verb prefixes: "execute bingo", "run scout", "do alpha"
@@ -5079,12 +5088,56 @@ class OperatorStationSession:
             if concept.concept_type == "procedure":
                 self.log(f"procedure build failed: nested procedure '{concept_name}' not allowed")
                 return None
+
+            if concept.plan is not None and concept.plan.steps:
+                concept_step_ids: list[str] = []
+                for source_step in concept.plan.steps:
+                    source_deps = list(source_step.depends_on)
+                    dep_map = {
+                        dep: f"concept_{idx}_{dep}"
+                        for dep in source_deps
+                    }
+                    step_id = f"concept_{idx}_{source_step.step_id}"
+                    depends_on = [dep_map.get(dep, dep) for dep in source_deps]
+                    if not source_deps and prev_step_id is not None:
+                        depends_on.append(prev_step_id)
+                    plan_steps.append(
+                        RequestPlanStep(
+                            step_id=step_id,
+                            layer=source_step.layer,
+                            operation=source_step.operation,
+                            required_handle=source_step.required_handle,
+                            implementation_status=source_step.implementation_status,
+                            inputs=dict(source_step.inputs),
+                            outputs=list(source_step.outputs),
+                            depends_on=depends_on,
+                            constraints={
+                                **dict(source_step.constraints),
+                                "concept_name": concept.name,
+                                "utterance": concept.utterance,
+                            },
+                            tie_policy=source_step.tie_policy,
+                            memory_reads=list(source_step.memory_reads),
+                            memory_writes=list(source_step.memory_writes),
+                            scene_fingerprint_required=source_step.scene_fingerprint_required,
+                            environment_assumption_ids=list(
+                                source_step.environment_assumption_ids
+                            ),
+                        )
+                    )
+                    concept_step_ids.append(step_id)
+                prev_step_id = concept_step_ids[-1]
+                continue
+
             try:
-                task = self.compose_known_task(concept.utterance)
+                self.compose_known_task(concept.utterance)
             except ValueError:
-                self.log(f"procedure build failed: cannot resolve handle for '{concept.utterance}'")
+                self.log(
+                    "procedure build failed: cannot resolve handle for "
+                    f"'{concept.utterance}'"
+                )
                 return None
-            step_id = f"step_{idx}"
+            step_id = f"concept_{idx}_execute_task"
             plan_steps.append(
                 RequestPlanStep(
                     step_id=step_id,
@@ -5092,7 +5145,7 @@ class OperatorStationSession:
                     operation="execute",
                     required_handle="task.go_to_object.door",
                     implementation_status="implemented",
-                    constraints={"utterance": concept.utterance},
+                    constraints={"concept_name": concept.name, "utterance": concept.utterance},
                     depends_on=[prev_step_id] if prev_step_id is not None else [],
                 )
             )
@@ -5101,7 +5154,7 @@ class OperatorStationSession:
         return RequestPlan(
             request_id=str(uuid.uuid4()),
             original_utterance=original_utterance,
-            objective_type="task",
+            objective_type="control",
             objective_summary=f"procedure: {' → '.join(steps)}",
             steps=plan_steps,
             expected_response="execute_task",
@@ -5142,13 +5195,17 @@ class OperatorStationSession:
             if concept is None:
                 return f"PROCEDURE ERROR\nConcept '{step_id_name}' disappeared during execution."
             self.log(f"procedure step {step_idx + 1}/{len(steps)}: {concept.name!r} → {concept.utterance!r}")
-            result = self._run_task_from_instruction(
-                concept.utterance,
-                concept.utterance,
-                source="procedure_step",
-                record_plan=False,
-            )
-            results.append(self.result_summary(result))
+            command = self._classify_utterance(concept.utterance)
+            if command.kind == "unresolved":
+                command = self.command_from_llm_intent(concept.utterance)
+            if command.kind in {"concept_teach", "procedure_execute", "sequence_execute"}:
+                return (
+                    "PROCEDURE ERROR\n"
+                    f"Step '{concept.name}' expands to unsupported nested command "
+                    f"{command.kind!r}."
+                )
+            result_text = self.turn_orchestrator.execute_command(self, command)
+            results.append(str(result_text))
 
         step_labels = " → ".join(steps)
         return f"PROCEDURE COMPLETE ({step_labels})\n" + "\n---\n".join(results)

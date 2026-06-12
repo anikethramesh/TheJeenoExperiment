@@ -14,6 +14,14 @@ from .primitive_library import (
 from .schemas import PrimitiveManifest, PrimitiveSpec, TargetSelector, get_registered_object_types
 
 
+def _orpi_postcondition_primitive(layer: str, spec: RuntimePrimitiveSpec) -> str | None:
+    if layer != "action":
+        return None
+    if spec.safety_class == "query":
+        return None
+    return "sensing.parse_grid_objects"
+
+
 _SYNTHESIZED_ALIASES = {
     "grounding.closest_door.euclidean.agent": (
         "grounding.all_doors.ranked.euclidean.agent",
@@ -64,6 +72,7 @@ def _manifest_spec(
         "failure_modes": list(spec.failure_modes),
         "validation_hooks": list(spec.validation_hooks),
         "substrate_fingerprint": spec.substrate_fingerprint,
+        "postcondition_primitive": _orpi_postcondition_primitive(layer, spec),
     }
 
 
@@ -104,6 +113,7 @@ def _top_level_task_capability(
         "failure_modes": failure_modes or [],
         "validation_hooks": validation_hooks or [],
         "substrate_fingerprint": None,
+        "postcondition_primitive": None,
     }
 
 
@@ -206,6 +216,10 @@ class CapabilityRegistry:
                     "failure_modes": list(spec.failure_modes),
                     "validation_hooks": list(spec.validation_hooks),
                     "substrate_fingerprint": spec.substrate_fingerprint,
+                    "postcondition_primitive": spec.postcondition_primitive,
+                    "mode": spec.mode,
+                    "cadence": spec.cadence,
+                    "invariant_level": spec.invariant_level,
                 }
             )
         return {"name": self.manifest.name, "primitives": grouped}
@@ -260,6 +274,10 @@ class CapabilityRegistry:
             implementation_status="implemented",
             safe_to_synthesize=False,
             runtime_binding={"kind": "python_synthesized", "value": handle},
+            postcondition_primitive=spec.postcondition_primitive,
+            mode=spec.mode,
+            cadence=spec.cadence,
+            invariant_level=spec.invariant_level,
         )
         self._promote_synthesized_schema(handle, promoted_schema, fn)
         for alias in _SYNTHESIZED_ALIASES.get(handle, ()):
@@ -276,6 +294,10 @@ class CapabilityRegistry:
                     implementation_status="implemented",
                     safe_to_synthesize=False,
                     runtime_binding={"kind": "python_synthesized", "value": handle},
+                    postcondition_primitive=alias_spec.postcondition_primitive,
+                    mode=alias_spec.mode,
+                    cadence=alias_spec.cadence,
+                    invariant_level=alias_spec.invariant_level,
                 )
                 self._promote_synthesized_schema(alias, alias_schema, fn)
         return True
@@ -338,6 +360,7 @@ class CapabilityRegistry:
             safety_class=safety_class,
             authority_level=authority_level,
             validation_hooks=validation_hooks or [],
+            mode="deterministic",
         )
         self._by_name[handle] = new_spec
         self.manifest.primitives.append(new_spec)

@@ -4,6 +4,7 @@ Suites:
   all          - every probe in this manifest
   architecture - invariant and architecture probes
   cleanup      - Phase 9 cleanup red-bar probes
+  orpi         - Phase 12 ORPI-v0 conformance probes
   smoke        - historical smoke/regression probes
 """
 from __future__ import annotations
@@ -46,12 +47,14 @@ EVAL_SPECS: list[dict[str, object]] = [
     {"file": "intent_fidelity_verifier_probe.py", "suites": ["architecture"]},
     # ── pipeline ──────────────────────────────────────────────────────────────
     {"file": "pipeline_dispatch_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "pipeline_orpi_labelled_episode_probe.py", "suites": ["architecture", "orpi"]},
     {"file": "pipeline_request_plan_probe.py", "suites": ["architecture"]},
     {"file": "pipeline_turn_orchestrator_probe.py", "suites": ["architecture", "cleanup"]},
     # ── regression ────────────────────────────────────────────────────────────
     {"file": "regression_golden_probe.py", "suites": ["smoke"]},
     {"file": "regression_jit_prewarm_probe.py", "suites": ["smoke"]},
     {"file": "regression_live_operator_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "regression_orpi_primitive_type_migration_probe.py", "suites": ["architecture", "orpi"]},
     {"file": "regression_phase7_5_probe.py", "suites": ["architecture"]},
     {"file": "regression_phase7_59_probe.py", "suites": ["architecture"]},
     {"file": "regression_phase7_6_probe.py", "suites": ["architecture"]},
@@ -68,6 +71,11 @@ EVAL_SPECS: list[dict[str, object]] = [
     {"file": "substrate_cortex_invariant_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "substrate_hardware_schema_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "substrate_domain_helper_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "substrate_orpi_cadence_probe.py", "suites": ["architecture", "orpi"]},
+    {"file": "substrate_orpi_contract_coverage_probe.py", "suites": ["architecture", "orpi"]},
+    {"file": "substrate_orpi_manifest_registration_probe.py", "suites": ["architecture", "orpi"]},
+    {"file": "substrate_orpi_no_llm_in_loop_probe.py", "suites": ["architecture", "orpi"]},
+    {"file": "substrate_orpi_postcondition_probe.py", "suites": ["architecture", "orpi"]},
     {"file": "substrate_runtime_package_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "substrate_schema_enforcement_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "substrate_static_architecture_probe.py", "suites": ["architecture", "cleanup"]},

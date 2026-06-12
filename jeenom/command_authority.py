@@ -107,13 +107,17 @@ class CommandAuthority:
         result_payload: dict[str, Any] = {"message": message}
         if ticket is not None and last_result is not None:
             result_payload["last_result"] = dict(last_result)
-        return CommandResult(
+        command_result = CommandResult(
             message,
             envelope=envelope,
             command=command,
             ticket=ticket,
             result=result_payload,
         )
+        from .orpi import LabelledEpisode
+
+        command_result.labelled_episode = LabelledEpisode.from_command_result(command_result)
+        return command_result
 
     def pending_clarification_trace(
         self,

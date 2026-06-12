@@ -5,6 +5,7 @@ from typing import Any, Protocol
 from .capability_registry import CapabilityRegistry
 from .llm_compiler import CompilerBackend
 from .memory import OperationalMemory
+from .orpi import OrpiManifest
 from .plan_cache import PlanCache
 
 
@@ -12,6 +13,9 @@ class SubstrateAdapter(Protocol):
     """Concrete HOW boundary for environment/tool-specific bindings."""
 
     def capability_registry(self) -> CapabilityRegistry:
+        ...
+
+    def orpi_manifest(self) -> OrpiManifest:
         ...
 
     def create_sense(

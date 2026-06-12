@@ -123,6 +123,26 @@ class TestPhase11BPrimitiveLadder(unittest.TestCase):
         invoke_response = session.handle_utterance("run fing fam foom")
         _assert_ranked_distance_query(self, session, invoke_response)
 
+    def test_procedure_sequence_uses_cached_atomic_plans_for_relative_and_query_concepts(self):
+        session = make_session(env_id=ENV_ID, seed=SEED)
+        session.handle_utterance("if I say bingo go to the closest door. Store that")
+        session.handle_utterance(
+            "if I say bongo you need to print the distance to all doors. Store that"
+        )
+
+        bare_response = session.handle_utterance("bingo bongo")
+        then_response = session.handle_utterance("do bingo then bongo")
+
+        for response in (bare_response, then_response):
+            self.assertIn("PROCEDURE COMPLETE", response)
+            self.assertIn("RUN COMPLETE", response)
+            self.assertIn("DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT", response)
+        self.assertIsNotNone(session.last_request_plan)
+        self.assertIn(
+            "grounding.all_doors.ranked.manhattan.agent",
+            _handles(session),
+        )
+
     def test_action_sequence_preserves_all_child_actions_not_only_final_child(self):
         session = make_session(env_id=ENV_ID, seed=SEED)
 

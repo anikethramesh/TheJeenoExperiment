@@ -119,6 +119,52 @@ class MiniGridOperationalContext(OperationalContext):
             metadata={
                 "env_id": env_id,
                 "description": "MiniGrid GoToDoor operational context.",
+                "substrate_fingerprint": f"minigrid:{env_id}:v1",
+                "symbol_mappings": {
+                    "object_index": dict(IDX_TO_OBJECT),
+                    "color_index": dict(IDX_TO_COLOR),
+                    "actions": {
+                        "turn_left": 0,
+                        "turn_right": 1,
+                        "move_forward": 2,
+                        "pickup": 3,
+                        "drop": 4,
+                        "toggle": 5,
+                        "done": 6,
+                    },
+                },
+                "frames": {
+                    "grid": {
+                        "type": "discrete_2d",
+                        "origin": "MiniGrid cell coordinates",
+                    }
+                },
+                "units": {
+                    "distance": "cell",
+                    "angle": "quarter_turn",
+                },
+                "risk_policy": {
+                    "query": {
+                        "min_confidence": 0.0,
+                        "verification_tier": "none",
+                        "required_validation_hooks": [],
+                    },
+                    "memory": {
+                        "min_confidence": 1.0,
+                        "verification_tier": "operator",
+                        "required_validation_hooks": [],
+                    },
+                    "actuation": {
+                        "min_confidence": 0.8,
+                        "verification_tier": "postcondition",
+                        "required_validation_hooks": ["minigrid_env_action_preflight"],
+                    },
+                    "hazardous": {
+                        "min_confidence": 1.0,
+                        "verification_tier": "manual",
+                        "required_validation_hooks": ["operator_authorization"],
+                    },
+                },
             },
         )
 

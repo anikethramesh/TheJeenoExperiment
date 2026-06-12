@@ -226,7 +226,12 @@ ARBITRATION_DECISION_TYPES = (
     "synthesize",
     "refuse",
 )
-PRIMITIVE_SPEC_TYPES = ("task", "grounding", "sensing", "action", "claims")
+LEGACY_PRIMITIVE_SPEC_TYPES = ("task", "grounding", "sensing", "action", "claims")
+ORPI_PRIMITIVE_SPEC_TYPES = ("sense", "actuation", "meta")
+PRIMITIVE_SPEC_TYPES = LEGACY_PRIMITIVE_SPEC_TYPES + ORPI_PRIMITIVE_SPEC_TYPES
+ORPI_MODES = ("deterministic", "deliberative")
+ORPI_CADENCES = ("control", "perception", "deliberation")
+ORPI_INVARIANT_LEVELS = ("pose", "contact", "object_state", "intent")
 PRIMITIVE_IMPLEMENTATION_STATUSES = (
     "implemented",
     "unsupported",
@@ -237,6 +242,38 @@ PRIMITIVE_IMPLEMENTATION_STATUSES = (
 PRIMITIVE_SAFETY_CLASSES = ("query", "memory", "actuation", "hazardous")
 PRIMITIVE_AUTHORITY_LEVELS = ("none", "operator", "restricted", "admin")
 SELECTION_DIRECTIONS = ("minimum", "maximum")
+
+
+def orpi_primitive_type_for(primitive_type: str) -> str:
+    mapping = {
+        "sensing": "sense",
+        "action": "actuation",
+        "task": "meta",
+        "grounding": "meta",
+        "claims": "meta",
+        "sense": "sense",
+        "actuation": "actuation",
+        "meta": "meta",
+    }
+    try:
+        return mapping[primitive_type]
+    except KeyError as exc:
+        raise SchemaValidationError(
+            f"primitive_type must map to ORPI class, got {primitive_type!r}"
+        ) from exc
+
+
+def default_orpi_cadence(*, primitive_type: str, layer: str) -> str:
+    orpi_type = orpi_primitive_type_for(primitive_type)
+    if orpi_type == "actuation" or layer in {"action", "spine"}:
+        return "control"
+    if orpi_type == "sense" or layer in {"sensing", "sense"}:
+        return "perception"
+    return "deliberation"
+
+
+def default_orpi_invariant_level(primitive_type: str) -> str:
+    return "intent" if orpi_primitive_type_for(primitive_type) == "meta" else "object_state"
 
 
 class SchemaValidationError(ValueError):
@@ -428,6 +465,10 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
         "failure_modes",
         "validation_hooks",
         "substrate_fingerprint",
+        "postcondition_primitive",
+        "mode",
+        "cadence",
+        "invariant_level",
     )
     _check_keys(spec, required_keys, label, optional_keys)
     primitive_type = _ensure_str(spec["primitive_type"], f"{label}.primitive_type")
@@ -461,6 +502,31 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
         raise SchemaValidationError(
             f"{label}.authority_level must be one of: "
             + ", ".join(PRIMITIVE_AUTHORITY_LEVELS)
+        )
+    mode = _ensure_str(spec.get("mode", "deterministic"), f"{label}.mode")
+    if mode not in ORPI_MODES:
+        raise SchemaValidationError(
+            f"{label}.mode must be one of: " + ", ".join(ORPI_MODES)
+        )
+    cadence = _ensure_str(
+        spec.get(
+            "cadence",
+            default_orpi_cadence(primitive_type=primitive_type, layer=str(spec["layer"])),
+        ),
+        f"{label}.cadence",
+    )
+    if cadence not in ORPI_CADENCES:
+        raise SchemaValidationError(
+            f"{label}.cadence must be one of: " + ", ".join(ORPI_CADENCES)
+        )
+    invariant_level = _ensure_str(
+        spec.get("invariant_level", default_orpi_invariant_level(primitive_type)),
+        f"{label}.invariant_level",
+    )
+    if invariant_level not in ORPI_INVARIANT_LEVELS:
+        raise SchemaValidationError(
+            f"{label}.invariant_level must be one of: "
+            + ", ".join(ORPI_INVARIANT_LEVELS)
         )
     return {
         "name": _ensure_str(spec["name"], f"{label}.name"),
@@ -512,6 +578,13 @@ def _ensure_primitive_spec(value: Any, label: str) -> dict[str, Any]:
             spec.get("substrate_fingerprint"),
             f"{label}.substrate_fingerprint",
         ),
+        "postcondition_primitive": _ensure_optional_str(
+            spec.get("postcondition_primitive"),
+            f"{label}.postcondition_primitive",
+        ),
+        "mode": mode,
+        "cadence": cadence,
+        "invariant_level": invariant_level,
     }
 
 
@@ -1149,6 +1222,36 @@ class PrimitiveSpec:
     validation_hooks: list[str] = field(default_factory=list)
     substrate_fingerprint: str | None = None
     postcondition_primitive: str | None = None
+    mode: str = "deterministic"
+    cadence: str | None = None
+    invariant_level: str | None = None
+
+    def __post_init__(self) -> None:
+        orpi_type = orpi_primitive_type_for(self.primitive_type)
+        if self.cadence is None:
+            self.cadence = default_orpi_cadence(
+                primitive_type=self.primitive_type,
+                layer=self.layer,
+            )
+        if self.invariant_level is None:
+            self.invariant_level = default_orpi_invariant_level(self.primitive_type)
+        if self.mode not in ORPI_MODES:
+            raise SchemaValidationError(
+                "PrimitiveSpec.mode must be one of: " + ", ".join(ORPI_MODES)
+            )
+        if self.cadence not in ORPI_CADENCES:
+            raise SchemaValidationError(
+                "PrimitiveSpec.cadence must be one of: " + ", ".join(ORPI_CADENCES)
+            )
+        if self.invariant_level not in ORPI_INVARIANT_LEVELS:
+            raise SchemaValidationError(
+                "PrimitiveSpec.invariant_level must be one of: "
+                + ", ".join(ORPI_INVARIANT_LEVELS)
+            )
+        if orpi_type != "meta" and self.mode == "deliberative":
+            raise SchemaValidationError(
+                "PrimitiveSpec.mode=deliberative is only valid for ORPI meta primitives"
+            )
 
     @classmethod
     def from_dict(cls, data: Any) -> PrimitiveSpec:
@@ -2669,6 +2772,7 @@ class CommandResult(str):
     ticket: ExecutionTicket | MemoryWriteTicket | RawMotorTicket | None
     result: dict[str, Any]
     failure_outcome: FailureOutcome | None
+    labelled_episode: Any | None
 
     def __new__(
         cls,
@@ -2687,6 +2791,7 @@ class CommandResult(str):
         obj.ticket = ticket
         obj.result = dict(result or {})
         obj.failure_outcome = failure_outcome
+        obj.labelled_episode = None
         return obj
 
 

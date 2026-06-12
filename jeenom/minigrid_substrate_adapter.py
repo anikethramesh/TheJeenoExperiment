@@ -8,6 +8,8 @@ from .llm_compiler import CompilerBackend
 from .memory import OperationalMemory
 from .minigrid_adapter import MiniGridAdapter
 from .minigrid_envs import ensure_custom_minigrid_envs_registered
+from .minigrid_operational_context import MiniGridOperationalContext
+from .orpi import OrpiManifest
 from .plan_cache import PlanCache
 from .primitive_library import ACTION_PRIMITIVES
 from .sense import MiniGridSense
@@ -17,15 +19,36 @@ from .spine import MiniGridSpine
 class MiniGridSubstrateAdapter:
     """MiniGrid implementation of JEENOM's concrete HOW boundary."""
 
-    def __init__(self, *, env_id: str, render_mode: str) -> None:
+    def __init__(
+        self,
+        *,
+        env_id: str,
+        render_mode: str,
+        operational_context: MiniGridOperationalContext | None = None,
+    ) -> None:
         ensure_custom_minigrid_envs_registered()
         self.env_id = env_id
         self.render_mode = render_mode
+        self.operational_context = operational_context or MiniGridOperationalContext.default(
+            env_id=env_id
+        )
+        self._capability_registry: CapabilityRegistry | None = None
+        self._orpi_manifest: OrpiManifest | None = None
         self.preview_adapter: MiniGridAdapter | None = None
         self.task_adapter: MiniGridAdapter | None = None
 
     def capability_registry(self) -> CapabilityRegistry:
-        return CapabilityRegistry.minigrid_default()
+        if self._capability_registry is None:
+            self._capability_registry = CapabilityRegistry.minigrid_default()
+        return self._capability_registry
+
+    def orpi_manifest(self) -> OrpiManifest:
+        if self._orpi_manifest is None:
+            self._orpi_manifest = OrpiManifest.from_context_and_registry(
+                self.operational_context,
+                self.capability_registry(),
+            )
+        return self._orpi_manifest
 
     def create_sense(
         self,

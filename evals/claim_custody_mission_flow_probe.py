@@ -109,9 +109,11 @@ def _run_static_checks(metrics: dict[str, bool], details: dict[str, Any]) -> Non
     workflow = _source("PlanOfAction/workflow_diagram.mmd")
     flow = _source("PlanOfAction/flow_of_control.mmd")
     docs_blob = "\n".join([task_plan, blueprint, workflow, flow])
-    metrics["planofaction_current_phase_is_mission_flow"] = (
+    metrics["planofaction_records_mission_flow_complete_before_phase12"] = (
         "Phase 11 - Architecture Fix - Mission Flow" in task_plan
-        and "Current phase: **Phase 11 - Architecture Fix - Mission Flow**" in task_plan
+        and "Phase 11A, 11B, and 11C are complete" in task_plan
+        and "Current phase: **Phase 12 - ORPI v0 - Open Robotics Primitive Interface**"
+        in task_plan
     )
     metrics["task_plan_phase11_numbering_not_corrupted"] = (
         "claims and pri\n- Decide whether repo liposuction" not in task_plan
@@ -218,7 +220,7 @@ def main() -> int:
             "mission_cortex_instantiates_mission_execution_plan",
             "execution_ticket_has_mission_lineage",
             "mission_execution_plan_has_typed_flow_fields",
-            "planofaction_current_phase_is_mission_flow",
+            "planofaction_records_mission_flow_complete_before_phase12",
             "task_plan_phase11_numbering_not_corrupted",
             "planofaction_documents_share_mission_flow",
             "planofaction_no_stale_phase10c_next_step",

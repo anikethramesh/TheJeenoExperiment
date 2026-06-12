@@ -9,6 +9,7 @@ from .minigrid_domain_helper import MiniGridDomainHelper
 from .minigrid_operational_context import MiniGridOperationalContext
 from .minigrid_runtime_package import build_minigrid_runtime_package
 from .operator_station import OperatorStationSession, classify_utterance
+from .orpi import LabelledEpisode, OrpiContract, OrpiManifest
 from .planning_semantics import PlanningSemantics
 from .representation import RepresentationStore
 from .runtime_package import RuntimePackage
@@ -30,6 +31,9 @@ __all__ = [
     "MiniGridSpine",
     "OperatorStationSession",
     "OperationalMemory",
+    "OrpiContract",
+    "OrpiManifest",
+    "LabelledEpisode",
     "PlanningSemantics",
     "PrimitiveDefinitionRequest",
     "RepresentationStore",

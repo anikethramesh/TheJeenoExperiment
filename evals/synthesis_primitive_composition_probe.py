@@ -30,6 +30,8 @@ Checks:
   build_plan_unknown_concept_rejected    — unknown concept name in steps returns None
   procedure_readiness_graph_evaluated    — _run_procedure stores last_readiness_graph
   procedure_executes_all_steps           — handle_utterance('patrol') runs 3 tasks (bingo→scout→bingo)
+  relative_query_procedure_bare_labels   — 'bingo bongo' runs cached relative task + query concepts
+  relative_query_procedure_then_labels   — 'do bingo then bongo' runs cached relative task + query concepts
   atomic_regression_bingo_alone          — 'bingo' still executes as atomic (no regression)
   no_nested_procedure_via_handle         — handle_utterance on nested procedure returns error, not crash
 """
@@ -210,6 +212,21 @@ def main() -> int:
 
         metrics["procedure_readiness_graph_evaluated"] = (
             session.last_readiness_graph is not None
+        )
+
+        session.handle_utterance("if I say bongo print the distance to all doors. Store that")
+        session.handle_utterance("if I say closie go to the closest door. Store that")
+        bare_relative_query_resp = session.handle_utterance("closie bongo")
+        then_relative_query_resp = session.handle_utterance("do closie then bongo")
+        metrics["relative_query_procedure_bare_labels"] = (
+            "PROCEDURE COMPLETE" in bare_relative_query_resp
+            and "RUN COMPLETE" in bare_relative_query_resp
+            and "DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT" in bare_relative_query_resp
+        )
+        metrics["relative_query_procedure_then_labels"] = (
+            "PROCEDURE COMPLETE" in then_relative_query_resp
+            and "RUN COMPLETE" in then_relative_query_resp
+            and "DOORS RANKED BY MANHATTAN DISTANCE FROM AGENT" in then_relative_query_resp
         )
 
         # Atomic regression: 'bingo' alone still executes as a single task

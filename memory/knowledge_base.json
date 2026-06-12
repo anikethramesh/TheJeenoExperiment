@@ -1,13 +1,68 @@
 [
   {
     "name": "bingo",
-    "utterance": "automatically go to the yellow door",
+    "utterance": "go to the closest door",
     "plan": {
-      "request_id": "request:472361",
-      "original_utterance": "automatically go to the yellow door",
+      "request_id": "request:300456",
+      "original_utterance": "go to the closest door",
       "objective_type": "task",
-      "objective_summary": "Deterministic operator-intent fallback parsed a door navigation task.",
+      "objective_summary": "Deterministic operator-intent fallback emitted a closest-door query plan.",
       "steps": [
+        {
+          "step_id": "rank_scene_doors",
+          "layer": "grounding",
+          "operation": "rank",
+          "required_handle": "grounding.all_doors.ranked.manhattan.agent",
+          "implementation_status": null,
+          "inputs": {
+            "object_type": "door"
+          },
+          "outputs": [
+            "active_claims.ranked_scene_doors"
+          ],
+          "depends_on": [],
+          "constraints": {
+            "metric": "manhattan",
+            "reference": "agent"
+          },
+          "tie_policy": "clarify",
+          "memory_reads": [],
+          "memory_writes": [],
+          "scene_fingerprint_required": false,
+          "environment_assumption_ids": []
+        },
+        {
+          "step_id": "select_grounded_target",
+          "layer": "claims",
+          "operation": "select",
+          "required_handle": null,
+          "implementation_status": null,
+          "inputs": {
+            "entries": "active_claims.ranked_scene_doors"
+          },
+          "outputs": [
+            "grounded_target"
+          ],
+          "depends_on": [
+            "rank_scene_doors"
+          ],
+          "constraints": {
+            "order": "ascending",
+            "ordinal": 1,
+            "answer_fields": [
+              "closest",
+              "distance"
+            ],
+            "metric": "manhattan"
+          },
+          "tie_policy": "clarify",
+          "memory_reads": [
+            "active_claims.ranked_scene_doors"
+          ],
+          "memory_writes": [],
+          "scene_fingerprint_required": true,
+          "environment_assumption_ids": []
+        },
         {
           "step_id": "execute_task",
           "layer": "task",
@@ -21,7 +76,9 @@
           "outputs": [
             "task_result"
           ],
-          "depends_on": [],
+          "depends_on": [
+            "select_grounded_target"
+          ],
           "constraints": {},
           "tie_policy": "clarify",
           "memory_reads": [],
@@ -36,15 +93,14 @@
         }
       ],
       "preservation_signals": [
-        "cardinality.all",
-        "color.yellow",
+        "superlative.closest",
         "object_type.door"
       ],
       "expected_response": "execute_task",
       "environment_assumptions": []
     },
     "stored_at": 1779362566.0032835,
-    "recall_count": 4,
+    "recall_count": 7,
     "tags": [],
     "concept_type": "atomic",
     "steps": []
@@ -93,6 +149,72 @@
       "environment_assumptions": []
     },
     "stored_at": 1779391645.4780068,
+    "recall_count": 2,
+    "tags": [],
+    "concept_type": "atomic",
+    "steps": []
+  },
+  {
+    "name": "bongo",
+    "utterance": "print the distance to all doors",
+    "plan": {
+      "request_id": "request:172289",
+      "original_utterance": "print the distance to all doors",
+      "objective_type": "query",
+      "objective_summary": "Deterministic operator-intent fallback emitted a ranked-door query plan.",
+      "steps": [
+        {
+          "step_id": "rank_scene_doors",
+          "layer": "grounding",
+          "operation": "rank",
+          "required_handle": "grounding.all_doors.ranked.manhattan.agent",
+          "implementation_status": null,
+          "inputs": {
+            "object_type": "door"
+          },
+          "outputs": [
+            "active_claims.ranked_scene_doors"
+          ],
+          "depends_on": [],
+          "constraints": {
+            "metric": "manhattan",
+            "reference": "agent"
+          },
+          "tie_policy": "clarify",
+          "memory_reads": [],
+          "memory_writes": [],
+          "scene_fingerprint_required": false,
+          "environment_assumption_ids": []
+        },
+        {
+          "step_id": "answer_query",
+          "layer": "answer",
+          "operation": "answer",
+          "required_handle": null,
+          "implementation_status": null,
+          "inputs": {},
+          "outputs": [
+            "operator_response"
+          ],
+          "depends_on": [
+            "rank_scene_doors"
+          ],
+          "constraints": {},
+          "tie_policy": "clarify",
+          "memory_reads": [],
+          "memory_writes": [],
+          "scene_fingerprint_required": false,
+          "environment_assumption_ids": []
+        }
+      ],
+      "preservation_signals": [
+        "cardinality.all",
+        "object_type.door"
+      ],
+      "expected_response": "answer_query",
+      "environment_assumptions": []
+    },
+    "stored_at": 1781268274.3081079,
     "recall_count": 2,
     "tags": [],
     "concept_type": "atomic",

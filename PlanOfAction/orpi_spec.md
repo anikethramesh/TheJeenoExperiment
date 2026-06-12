@@ -62,6 +62,12 @@ These three classes are the value set of `schemas.PrimitiveSpec.primitive_type` 
 prior value set (`task | grounding | sensing | action | claims`) is remapped — see Phase 12 in
 [task_plan.md](task_plan.md) for the migration.
 
+Implementation note for the completed MiniGrid Phase 12 boundary: the code exposes the ORPI
+taxonomy through `OrpiContract` while preserving the legacy `PrimitiveSpec.primitive_type` values
+for existing registry grouping and prompt summaries. This compatibility bridge is intentional; the
+hard schema remap can happen after the contract/manifest/trace boundary survives more substrate
+pressure.
+
 ## 4. The Contract
 
 The contract is the existing `schemas.PrimitiveSpec`, serialized. Fields marked **NEW** are v0

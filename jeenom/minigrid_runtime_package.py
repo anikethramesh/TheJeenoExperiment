@@ -17,8 +17,14 @@ def build_minigrid_runtime_package(
     render_mode: str,
 ) -> RuntimePackage:
     context = MiniGridOperationalContext.default(env_id=env_id)
+    substrate = MiniGridSubstrateAdapter(
+        env_id=env_id,
+        render_mode=render_mode,
+        operational_context=context,
+    )
     return RuntimePackage(
-        substrate=MiniGridSubstrateAdapter(env_id=env_id, render_mode=render_mode),
+        substrate=substrate,
         operational_context=context,
         domain_helper=MiniGridDomainHelper(context),
+        orpi_manifest=substrate.orpi_manifest(),
     )

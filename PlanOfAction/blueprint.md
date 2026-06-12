@@ -346,13 +346,15 @@ ARC-AGI3:
 - HOW: ARC game-state API, legal action API, state parser, replay/simulation
   tools, scoring/end-state feedback.
 
-## Current Repo Shape After Phase 11C
+## Current Repo Shape After Phase 12 ORPI v0 Completion
 
 The implementation now enforces the cortical control-plane objects, the
 block/schema/knowledge boundary gates, the substrate HOW boundary, Cortex-owned
-compound mission flow, and the full Phase 11C architecture surgery outcomes.
+compound mission flow, the full Phase 11C architecture surgery outcomes, and
+the MiniGrid ORPI-v0 contract/manifest/trace boundary.
 
-**Verification:** 60/60 evals passing.
+**Verification:** 67/67 evals passing, including 7/7 ORPI conformance probes;
+`python -m pytest -q tests` is 265 passing.
 
 Current enforced gateways:
 
@@ -404,15 +406,23 @@ Current enforced gateways:
 - **[11C]** `PrimitiveSpec.postcondition_primitive`, `ClaimRecord.valid_until`,
   `MissionContract.risk_tier` / `cadence`, `CommandResult.failure_outcome`, and
   `FailureOutcome` dataclass are in `schemas.py`.
-- **[11C]** Eval naming contract enforced: all 60 probes use capability-based
+- **[11C/12]** Eval naming contract enforced: all 67 probes use capability-based
   prefixes (`authority_`, `claim_custody_`, `intent_fidelity_`, `pipeline_`,
   `regression_`, `repair_`, `substrate_`, `synthesis_`).
-- **[12 planned]** ORPI v0 (`PlanOfAction/orpi_spec.md`): `PrimitiveSpec` gains
-  `mode`, `cadence`, `invariant_level` (MiniGrid degenerate defaults) and its
-  `primitive_type` is remapped to `{sense, actuation, meta}`.
-  `CapabilityRegistry.minigrid_default()` graduates into a registered ORPI
-  manifest; every executed turn emits a `LabelledEpisode`. Conformance is gated by
-  a new `orpi` eval suite.
+- **[12]** ORPI v0 (`PlanOfAction/orpi_spec.md`) has a compat bridge:
+  `PrimitiveSpec` carries `mode`, `cadence`, and `invariant_level`; legacy
+  primitive layers serialize through `OrpiContract` as `{sense, actuation,
+  meta}` while keeping layer grouping stable.
+- **[12]** `MiniGridSubstrateAdapter.orpi_manifest()` publishes an
+  `OrpiManifest` with MiniGrid symbol mappings, frames, units, risk policy, and
+  a contract for every registered capability.
+- **[12]** Every `CommandResult` carries a `LabelledEpisode` with intent,
+  grounding, plan, authority, execution, verification, attribution, and steering
+  sections. The artifact is JSON-serializable and task episodes include compact
+  postcondition evidence from final state/final claims.
+- **[12]** `evals/manifest.py` includes a new `orpi` suite covering contract
+  coverage, manifest registration, postconditions, cadence, no-deliberative-meta
+  plan references, labelled episodes, and primitive-type migration.
 
 Current architectural debt:
 
@@ -423,32 +433,19 @@ Current architectural debt:
   - Mission flow is now Cortex-owned for inline derived metric tasks, but other
     historical mission/procedure paths still need the same treatment before repo
     liposuction.
-- Eval honesty debt (Phase 11B exposed, not yet fully green):
-  - Low-level Sense paraphrases ("what is in front of me") are unsupported.
-  - Some low-level Spine paraphrases ("advance one cell") are unsupported.
-  - Distance-query paraphrases only work when trigger words like "all" or "each"
-    are present.
-  - Named procedure teaching can store a concept without a typed memory-update
-    RequestPlan.
-  - Multi-action motor/procedure prompts can preserve only the final child action
-    in the current plan/ticket state.
-  - Conditional actuation can execute raw motor motion before evidence proves
-    the condition.
-  - Compound mission paraphrases beyond the exact 11A inline sum phrase do not
-    consistently create `MissionExecutionPlan` lineage.
 - Remaining schema/knowledge debt:
   - Existing memory pockets remain internally while the facade stabilizes.
   - More Sense/Cortex/Spine paths should consume representation snapshots during
     Phase 13 evidence planning.
 - Substrate drift:
-  - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest;
-    Phase 12 graduates it into a registered ORPI manifest.
+  - MiniGrid is the only ORPI-v0 conformant substrate; the Phase 15 second
+    substrate port is still the validation event.
   - Request planning, primitive validation fixtures, and some station formatters
     still contain MiniGrid/door/grid assumptions.
   - Contract preflight is represented and gated, but not yet a general executable
     proof system for arbitrary robot stacks.
 
-The next step is Phase 11B green bar: implement the smallest production-code
-fixes needed to make the hostile primitive/mission eval ladder green. Do not
-start Phase 12 (ORPI v0), Phase 13 evidence planning, harder domains, or repo
-liposuction before the Phase 11B hostile ladder is fully green.
+Phase 12 is complete for MiniGrid ORPI v0. The next step is Phase 13: steered
+curriculum under partial observability, building on the stable
+contract/manifest/trace surface without starting harder domains or repo
+liposuction first.
