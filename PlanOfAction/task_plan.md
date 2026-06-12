@@ -798,7 +798,7 @@ Why this belongs in Phase 10:
 - A command like "synthesize a new distance metric which is the minimum between
   euclidean and manhattan distance; call it convenientDistance" should not fall
   through as unsupported.
-- Phase 12 evidence planning should build on this capability, not work around
+- Phase 13 evidence planning should build on this capability, not work around
   its absence.
 
 Non-goals:
@@ -1194,8 +1194,8 @@ After Phase 11B:
 
 - Implement the smallest architecture fixes needed to make the hostile ladder
   green.
-- Do not start Phase 12 evidence planning or repo liposuction until this ladder
-  is green.
+- Do not start Phase 12 (ORPI v0), Phase 13 evidence planning, or repo
+  liposuction until this ladder is green.
 
 ### Phase 11C - Architecture Surgery
 
@@ -1282,14 +1282,130 @@ Measured outcome:
 - `python evals/eval_master.py`: 60/60 passing.
 - All 7 operations landed with zero regressions.
 
-## Phase 12 - Minimal Representation And Evidence Planning
+## Phase 12 - ORPI v0 - Open Robotics Primitive Interface
+
+Status: planned. Authoritative spec: `PlanOfAction/orpi_spec.md`.
+
+Goal: extract the typed interface standard between the cognition layer (JEENOM)
+and an embodiment - "MCP for robot cognition." This is deliberately a v0: it is
+extracted from n=1 substrate (MiniGrid) and exists to be broken by the second
+substrate during the Phase 15 cross-substrate port. Do not start Phase 12 until
+the Phase 11B hostile ladder is green.
+
+ORPI has two halves:
+
+- Inbound - what a substrate exposes to cognition. Every capability is published
+  as a primitive with a machine-readable contract. Cognition sees contracts, not
+  hardware/drivers/policies.
+- Outbound - what a deployment emits to learning. Every executed turn produces a
+  `LabelledEpisode` (intent, grounding, plan, authority, execution, verification,
+  attribution, steering). This is the supervision artifact for self-improving
+  deployment loops; no other part of the robotics stack produces it by
+  construction.
+
+The grounding obligation is discharged at the primitive boundary. The cognition
+layer above provides grounding accounting (custody, validity, arbitration,
+composition), never grounding itself.
+
+### Primitive classes and the contract
+
+- Every primitive declares exactly one class: `sense` (reality -> claims),
+  `actuation` (approved command -> physical effect), `meta` (claims -> claims).
+- `meta` primitives declare `mode: deterministic | deliberative`. Compiled plans
+  may never reference a `deliberative` meta-primitive - this is the enforcement
+  point for the no-LLM-in-the-loop invariant.
+- The contract is the existing `schemas.PrimitiveSpec`, serialized. It already
+  carries `preconditions`, object-centric `postconditions` (Δg), the
+  `postcondition_primitive` checker, `required_claims`/`produced_claims`,
+  `units`/`frame_id`/`required_frames`, `safety_class`, `authority_level`,
+  typed `failure_modes`, `validation_hooks`, and `substrate_fingerprint`.
+  See `orpi_spec.md` §4 for the full field table.
+
+### Taxonomy migration (breaking)
+
+- Remap `schemas.PrimitiveSpec.primitive_type` allowed values from
+  `{task, grounding, sensing, action, claims}` to `{sense, actuation, meta}`.
+  5 -> 3 mapping: `sensing -> sense`, `action -> actuation`, and
+  `task | grounding | claims -> meta`.
+- Central implementation risk: two `PrimitiveSpec` classes exist - the contract
+  type in `schemas.py` and the frozen runtime type in `primitive_library.py`
+  (`runtime_kind`/`runtime_value`, used by the
+  `TASK/GROUNDING/SENSING/ACTION/CLAIMS_FILTER_PRIMITIVES` registries). "Every
+  capability registered through a contract" (conformance item 1) requires
+  bridging these two, not just renaming a string set.
+
+### Deliverables
+
+1. `jeenom/orpi.py` (or `orpi/` package): serializable `OrpiContract`,
+   `OrpiManifest`, `LabelledEpisode` - thin wrappers/serializers over existing
+   `PrimitiveSpec`, `OperationalContext`, and trace machinery, not parallel types
+   (closure rule applies).
+2. Add the three NEW contract fields (`mode`, `cadence`, `invariant_level`) to
+   `schemas.PrimitiveSpec` with MiniGrid degenerate defaults.
+3. Finish moving MiniGrid symbol mappings into the manifest (`register_domain_
+   index_maps` already moved IDX_TO_OBJECT/IDX_TO_COLOR; complete the Phase 11C
+   partition intent: `symbol_mappings`, `frames`, `units`, `risk_policy`).
+4. Retrofit all MiniGrid sense/cortex/spine primitives to register through the
+   manifest. `CapabilityRegistry.minigrid_default()` graduates into a registered
+   ORPI manifest.
+5. `LabelledEpisode` emission wired into `TurnOrchestrator`; one probe asserting
+   a full turn round-trips to a valid trace.
+6. `PlanOfAction/orpi_spec.md` versioned with the code (created; keep in sync).
+
+### Conformance
+
+A substrate is ORPI-v0 conformant when (1) every capability is registered through
+a contract - no side channels; (2) the manifest is registered at init; (3) all
+postconditions are object-centric deltas and every actuation primitive with
+`safety_class != query` names a `postcondition_primitive`; (4) cadence
+declarations are honoured (no deliberation-cadence call on a Spine path); (5)
+every executed turn emits a `LabelledEpisode`; (6) no compiled plan references a
+`deliberative` meta-primitive.
+
+### Red-bar conformance probes (eval-first; spec only this round)
+
+These are specified now and authored before the production code, following the
+Phase 11B red-bar method: each must fail on the current repo for a named,
+architecture-level reason, then be driven green. Names use the capability-prefix
+eval naming contract; register all in `evals/manifest.py` under a new `orpi`
+suite when authored.
+
+- `substrate_orpi_contract_coverage_probe.py` - conformance 1: every capability
+  is registered through a contract; no side-channel capabilities.
+- `substrate_orpi_manifest_registration_probe.py` - conformance 2: manifest is
+  registered at adapter init; the permissive validation window is provably never
+  live.
+- `substrate_orpi_postcondition_probe.py` - conformance 3: all postconditions are
+  object-centric Δg; every actuation with `safety_class != query` names a
+  `postcondition_primitive`.
+- `substrate_orpi_cadence_probe.py` - conformance 4: AST static check - no
+  deliberation-cadence call on a Spine/control path.
+- `substrate_orpi_no_llm_in_loop_probe.py` - conformance 6: AST static check - no
+  compiled plan references a `deliberative` meta-primitive.
+- `pipeline_orpi_labelled_episode_probe.py` - conformance 5: a full turn
+  round-trips to a valid `LabelledEpisode`.
+- `regression_orpi_primitive_type_migration_probe.py` - the taxonomy remap leaves
+  the existing eval suite green (migration safety net).
+
+### Acceptance criteria
+
+- MiniGrid is ORPI-v0 conformant against all six conformance items.
+- The three NEW fields exist with degenerate MiniGrid defaults; no other
+  substrate semantics leak into the schema.
+- Every executed turn round-trips to a valid `LabelledEpisode`, failed episodes
+  included with attribution.
+- The taxonomy remap lands with zero regressions on the existing eval suite.
+
+## Phase 13 - Steered Curriculum under Partial Observability
 
 Status: planned.
 
 Goal: prove JEENOM can collaborate about uncertainty without building a giant
-ontology.
+ontology, and that it improves with operator steering across a curriculum it has
+not memorized. This phase absorbs the former "Minimal Representation and Evidence
+Planning" loop and runs it under genuine partial observability.
 
-Minimum loop:
+Minimum loop (carried over):
 
 1. Operator gives WHY.
 2. JEENOM turns it into WHAT.
@@ -1302,21 +1418,37 @@ Minimum loop:
 Minimal additions:
 
 - Extend existing claims rather than adding many new classes.
-- Add `RequestPlan` evidence steps.
-- Add `ReadinessGraph` status/action for `needs_evidence`.
+- Add `RequestPlan` evidence steps and a `ReadinessGraph` status/action for
+  `needs_evidence`.
 - Add simple typed steering constraints: budget, scope, risk, stopping rule.
 - Keep operator claims separate from observation/world claims.
 - Let procedures reuse solved decompositions only when the evidence supports it.
 
+New for the steered curriculum:
+
+- Derived-claim layer: deterministic `meta` primitives (per ORPI v0) infer claims
+  from observed claims (e.g. reachability, "behind", "searched region") instead
+  of asking the substrate for omniscient answers.
+- Ask-for-help: when evidence is missing or ambiguous, JEENOM emits a typed
+  request for steering; the operator response is recorded in the
+  `LabelledEpisode` `steering` field.
+- MiniGrid map ladder: progressively harder partial-observability maps, where the
+  agent cannot see the whole grid and must search/ask rather than answer
+  omnisciently.
+- KB reuse: solved decompositions and operator claims carry forward across the
+  ladder when evidence still supports them.
+- MTBCI metric: mean turns between clarification/intervention - the headline
+  measure that JEENOM is getting steered less as it learns the curriculum.
+
 Pressure tests:
 
 - MiniGrid visible-only query:
-  - "closest/farthest door" must answer with scope or ask to search
+  - "closest/farthest door" must answer with scope or ask to search.
   - no omniscient full-grid answer unless the substrate explicitly provides that
-    as an authorized HOW
+    as an authorized HOW.
 - Robotics-like mock:
-  - path-planner primitive returns reachable/unreachable/path
-  - JEENOM converts that into claims and plan decisions
+  - path-planner primitive returns reachable/unreachable/path.
+  - JEENOM converts that into claims and plan decisions.
 
 Acceptance criteria:
 
@@ -1324,66 +1456,11 @@ Acceptance criteria:
   not-knowable.
 - Evidence gathering is represented as a plan, not a phrase branch.
 - Operator steering changes typed plan constraints.
+- MTBCI improves across repeated runs of the same ladder rung as KB reuse kicks
+  in.
 - MiniGrid and robotics-like mock both use the same cognition loop.
 
-## Phase 13 - Cross-Substrate Demonstration
-
-Status: planned.
-
-Goal: prove the same architecture works on MiniGrid and a robotics-like
-substrate.
-
-Demo requirements:
-
-- Same `OperatorIntent`, `RequestPlan`, `ReadinessGraph`, claims, tickets, and
-  orchestration kernel.
-- Different substrate HOW:
-  - MiniGrid: grid observation, grid actions, grid pathing.
-  - Robotics-like mock or robot stack: sensors, pose/map, path planner,
-    controller/action binding.
-- Same operator collaboration pattern:
-  - ask for missing evidence
-  - accept steering constraints
-  - compose a plan from available primitives
-  - execute through tickets
-  - update claims/provenance
-
-Acceptance criteria:
-
-- One MiniGrid task and one robotics-like task follow the same cognitive flow.
-- Differences are confined to substrate adapter and domain helpers.
-- No MiniGrid vocabulary leaks into the generic kernel.
-
-## Phase 14 - ARC-Style Steerable Prototype
-
-Status: later.
-
-Goal: pressure the same architecture with an ARC-like interactive reasoning
-substrate.
-
-Do not start by trying to solve ARC. Start with a tiny ARC-like substrate:
-
-- observation/state API
-- legal action API
-- transition feedback
-- score/end feedback
-- substrate-specific state parser
-
-JEENOM should own:
-
-- representing observations as claims
-- comparing state transitions
-- asking for steering
-- planning the next experiment/action
-- updating claims/procedures from feedback
-
-Acceptance criteria:
-
-- The ARC-like prototype uses the same WHY/WHAT/HOW split.
-- The LLM does not directly solve by free-form answer.
-- The operator can steer experiments and strategy.
-
-## Phase 15 - Operational Hardening
+## Phase 14 - Operational Hardening
 
 Status: later.
 
@@ -1398,6 +1475,32 @@ Planned work:
 - transfer evals
 - missing primitive / ambiguity / no-path handling
 - render-time guarantees preserved across substrates
+
+## Phase 15 - Cross-Substrate Demonstration & ORPI v1 Freeze
+
+Status: later. Not specced beyond this pointer - the second substrate is the
+validation event, and specifying the port now would ossify v0's n=1 abstractions.
+
+Goal: prove the same architecture and the same ORPI contract/manifest/trace work
+on MiniGrid and a second, robotics-like substrate - and use that port to freeze
+ORPI v0 to v1.
+
+Pointer requirements:
+
+- Same `OperatorIntent`, `RequestPlan`, `ReadinessGraph`, claims, tickets, and
+  orchestration kernel; only the substrate adapter HOW differs.
+- Both substrates register an ORPI manifest and pass all six conformance items.
+- Every place ORPI v0 bends or breaks during the port is recorded as a spec issue
+  against `orpi_spec.md`.
+
+Acceptance criteria (also the v1 freeze gate):
+
+- Second substrate is ORPI-v0 conformant; one MiniGrid task and one robotics-like
+  task follow the same cognitive flow.
+- Differences are confined to the substrate adapter and domain helpers; no
+  MiniGrid vocabulary leaks into the generic kernel.
+- ORPI freezes to v1: from v1, additive changes only; breaking changes require a
+  major version.
 
 ## Phase 16 - Capability Stress Tests
 

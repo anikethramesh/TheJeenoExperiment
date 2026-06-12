@@ -16,6 +16,9 @@ flowchart LR
   FP["Context fingerprint<br>cache / reuse boundary"]
   SLICE["Compact context slice<br>LLM only when needed"]
   TEST["Phase 11B hostile eval ladder<br>same flow under paraphrases"]
+  ORPI["ORPI contract boundary (Phase 12)<br>SubstrateAdapter publishes OrpiContracts via OrpiManifest"]
+  EP["LabelledEpisode (Phase 12)<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
+  CONF["ORPI conformance probes (Phase 12)<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
 
   subgraph ARCH["JEENOM WHAT"]
     TO["TurnOrchestrator<br>dispatch: 5 knowledge_type paths"]
@@ -72,3 +75,9 @@ flowchart LR
   TEST -. "low-level Spine paraphrases" .-> SP
   TEST -. "named procedures + compound missions" .-> CX
   TEST -. "conditional evidence before actuation" .-> RG
+
+  SUB -. "publishes capability contracts" .-> ORPI
+  ORPI -. "registered manifest" .-> REG
+  KB -->|emit per executed turn| EP
+  CONF -. "gates contract boundary" .-> ORPI
+  CONF -. "turn round-trips to valid trace" .-> EP

@@ -121,6 +121,28 @@
     assumption does not match. This is the Phase 9B foundation for JEENOM as retrofit
     cognition rather than a MiniGrid-specific controller.
 
+    Phase 12 formalizes this contract as **ORPI v0** (`PlanOfAction/orpi_spec.md`): a
+    typed interface standard with a contract/manifest/trace triad.
+
+    - Contract: the existing `schemas.PrimitiveSpec`, serialized as `OrpiContract`,
+      with three NEW fields - `mode` (`deterministic | deliberative`, meta only),
+      `cadence` (`control | perception | deliberation`), and `invariant_level`
+      (`pose | contact | object_state | intent`).
+    - Manifest: one per substrate (`OrpiManifest`), registered at adapter init,
+      extending `register_domain_vocabulary` / `OperationalContext` with
+      `symbol_mappings`, `frames`, `units`, and an auditable `risk_policy`.
+    - Trace: every executed turn emits a `LabelledEpisode` - a thin aggregator over
+      `OperatorIntent`/`RequestPlan`/`ReadinessGraph`/`CommandResult`/`FailureOutcome`,
+      carrying intent, grounding, plan, authority, execution, verification, and
+      failure attribution. This is the standard outbound supervision artifact.
+
+    **Breaking schema change (Phase 12):** `PrimitiveSpec.primitive_type` is remapped
+    from `{task, grounding, sensing, action, claims}` to the three ORPI classes
+    `{sense, actuation, meta}` (`sensing -> sense`, `action -> actuation`,
+    `task | grounding | claims -> meta`). The no-LLM-in-the-loop invariant (rule 6) is
+    enforced at the contract: a compiled plan may never reference a `deliberative`
+    meta-primitive. Conformance is probe-enforced (six items; see `orpi_spec.md` §7).
+
 12. ApprovedCommand and tickets are executable authority.
     A plan or primitive name is not enough to act. The station must wrap each
     operator turn in a `CorticalEnvelope`, route it through `RequestPlan` and
@@ -385,6 +407,12 @@ Current enforced gateways:
 - **[11C]** Eval naming contract enforced: all 60 probes use capability-based
   prefixes (`authority_`, `claim_custody_`, `intent_fidelity_`, `pipeline_`,
   `regression_`, `repair_`, `substrate_`, `synthesis_`).
+- **[12 planned]** ORPI v0 (`PlanOfAction/orpi_spec.md`): `PrimitiveSpec` gains
+  `mode`, `cadence`, `invariant_level` (MiniGrid degenerate defaults) and its
+  `primitive_type` is remapped to `{sense, actuation, meta}`.
+  `CapabilityRegistry.minigrid_default()` graduates into a registered ORPI
+  manifest; every executed turn emits a `LabelledEpisode`. Conformance is gated by
+  a new `orpi` eval suite.
 
 Current architectural debt:
 
@@ -411,9 +439,10 @@ Current architectural debt:
 - Remaining schema/knowledge debt:
   - Existing memory pockets remain internally while the facade stabilizes.
   - More Sense/Cortex/Spine paths should consume representation snapshots during
-    Phase 12 evidence planning.
+    Phase 13 evidence planning.
 - Substrate drift:
-  - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest.
+  - `CapabilityRegistry.minigrid_default()` is the only real substrate manifest;
+    Phase 12 graduates it into a registered ORPI manifest.
   - Request planning, primitive validation fixtures, and some station formatters
     still contain MiniGrid/door/grid assumptions.
   - Contract preflight is represented and gated, but not yet a general executable
@@ -421,5 +450,5 @@ Current architectural debt:
 
 The next step is Phase 11B green bar: implement the smallest production-code
 fixes needed to make the hostile primitive/mission eval ladder green. Do not
-start Phase 12 evidence planning, harder domains, or repo liposuction before
-the Phase 11B hostile ladder is fully green.
+start Phase 12 (ORPI v0), Phase 13 evidence planning, harder domains, or repo
+liposuction before the Phase 11B hostile ladder is fully green.

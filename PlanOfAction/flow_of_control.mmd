@@ -12,6 +12,9 @@ flowchart TD
   Cache["Plan/template cache<br>keyed by context fingerprint"]
   Slice["Compact context slice<br>only when LLM needs it"]
   EvalLadder["Phase 11B hostile eval ladder<br>sense / spine / procedure / conditional / mission"]
+  OrpiManifest["ORPI manifest (Phase 12)<br>SubstrateAdapter publishes OrpiContracts<br>(+ symbol_mappings / frames / units / risk_policy)"]
+  Episode["LabelledEpisode (Phase 12)<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
+  OrpiConf["ORPI conformance probes (Phase 12)<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
 
   Start["Operator utterance"]
   Station["OperatorStation<br>wrap as CorticalEnvelope"]
@@ -81,3 +84,11 @@ flowchart TD
   EvalLadder -. "primitive-role checks" .-> Ready
   EvalLadder -. "evidence before action" .-> Sense
   EvalLadder -. "ticket/provenance lineage" .-> Spine
+
+  Substrate -. "publishes capability contracts" .-> OrpiManifest
+  OrpiManifest --> Registry
+  KnowledgeWrite -->|emit per executed turn| Episode
+  Result -->|emit per executed turn| Episode
+  OrpiConf -. "gates contract boundary" .-> OrpiManifest
+  OrpiConf -. "no deliberative meta in compiled plan" .-> Ready
+  OrpiConf -. "turn round-trips to valid trace" .-> Episode
