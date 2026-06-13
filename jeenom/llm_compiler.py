@@ -592,7 +592,14 @@ class SmokeTestCompiler(CompilerBackend):
                     reason=f"Explicit mission contract with {len(raw_steps)} tasks.",
                 )
 
-        color_pattern = r"red|green|blue|yellow|purple|grey|gray"
+        _color_idx = (capability_manifest or {}).get("symbol_mappings", {}).get("color_index") or {}
+        if _color_idx:
+            _color_names = list(_color_idx.values())
+            if "grey" in _color_names and "gray" not in _color_names:
+                _color_names.append("gray")
+            color_pattern = "|".join(re.escape(c) for c in _color_names)
+        else:
+            color_pattern = r"red|green|blue|yellow|purple|grey|gray"
         door_match = re.search(
             rf"\b(?:go to|go the|reach|find|get to|head to|navigate to)\s+"
             rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door)\b",

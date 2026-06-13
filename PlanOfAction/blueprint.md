@@ -121,7 +121,7 @@
     assumption does not match. This is the Phase 9B foundation for JEENOM as retrofit
     cognition rather than a MiniGrid-specific controller.
 
-    Phase 12 formalizes this contract as **ORPI v0** (`PlanOfAction/orpi_spec.md`): a
+    Phase 12 formalizes this contract as **ORPI v0.1** (`PlanOfAction/orpi_spec.md`): a
     typed interface standard with a contract/manifest/trace triad.
 
     - Contract: the existing `schemas.PrimitiveSpec`, serialized as `OrpiContract`,
@@ -130,11 +130,16 @@
       (`pose | contact | object_state | intent`).
     - Manifest: one per substrate (`OrpiManifest`), registered at adapter init,
       extending `register_domain_vocabulary` / `OperationalContext` with
-      `symbol_mappings`, `frames`, `units`, and an auditable `risk_policy`.
+      `symbol_mappings`, `frames`, `units`, an auditable `risk_policy`, and
+      optional OEM `bundled_procedures`.
+    - Procedure: `OrpiProcedure` is the schema-backed view of a vouched-for
+      recipe. Bundled procedures are selectable by declared postcondition like
+      primitives, but expand to primitive handles before authority/ticket gates.
     - Trace: every executed turn emits a `LabelledEpisode` - a thin aggregator over
       `OperatorIntent`/`RequestPlan`/`ReadinessGraph`/`CommandResult`/`FailureOutcome`,
-      carrying intent, grounding, plan, authority, execution, verification, and
-      failure attribution. This is the standard outbound supervision artifact.
+      carrying intent, grounding, plan, authority, execution, verification,
+      failure attribution, candidate provenance, KB writes, and per-scope
+      knowledge reuse. This is the standard outbound supervision artifact.
 
     **Taxonomy (Phase 12):** `OrpiContract.primitive_type` always returns one of
     `{sense, actuation, meta}` via `orpi_primitive_type_for()`. The mapping is:
@@ -144,8 +149,13 @@
     types directly) is deferred to after the Phase 15 cross-substrate port, when it won't
     break a single substrate. The no-LLM-in-the-loop invariant (rule 6) is enforced in
     `CortexSession.plan`: a compiled plan referencing a `deliberative` meta-primitive
-    raises `SchemaValidationError`. Conformance is probe-enforced (six items; see
-    `orpi_spec.md` §7).
+    raises `SchemaValidationError`. Conformance is probe-enforced (see
+    `orpi_spec.md` §9).
+
+    **Knowledge scope (Phase 12C):** durable KB records carry `scope`:
+    `site`, `embodiment`, or `universal`. `episodic` claims remain in the claim
+    store, not the KB. `KnowledgeChannel` gates writes by writer identity,
+    emits KB writes into labelled episodes, and records per-scope reuse counters.
 
 12. ApprovedCommand and tickets are executable authority.
     A plan or primitive name is not enough to act. The station must wrap each
@@ -350,15 +360,16 @@ ARC-AGI3:
 - HOW: ARC game-state API, legal action API, state parser, replay/simulation
   tools, scoring/end-state feedback.
 
-## Current Repo Shape After Phase 12 ORPI v0 Completion
+## Current Repo Shape After Phase 12 ORPI v0.1 Completion
 
 The implementation now enforces the cortical control-plane objects, the
 block/schema/knowledge boundary gates, the substrate HOW boundary, Cortex-owned
 compound mission flow, the full Phase 11C architecture surgery outcomes, and
-the MiniGrid ORPI-v0 contract/manifest/trace boundary.
+the MiniGrid ORPI-v0.1 contract/manifest/procedure/trace/knowledge-scope
+boundary.
 
-**Verification:** 67/67 evals passing, including 7/7 ORPI conformance probes;
-`python -m pytest -q tests` is 265 passing.
+**Verification:** 70/70 evals passing, including 9/9 ORPI probes;
+`python -m pytest -q tests` is 267 passing.
 
 Current enforced gateways:
 
@@ -372,6 +383,10 @@ Current enforced gateways:
   `invalidation`).
 - `KnowledgeSnapshot` lets readiness consume typed knowledge state.
 - `RepresentationStore` wraps existing `OperationalMemory` and `KnowledgeBase`.
+- `KnowledgeChannel` gates KB access, enforces writer/scope policy, and exposes
+  scope invalidation hooks.
+- `NamedConcept.scope` and `derive_scope()` distinguish `site`, `embodiment`,
+  and `universal` durable knowledge.
 - Station active grounding claims are representation-backed.
 - Station request-plan/readiness provenance is recorded through the
   representation store.
@@ -410,46 +425,98 @@ Current enforced gateways:
 - **[11C]** `PrimitiveSpec.postcondition_primitive`, `ClaimRecord.valid_until`,
   `MissionContract.risk_tier` / `cadence`, `CommandResult.failure_outcome`, and
   `FailureOutcome` dataclass are in `schemas.py`.
-- **[11C/12]** Eval naming contract enforced: all 67 probes use capability-based
+- **[11C/12]** Eval naming contract enforced: all 70 probes use capability-based
   prefixes (`authority_`, `claim_custody_`, `intent_fidelity_`, `pipeline_`,
   `regression_`, `repair_`, `substrate_`, `synthesis_`).
-- **[12]** ORPI v0 (`PlanOfAction/orpi_spec.md`) has a compat bridge:
+- **[12]** ORPI v0.1 (`PlanOfAction/orpi_spec.md`) has a compat bridge:
   `PrimitiveSpec` carries `mode`, `cadence`, and `invariant_level`; legacy
   primitive layers serialize through `OrpiContract` as `{sense, actuation,
   meta}` while keeping layer grouping stable.
 - **[12]** `MiniGridSubstrateAdapter.orpi_manifest()` publishes an
   `OrpiManifest` with MiniGrid symbol mappings, frames, units, risk policy, and
   a contract for every registered capability.
+- **[12B]** `OrpiProcedure` and `OrpiManifest.bundled_procedures` make OEM
+  procedures first-class interface objects while keeping authority gating
+  per-primitive after expansion.
 - **[12]** Every `CommandResult` carries a `LabelledEpisode` with intent,
   grounding, plan, authority, execution, verification, attribution, and steering
   sections. The artifact is JSON-serializable and task episodes include compact
   postcondition evidence from final state/final claims.
-- **[12]** `evals/manifest.py` includes a new `orpi` suite covering contract
+- **[12B/12C]** `LabelledEpisode.plan.candidates` records primitive/procedure
+  candidate provenance, while `LabelledEpisode.steering` records KB writes and
+  per-scope reuse counters.
+- **[12C]** Durable KB writes now flow through `KnowledgeChannel`; operator
+  writes default to `site`, OEM manifest procedures derive `embodiment`, and
+  effect-only synthesized recipes can derive `universal`.
+- **[12]** `evals/manifest.py` includes an `orpi` suite covering contract
   coverage, manifest registration, postconditions, cadence, no-deliberative-meta
-  plan references, labelled episodes, and primitive-type migration.
+  plan references, labelled episodes, procedure selection, knowledge scoping,
+  and primitive-type migration.
 
 Current architectural debt:
 
-- Remaining block debt:
-  - `OperatorStationSession` is still a large facade over orchestration,
-    conversation, MiniGrid substrate bindings, query formatting,
-    repair/synthesis, memory writes, and task runtime.
+- Structural bloat (parked, orthogonal to both proofs):
+  - `OperatorStationSession` is still a large facade (~5,613 lines) over
+    orchestration, conversation, MiniGrid substrate bindings, query formatting,
+    repair/synthesis, memory writes, and task runtime. Only ~67 lines are
+    substrate-coupled; the rest is large-but-generic. The de-bloat is deferred to
+    Phase 16 and gated by the decomposition-design rule above. The 12D audit
+    catalogs the worklist but bloat does not compete for phase position.
   - Mission flow is now Cortex-owned for inline derived metric tasks, but other
-    historical mission/procedure paths still need the same treatment before repo
-    liposuction.
+    historical mission/procedure paths still need the same treatment.
 - Remaining schema/knowledge debt:
   - Existing memory pockets remain internally while the facade stabilizes.
   - More Sense/Cortex/Spine paths should consume representation snapshots during
     Phase 13 evidence planning.
-- Substrate drift:
-  - MiniGrid is the only ORPI-v0 conformant substrate; the Phase 15 second
-    substrate port is still the validation event.
-  - Request planning, primitive validation fixtures, and some station formatters
-    still contain MiniGrid/door/grid assumptions.
+- Substrate coupling (the boundary - on the critical path):
+  - MiniGrid is the only ORPI-conformant substrate; AI2-THOR (the Phase 14 spike
+    and Phase 15 committed port) is the substrate-independence validation event.
+  - Domain vocabulary is baked into generically-named code - notably
+    `llm_compiler.py`'s fast-path `door` grammar (the prime structural-leak
+    suspect), `request_planner.py` `rank_scene_doors`, the `MiniGridSense`/
+    `MiniGridSpine` role bindings, and the MiniGrid primitive set in
+    `primitive_library.py`. The 12D leak audit catalogs each site with a
+    `{cheap | structural} x {curriculum-touching | not}` verdict; removal happens
+    before Phase 13 (curriculum-touching) or in Phase 14 (the rest).
   - Contract preflight is represented and gated, but not yet a general executable
     proof system for arbitrary robot stacks.
 
-Phase 12 is complete for MiniGrid ORPI v0. The next step is Phase 13: steered
-curriculum under partial observability, building on the stable
-contract/manifest/trace surface without starting harder domains or repo
-liposuction first.
+Phase 12, 12B, and 12C are complete for MiniGrid ORPI v0.1. The current phase is
+**Phase 12D - Consolidation + Leak Audit**: close v0.1 cleanly (doc-label
+unification to v0.1, `LabelledEpisode` attribution-taxonomy + postcondition
+verification, the diagram emission-node fix) and produce the leak audit that
+orders everything after it.
+
+Phase order from here, and the reasoning behind it:
+
+- **12D Consolidation + Leak Audit.** The audit separates two orthogonal problems
+  and tags every substrate-coupling site
+  `{cheap | structural} x {curriculum-touching | not}`. That table - not an
+  assumption - decides whether the curriculum can precede leak removal.
+- **13 Steered Curriculum (MiniGrid).** Proves *steering* under partial
+  observability. Any leak the curriculum would build on top of is removed first
+  (curriculum-touching, per the 12D audit), so the curriculum never entrenches a
+  leak.
+- **14 Cheap Leak Removal + AI2-THOR spike.** Removes the remaining
+  `cheap`/`not-curriculum-touching` leaks to clean the boundary, then a parallel
+  `ai2thor` exploratory branch proves *substrate-independence*. Steering and
+  substrate-independence are validated on separate substrates so neither signal
+  masks the other.
+- **15 Cross-Substrate & v1 Freeze.** Committed AI2-THOR port that merges the
+  spike's findings (incl. a spike-driven second targeted leak-removal pass) and
+  freezes ORPI to v1.
+- **16 Operational Hardening.** Absorbs the deferred `operator_station.py`
+  de-bloat **in full**.
+- **17 Capability Stress.**
+
+Two standing rules from this reorientation:
+
+- **Bloat is orthogonal to both proofs and is parked.** The `operator_station.py`
+  size (~5,613 lines, of which only ~67 are substrate-coupled) blocks neither
+  steering nor substrate-independence, so it does not compete for phase position.
+  No early de-bloat - wanting the file smaller is not a reason to take on a
+  5,600-line refactor ahead of either proof.
+- **Decomposition-design gate.** Any `operator_station.py` extraction - whenever
+  it lands - is gated by a decomposition design (target modules, shared-state map,
+  ordered green-able extraction sequence) written and reviewed first. No station
+  code moves before that design exists.

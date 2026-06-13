@@ -124,6 +124,7 @@ def main() -> int:
     from jeenom.capability_registry import CapabilityRegistry
     from jeenom.knowledge_base import KnowledgeBase
     from jeenom.memory import OperationalMemory
+    from jeenom.turn_orchestrator import KnowledgeChannel
     from jeenom.readiness_graph import evaluate_request_plan
     import jeenom.schemas as schemas
 
@@ -187,7 +188,7 @@ def main() -> int:
     if RepresentationStore is not None:
         store = RepresentationStore(
             memory=OperationalMemory(root=Path("/tmp/jeenom-phase9e-schema-probe")),
-            knowledge_base=KnowledgeBase(storage_path=None),
+            knowledge_channel=KnowledgeChannel(KnowledgeBase(storage_path=None)),
         )
         try:
             store.put_claim({"key": "loose", "value": True})  # type: ignore[arg-type]
@@ -220,7 +221,7 @@ def main() -> int:
         root = Path(tempfile.mkdtemp())
         kstore = RepresentationStore(
             memory=OperationalMemory(root=root),
-            knowledge_base=KnowledgeBase(storage_path=None),
+            knowledge_channel=KnowledgeChannel(KnowledgeBase(storage_path=None)),
         )
         records = [
             ClaimRecord(
@@ -290,7 +291,7 @@ def main() -> int:
     if RepresentationStore is not None:
         rstore = RepresentationStore(
             memory=OperationalMemory(root=Path(tempfile.mkdtemp())),
-            knowledge_base=KnowledgeBase(storage_path=None),
+            knowledge_channel=KnowledgeChannel(KnowledgeBase(storage_path=None)),
         )
         rstore.set_active_claims(_active_claims())
         snapshot = rstore.snapshot(claims_valid=True)

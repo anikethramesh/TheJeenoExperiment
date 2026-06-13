@@ -43,6 +43,7 @@ from .side_effect_authority import SideEffectAuthority
 from .substrate_adapter import SubstrateAdapter
 from .intent_cache import IntentCache, SEQUENCE_STEP_PREFIX, SEQUENCE_STEP_SUFFIX, parse_metric_query, seed_intent_cache
 from .turn_orchestrator import (
+    KnowledgeChannel,
     PendingClarification,
     PendingPrimitiveDefinition,
     PendingSynthesisProposal,
@@ -350,9 +351,15 @@ class OperatorStationSession:
         self.cortex_session = CortexSession(
             registry=self.capability_registry,
             planning_semantics=self.planning_semantics,
+            risk_policy=self.runtime_package.resolve_orpi_manifest().risk_policy or None,
         )
         self.intent_cache = IntentCache()
         seed_intent_cache(self.intent_cache, self.capability_registry)
+        # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
+        self.knowledge_base = KnowledgeBase(
+            storage_path=self.memory.memory_dir / "knowledge_base.json"
+        )
+        self.knowledge_channel = KnowledgeChannel(self.knowledge_base)
         self.turn_orchestrator = TurnOrchestrator(
             classify_utterance=self._classify_utterance,
             normalize_utterance=_normalize_utterance,
@@ -361,13 +368,9 @@ class OperatorStationSession:
             mission_cortex=self.mission_cortex,
             intent_cache=self.intent_cache,
         )
-        # KnowledgeBase persists alongside knowledge.yaml in memory_dir.
-        self.knowledge_base = KnowledgeBase(
-            storage_path=self.memory.memory_dir / "knowledge_base.json"
-        )
         self.representation = RepresentationStore(
             memory=self.memory,
-            knowledge_base=self.knowledge_base,
+            knowledge_channel=self.knowledge_channel,
         )
         self.command_authority = CommandAuthority(station_name="OperatorStationSession")
         self.side_effect_authority = SideEffectAuthority(source_name="OperatorStationSession")
@@ -491,6 +494,9 @@ class OperatorStationSession:
             return None
 
         instruction = self._startup_warmup_instruction()
+        if instruction is None:
+            self.log("no manifest vocabulary; skipping startup prewarm")
+            return None
         self.log("warming up known go_to_object task family")
         self.log(f"startup warmup target: {instruction}")
         self._pump_render_window()
@@ -511,20 +517,40 @@ class OperatorStationSession:
             "cache_entries": len(self.plan_cache.entries),
         }
 
-    def _startup_warmup_instruction(self) -> str:
+    def _startup_warmup_instruction(self) -> str | None:
+        manifest = self.runtime_package.resolve_orpi_manifest()
+        manifest_dict = manifest.as_dict() if manifest is not None else {}
+        color_index = manifest_dict.get("symbol_mappings", {}).get("color_index") or {}
+        object_vocab = set(manifest_dict.get("object_vocabulary") or [])
+        valid_colors = set(color_index.values())
+
         delivery_target = self.memory.knowledge.get("delivery_target")
         if isinstance(delivery_target, dict):
             color = delivery_target.get("color")
             object_type = delivery_target.get("object_type")
-            if color in self.domain_helper.supported_colors and object_type == "door":
-                return f"go to the {self.domain_helper.normalize_color(color)} door"
+            if color in valid_colors and object_type in object_vocab:
+                return f"go to the {self.domain_helper.normalize_color(color)} {object_type}"
 
         target_color = self.memory.knowledge.get("target_color")
         target_type = self.memory.knowledge.get("target_type")
-        if target_color in self.domain_helper.supported_colors and target_type == "door":
-            return f"go to the {self.domain_helper.normalize_color(target_color)} door"
+        if target_color in valid_colors and target_type in object_vocab:
+            return f"go to the {self.domain_helper.normalize_color(target_color)} {target_type}"
 
-        return "go to the red door"
+        if color_index and object_vocab:
+            default_color = next(iter(color_index.values()))
+            default_object = next(iter(object_vocab))
+            return f"go to the {default_color} {default_object}"
+        return None
+
+    def _compiler_manifest(self) -> dict:
+        base = self.capability_registry.compact_summary()
+        manifest = self.runtime_package.resolve_orpi_manifest()
+        if manifest is not None:
+            manifest_dict = manifest.as_dict()
+            base = dict(base)
+            base["symbol_mappings"] = manifest_dict.get("symbol_mappings", {})
+            base["object_vocabulary"] = manifest_dict.get("object_vocabulary", [])
+        return base
 
     def _record_command_result(
         self,
@@ -546,6 +572,7 @@ class OperatorStationSession:
                 self.last_raw_motor_ticket,
             ),
             compiler_name=self.compiler_name,
+            manifest=self.runtime_package.resolve_orpi_manifest(),
             pending_context={
                 "clarification": self.pending_clarification.clarification_type
                 if self.pending_clarification is not None
@@ -558,6 +585,8 @@ class OperatorStationSession:
                     if self.pending_primitive_definition is not None
                     else None
                 ),
+                "knowledge_writes": self.knowledge_channel.consume_write_events(),
+                "kb_reuse_counters": self.knowledge_channel.consume_reuse_counters(),
             },
             last_result=self.last_result,
         )
@@ -610,7 +639,7 @@ class OperatorStationSession:
             utterance,
             memory=self.memory,
             scene_summary=None,
-            capability_manifest=self.capability_registry.compact_summary(),
+            capability_manifest=self._compiler_manifest(),
             active_claims_summary=(
                 self.active_claims.compact_summary() if self.active_claims is not None else None
             ),
@@ -4917,7 +4946,7 @@ class OperatorStationSession:
                 utterance,
                 memory=self.memory,
                 scene_summary=None,
-                capability_manifest=self.capability_registry.compact_summary(),
+                capability_manifest=self._compiler_manifest(),
                 active_claims_summary=None,
             )
             candidate, graph = self.cortex_session.plan(
@@ -4978,7 +5007,7 @@ class OperatorStationSession:
         return result
 
     def forget_concept(self, name: str) -> str:
-        if self.knowledge_base.forget(name):
+        if self.knowledge_channel.forget(name):
             self.log(f"concept forgotten: {name!r}")
             return f"CONCEPT FORGOTTEN: {name!r}"
         return f"CONCEPT NOT FOUND: {name!r} (nothing forgotten)"
@@ -5000,7 +5029,7 @@ class OperatorStationSession:
         cleaned = [p for p in cleaned if p]
         if len(cleaned) < 2:
             return None
-        seq = self.knowledge_base._is_sequence(",".join(cleaned))
+        seq = self.knowledge_channel.is_sequence(",".join(cleaned))
         if seq is not None:
             return ApprovedCommand(command_type="procedure_execute", utterance=utterance, payload={"steps": seq})
         # If all steps are motor commands, route to motor_sequence_execute, not sequence_execute.
@@ -5025,7 +5054,7 @@ class OperatorStationSession:
         normalized = _normalize_utterance(utterance.strip())
 
         # Check if utterance is an anonymous comma-separated sequence of known concepts
-        seq = self.knowledge_base._is_sequence(utterance.strip())
+        seq = self.knowledge_channel.is_sequence(utterance.strip())
         if seq is not None:
             self.log(f"anonymous procedure detected: {seq}")
             return _approved("procedure_execute", utterance, payload={"steps": seq})
@@ -5040,18 +5069,18 @@ class OperatorStationSession:
         # Bare adjacent known labels: "bingo bongo" → procedure_execute.
         # Prefer exact concept recall below when the full phrase is itself a concept.
         tokens = normalized.split()
-        if len(tokens) >= 2 and self.knowledge_base.recall(normalized) is None:
-            seq = self.knowledge_base._is_sequence(",".join(tokens))
+        if len(tokens) >= 2 and self.knowledge_channel.recall(normalized) is None:
+            seq = self.knowledge_channel.is_sequence(",".join(tokens))
             if seq is not None:
                 self.log(f"bare-label procedure detected: {seq}")
                 return _approved("procedure_execute", utterance, payload={"steps": seq})
 
-        concept = self.knowledge_base.recall(normalized) or self.knowledge_base.recall(utterance.strip())
+        concept = self.knowledge_channel.recall(normalized) or self.knowledge_channel.recall(utterance.strip())
         if concept is None:
             # Try stripping execution-verb prefixes: "execute bingo", "run scout", "do alpha"
             m = re.match(r"^(?:execute|run|do)\s+(.+)$", normalized)
             if m:
-                concept = self.knowledge_base.recall(m.group(1).strip())
+                concept = self.knowledge_channel.recall(m.group(1).strip())
         if concept is None:
             return None
 
@@ -5081,7 +5110,7 @@ class OperatorStationSession:
         plan_steps: list[RequestPlanStep] = []
         prev_step_id: str | None = None
         for idx, concept_name in enumerate(steps):
-            concept = self.knowledge_base.recall(concept_name)
+            concept = self.knowledge_channel.recall(concept_name)
             if concept is None:
                 self.log(f"procedure build failed: concept '{concept_name}' not found")
                 return None
@@ -5191,7 +5220,7 @@ class OperatorStationSession:
 
         results: list[str] = []
         for step_idx, step_id_name in enumerate(steps):
-            concept = self.knowledge_base.recall(step_id_name)
+            concept = self.knowledge_channel.recall(step_id_name)
             if concept is None:
                 return f"PROCEDURE ERROR\nConcept '{step_id_name}' disappeared during execution."
             self.log(f"procedure step {step_idx + 1}/{len(steps)}: {concept.name!r} → {concept.utterance!r}")
@@ -5393,7 +5422,7 @@ class OperatorStationSession:
         return f"MISSION COMPLETE ({step_labels})\n" + "\n---\n".join(results)
 
     def concepts_summary(self) -> str:
-        concepts = self.knowledge_base.all_concepts()
+        concepts = self.knowledge_channel.all_concepts()
         if not concepts:
             return "CONCEPTS\n(none — teach a concept with: remember <name> means <utterance>)"
         lines = ["CONCEPTS"]

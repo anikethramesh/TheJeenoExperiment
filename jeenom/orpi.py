@@ -12,7 +12,10 @@ from .schemas import (
 )
 
 
-ORPI_VERSION = "0"
+ORPI_VERSION = "0.1"
+ORPI_PROCEDURE_PROVENANCE = ("oem", "synthesized", "operator")
+_SAFETY_RANK = {"query": 0, "memory": 1, "actuation": 2, "hazardous": 3}
+_AUTHORITY_RANK = {"none": 0, "operator": 1, "restricted": 2, "admin": 3}
 
 
 def _obj_as_dict(value: Any) -> dict[str, Any] | None:
@@ -58,6 +61,30 @@ def _plan_required_handles(plan: dict[str, Any] | None) -> list[str]:
     return handles
 
 
+def _plan_candidate_summary(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if plan is None:
+        return []
+    candidates: list[dict[str, Any]] = []
+    for step in plan.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        constraints = step.get("constraints", {})
+        if not isinstance(constraints, dict):
+            continue
+        candidate_kind = constraints.get("candidate_kind")
+        if candidate_kind not in {"primitive", "procedure"}:
+            continue
+        candidates.append(
+            {
+                "step_id": step.get("step_id"),
+                "kind": candidate_kind,
+                "name": constraints.get("candidate_name") or step.get("required_handle"),
+                "provenance": constraints.get("candidate_provenance"),
+            }
+        )
+    return candidates
+
+
 def _readiness_node_summary(graph: dict[str, Any] | None) -> list[dict[str, Any]]:
     if graph is None:
         return []
@@ -84,6 +111,32 @@ def _readiness_node_summary(graph: dict[str, Any] | None) -> list[dict[str, Any]
 def _last_runtime_result(result_payload: dict[str, Any]) -> dict[str, Any]:
     last_result = result_payload.get("last_result")
     return dict(last_result) if isinstance(last_result, dict) else {}
+
+
+_FAILURE_CATEGORY_TO_ORPI_ATTRIBUTION: dict[str, str] = {
+    "stuck": "unmet_postcondition",
+    "progress": "unmet_postcondition",
+    "blocking_claim": "stale_claim",
+    "timeout": "substrate_fault",
+}
+
+
+def _map_failure_attribution(category: str | None) -> str | None:
+    if category is None:
+        return None
+    return _FAILURE_CATEGORY_TO_ORPI_ATTRIBUTION.get(category, "substrate_fault")
+
+
+def _postcondition_checker_for_handle(
+    handle: str | None, manifest: Any
+) -> str | None:
+    if handle is None or manifest is None:
+        return None
+    for contract in getattr(manifest, "primitives", []) or []:
+        contract_dict = contract.as_dict() if hasattr(contract, "as_dict") else {}
+        if contract_dict.get("name") == handle:
+            return contract_dict.get("postcondition_primitive")
+    return None
 
 
 def _postcondition_results(
@@ -162,6 +215,136 @@ class OrpiContract:
         }
 
 
+def _max_ranked(values: list[str], ranks: dict[str, int], default: str) -> str:
+    if not values:
+        return default
+    return max(values, key=lambda item: ranks.get(item, -1))
+
+
+def _contract_by_name(registry: Any) -> dict[str, PrimitiveSpec]:
+    return {
+        spec.name: spec
+        for spec in getattr(getattr(registry, "manifest", None), "primitives", [])
+    }
+
+
+def _resolve_procedure_step(name: str, contracts: dict[str, PrimitiveSpec]) -> PrimitiveSpec:
+    candidates = [name]
+    if "." not in name:
+        candidates.extend(
+            [
+                f"task.{name}",
+                f"grounding.{name}",
+                f"sensing.{name}",
+                f"action.{name}",
+                f"claims.{name}",
+            ]
+        )
+    for candidate in candidates:
+        spec = contracts.get(candidate)
+        if spec is not None:
+            return spec
+    raise SchemaValidationError(f"ORPI procedure step references unknown primitive: {name}")
+
+
+@dataclass(frozen=True)
+class OrpiProcedure:
+    """ORPI-v0.1 procedure view over an existing JEENOM recipe-like object."""
+
+    name: str
+    steps: list[dict[str, Any]]
+    declared_postconditions: list[str]
+    declared_preconditions: list[str] = field(default_factory=list)
+    provenance: str = "oem"
+    safety_class: str = "query"
+    authority_level: str = "none"
+    substrate_fingerprint: str | None = None
+    source: Any = None
+
+    def __post_init__(self) -> None:
+        if self.provenance not in ORPI_PROCEDURE_PROVENANCE:
+            raise SchemaValidationError(
+                "OrpiProcedure.provenance must be one of: "
+                + ", ".join(ORPI_PROCEDURE_PROVENANCE)
+            )
+
+    @classmethod
+    def from_recipe(
+        cls,
+        *,
+        name: str,
+        recipe: Any,
+        registry: Any,
+        declared_postconditions: list[str] | None = None,
+        declared_preconditions: list[str] | None = None,
+        provenance: str = "oem",
+        substrate_fingerprint: str | None = None,
+    ) -> "OrpiProcedure":
+        contracts = _contract_by_name(registry)
+        step_names = list(getattr(recipe, "steps", []))
+        if not step_names and isinstance(recipe, dict):
+            step_names = list(recipe.get("steps", []))
+        steps: list[dict[str, Any]] = []
+        safety_classes: list[str] = []
+        authority_levels: list[str] = []
+        for step_name in step_names:
+            spec = _resolve_procedure_step(str(step_name), contracts)
+            safety_classes.append(spec.safety_class)
+            authority_levels.append(spec.authority_level)
+            steps.append(
+                {
+                    "name": spec.name,
+                    "effect": list(spec.postconditions or spec.outputs),
+                }
+            )
+        return cls(
+            name=name,
+            steps=steps,
+            declared_postconditions=list(declared_postconditions or []),
+            declared_preconditions=list(declared_preconditions or []),
+            provenance=provenance,
+            safety_class=_max_ranked(safety_classes, _SAFETY_RANK, "query"),
+            authority_level=_max_ranked(authority_levels, _AUTHORITY_RANK, "none"),
+            substrate_fingerprint=substrate_fingerprint,
+            source=recipe,
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "OrpiProcedure":
+        return cls(
+            name=str(payload["name"]),
+            steps=[dict(step) for step in payload.get("steps", [])],
+            declared_postconditions=list(payload.get("declared_postconditions", [])),
+            declared_preconditions=list(payload.get("declared_preconditions", [])),
+            provenance=str(payload.get("provenance", "oem")),
+            safety_class=str(payload.get("safety_class", "query")),
+            authority_level=str(payload.get("authority_level", "none")),
+            substrate_fingerprint=payload.get("substrate_fingerprint"),
+        )
+
+    def primitive_step_names(self) -> list[str]:
+        names: list[str] = []
+        for step in self.steps:
+            name = step.get("name")
+            if isinstance(name, str):
+                names.append(name)
+        return names
+
+    def as_dict(self) -> dict[str, Any]:
+        return _json_safe(
+            {
+                "name": self.name,
+                "steps": [dict(step) for step in self.steps],
+                "declared_postconditions": list(self.declared_postconditions),
+                "declared_preconditions": list(self.declared_preconditions),
+                "provenance": self.provenance,
+                "safety_class": self.safety_class,
+                "authority_level": self.authority_level,
+                "substrate_fingerprint": self.substrate_fingerprint,
+            }
+        )
+
+
 @dataclass(frozen=True)
 class OrpiManifest:
     """Substrate manifest: context meaning plus published primitive contracts."""
@@ -175,6 +358,25 @@ class OrpiManifest:
     frames: dict[str, Any] = field(default_factory=dict)
     units: dict[str, Any] = field(default_factory=dict)
     risk_policy: dict[str, Any] = field(default_factory=dict)
+    bundled_procedures: list[OrpiProcedure] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        primitive_names = {contract.name for contract in self.primitives}
+        for procedure in self.bundled_procedures:
+            if procedure.provenance != "oem":
+                raise SchemaValidationError(
+                    "ORPI bundled procedures must have provenance='oem'"
+                )
+            missing = [
+                name
+                for name in procedure.primitive_step_names()
+                if name not in primitive_names
+            ]
+            if missing:
+                raise SchemaValidationError(
+                    "ORPI bundled procedure references unknown primitive(s): "
+                    + ", ".join(sorted(missing))
+                )
 
     @classmethod
     def from_context_and_registry(
@@ -200,6 +402,7 @@ class OrpiManifest:
             units=units,
             risk_policy=dict(metadata.get("risk_policy", {})),
             primitives=primitives,
+            bundled_procedures=[],
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -213,6 +416,9 @@ class OrpiManifest:
             "units": dict(self.units),
             "risk_policy": dict(self.risk_policy),
             "primitives": [contract.as_dict() for contract in self.primitives],
+            "bundled_procedures": [
+                procedure.as_dict() for procedure in self.bundled_procedures
+            ],
         }
 
 
@@ -230,7 +436,9 @@ class LabelledEpisode:
     steering: dict[str, Any]
 
     @classmethod
-    def from_command_result(cls, command_result: CommandResult) -> "LabelledEpisode":
+    def from_command_result(
+        cls, command_result: CommandResult, manifest: Any = None
+    ) -> "LabelledEpisode":
         envelope = command_result.envelope
         command = command_result.command
         ticket = command_result.ticket
@@ -250,6 +458,15 @@ class LabelledEpisode:
         )
         required_handles = _plan_required_handles(plan)
         readiness_nodes = _readiness_node_summary(graph)
+        candidates = _plan_candidate_summary(plan)
+        pending_context = dict(getattr(envelope, "pending_context", {}) or {})
+        primary_handle = required_handles[0] if required_handles else None
+        named_checker = _postcondition_checker_for_handle(primary_handle, manifest)
+        verification_method = (
+            "postcondition_primitive" if named_checker is not None else "degenerate_boolean"
+        )
+        failure_category = getattr(failure, "category", None)
+        orpi_attribution = _map_failure_attribution(failure_category)
         return cls(
             intent=intent,
             grounding={
@@ -271,6 +488,7 @@ class LabelledEpisode:
                 "readiness_graph": graph,
                 "required_handles": required_handles,
                 "readiness_nodes": readiness_nodes,
+                "candidates": candidates,
                 "graph_status": graph.get("graph_status") if graph is not None else None,
                 "next_action": graph.get("next_action") if graph is not None else None,
             },
@@ -296,6 +514,8 @@ class LabelledEpisode:
                     if isinstance(final_state, dict)
                     else None
                 ),
+                "verification_method": verification_method,
+                "postcondition_primitive": named_checker,
                 "final_state": dict(final_state) if isinstance(final_state, dict) else {},
                 "final_claim_keys": (
                     sorted(final_claims)
@@ -305,12 +525,17 @@ class LabelledEpisode:
                 "postcondition_results": postcondition_results,
             },
             attribution={
-                "failure_category": getattr(failure, "category", None),
+                "orpi_attribution": orpi_attribution,
+                "failure_category": failure_category,
                 "blocking_claim_handle": getattr(failure, "blocking_claim_handle", None),
                 "readiness_status": graph.get("graph_status") if graph is not None else None,
             },
             steering={
-                "pending_context": dict(getattr(envelope, "pending_context", {}) or {}),
+                "pending_context": pending_context,
+                "knowledge": list(pending_context.get("knowledge_writes", []) or []),
+                "kb_reuse_counters": dict(
+                    pending_context.get("kb_reuse_counters", {}) or {}
+                ),
             },
         )
 

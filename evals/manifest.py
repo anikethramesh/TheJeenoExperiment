@@ -16,6 +16,7 @@ EVAL_SPECS: list[dict[str, object]] = [
     {"file": "authority_command_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "authority_command_registry_probe.py", "suites": ["architecture"]},
     {"file": "authority_execution_ticket_probe.py", "suites": ["architecture", "cleanup"]},
+    {"file": "authority_kb_channel_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "authority_memory_write_gate_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "authority_mission_child_ticket_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "authority_motor_ticket_probe.py", "suites": ["architecture", "cleanup"]},
@@ -27,6 +28,7 @@ EVAL_SPECS: list[dict[str, object]] = [
     {"file": "claim_custody_env_assumption_probe.py", "suites": ["architecture"]},
     {"file": "claim_custody_episode_semantics_probe.py", "suites": ["cleanup"]},
     {"file": "claim_custody_knowledge_base_probe.py", "suites": ["architecture"]},
+    {"file": "claim_custody_knowledge_scope_probe.py", "suites": ["architecture", "orpi"]},
     {"file": "claim_custody_mission_contract_probe.py", "suites": ["architecture"]},
     {"file": "claim_custody_mission_flow_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "claim_custody_operational_context_probe.py", "suites": ["architecture", "cleanup"]},
@@ -48,6 +50,7 @@ EVAL_SPECS: list[dict[str, object]] = [
     # ── pipeline ──────────────────────────────────────────────────────────────
     {"file": "pipeline_dispatch_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "pipeline_orpi_labelled_episode_probe.py", "suites": ["architecture", "orpi"]},
+    {"file": "pipeline_procedure_selection_probe.py", "suites": ["architecture", "orpi"]},
     {"file": "pipeline_request_plan_probe.py", "suites": ["architecture"]},
     {"file": "pipeline_turn_orchestrator_probe.py", "suites": ["architecture", "cleanup"]},
     # ── regression ────────────────────────────────────────────────────────────

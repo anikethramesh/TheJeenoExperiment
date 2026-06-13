@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .knowledge_base import KnowledgeBase, NamedConcept
+from .knowledge_base import NamedConcept
+from .turn_orchestrator import KnowledgeChannel
 from .memory import OperationalMemory
 from .schemas import (
     ClaimRecord,
@@ -28,10 +29,10 @@ class RepresentationStore:
         self,
         *,
         memory: OperationalMemory,
-        knowledge_base: KnowledgeBase,
+        knowledge_channel: KnowledgeChannel,
     ) -> None:
         self.memory = memory
-        self.knowledge_base = knowledge_base
+        self.knowledge_channel = knowledge_channel
         self._claims: dict[str, ClaimRecord] = {}
         self._provenance: list[dict[str, Any]] = []
         self._active_claims: StationActiveClaims | None = None
@@ -98,7 +99,13 @@ class RepresentationStore:
         plan: Any | None = None,
         provenance: dict[str, Any] | None = None,
     ) -> NamedConcept:
-        concept = self.knowledge_base.teach(name, utterance, plan=plan)
+        concept = self.knowledge_channel.teach(
+            name,
+            utterance,
+            plan=plan,
+            writer="operator",
+            scope="site",
+        )
         self.put_claim(
             ClaimRecord(
                 claim_id=f"procedure:{concept.name}",
@@ -115,7 +122,7 @@ class RepresentationStore:
         return concept
 
     def get_procedure(self, name: str) -> NamedConcept | None:
-        return self.knowledge_base.recall(name)
+        return self.knowledge_channel.recall(name)
 
     # -- provenance -------------------------------------------------------------
 
@@ -214,8 +221,8 @@ class RepresentationStore:
         ):
             self.memory.update_knowledge(key, None, persist=(key == "last_instruction"))
             self._claims.pop(key, None)
-        for concept in list(self.knowledge_base.all_concepts()):
-            self.knowledge_base.forget(concept.name)
+        for concept in list(self.knowledge_channel.all_concepts()):
+            self.knowledge_channel.forget(concept.name)
             self._claims.pop(f"procedure:{concept.name}", None)
         self.record_provenance({"event": "operator_knowledge_cleared"})
 
@@ -276,7 +283,7 @@ class RepresentationStore:
             claims=dict(self._claims),
             procedures={
                 concept.name: concept.as_dict()
-                for concept in self.knowledge_base.all_concepts()
+                for concept in self.knowledge_channel.all_concepts()
             },
             provenance=[dict(item) for item in self._provenance],
             active_claims=self._active_claims,

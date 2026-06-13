@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from .schemas import RequestPlan
 
 
+KNOWLEDGE_SCOPES = ("episodic", "site", "embodiment", "universal")
+
+
 @dataclass
 class NamedConcept:
     """An operator-asserted claim: a durable, named shorthand for a full instruction.
@@ -44,6 +47,7 @@ class NamedConcept:
     claim_scope: str = "operator"
     concept_type: str = "atomic"          # "atomic" | "procedure"
     steps: list[str] = field(default_factory=list)  # procedure: ordered concept names
+    scope: str = "site"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -53,8 +57,10 @@ class NamedConcept:
             "stored_at": self.stored_at,
             "recall_count": self.recall_count,
             "tags": list(self.tags),
+            "claim_scope": self.claim_scope,
             "concept_type": self.concept_type,
             "steps": list(self.steps),
+            "scope": self.scope,
         }
 
     @classmethod
@@ -74,9 +80,62 @@ class NamedConcept:
             stored_at=data.get("stored_at", time.time()),
             recall_count=data.get("recall_count", 0),
             tags=list(data.get("tags", [])),
+            claim_scope=data.get("claim_scope", "operator"),
             concept_type=data.get("concept_type", "atomic"),
             steps=list(data.get("steps", [])),
+            scope=data.get("scope", "site"),
         )
+
+
+def _manifest_contracts(manifest: Any) -> dict[str, dict[str, Any]]:
+    if manifest is None:
+        return {}
+    primitives = getattr(manifest, "primitives", None)
+    if primitives is None and isinstance(manifest, dict):
+        primitives = manifest.get("primitives", [])
+    contracts: dict[str, dict[str, Any]] = {}
+    for primitive in primitives or []:
+        payload = primitive.as_dict() if hasattr(primitive, "as_dict") else dict(primitive)
+        name = payload.get("name")
+        if isinstance(name, str):
+            contracts[name] = payload
+    return contracts
+
+
+def derive_scope(record: Any, manifest: Any = None) -> str:
+    """Derive transfer scope from a concept/procedure and an ORPI manifest."""
+
+    provenance = getattr(record, "provenance", None)
+    if provenance == "oem":
+        return "embodiment"
+
+    contracts = _manifest_contracts(manifest)
+    effect_vocabulary: set[str] = set()
+    for payload in contracts.values():
+        effect_vocabulary.update(str(item) for item in payload.get("postconditions", []))
+        effect_vocabulary.update(str(item) for item in payload.get("outputs", []))
+
+    primitive_step_names = getattr(record, "primitive_step_names", None)
+    if callable(primitive_step_names):
+        names = primitive_step_names()
+        if any(contracts.get(name, {}).get("substrate_fingerprint") for name in names):
+            return "embodiment"
+        return "site"
+
+    plan = getattr(record, "plan", None)
+    steps = list(getattr(plan, "steps", []) or [])
+    direct_handles = [
+        getattr(step, "required_handle", None)
+        for step in steps
+        if getattr(step, "required_handle", None)
+    ]
+    if direct_handles:
+        if any(contracts.get(handle, {}).get("substrate_fingerprint") for handle in direct_handles):
+            return "embodiment"
+        if all(handle in effect_vocabulary for handle in direct_handles):
+            return "universal"
+        return "site"
+    return "site"
 
 
 class KnowledgeBase:
@@ -115,6 +174,9 @@ class KnowledgeBase:
         name: str,
         utterance: str,
         plan: RequestPlan | None = None,
+        *,
+        scope: str | None = "site",
+        manifest: Any = None,
     ) -> NamedConcept:
         """Store a named concept; updates utterance/plan if the name already exists.
 
@@ -125,6 +187,10 @@ class KnowledgeBase:
         seq = self._is_sequence(utterance)
         concept_type = "procedure" if seq is not None else "atomic"
         steps = seq if seq is not None else []
+        if scope is not None and scope not in KNOWLEDGE_SCOPES:
+            raise ValueError(f"Unknown knowledge scope: {scope}")
+        if scope == "episodic":
+            raise ValueError("KnowledgeBase does not store episodic records")
 
         existing = self._concepts.get(key)
         if existing is not None:
@@ -133,6 +199,7 @@ class KnowledgeBase:
             existing.steps = steps
             if plan is not None:
                 existing.plan = plan
+            existing.scope = scope or derive_scope(existing, manifest)
             self.persist()
             return existing
         concept = NamedConcept(
@@ -141,7 +208,9 @@ class KnowledgeBase:
             plan=plan,
             concept_type=concept_type,
             steps=steps,
+            scope=scope or "site",
         )
+        concept.scope = scope or derive_scope(concept, manifest)
         self._concepts[key] = concept
         self.persist()
         return concept
@@ -173,6 +242,16 @@ class KnowledgeBase:
 
     def all_concepts(self) -> list[NamedConcept]:
         return list(self._concepts.values())
+
+    def purge_scope(self, scope: str) -> int:
+        if scope not in KNOWLEDGE_SCOPES:
+            raise ValueError(f"Unknown knowledge scope: {scope}")
+        removed = [name for name, concept in self._concepts.items() if concept.scope == scope]
+        for name in removed:
+            del self._concepts[name]
+        if removed:
+            self.persist()
+        return len(removed)
 
     # ── persistence ───────────────────────────────────────────────────────────
 

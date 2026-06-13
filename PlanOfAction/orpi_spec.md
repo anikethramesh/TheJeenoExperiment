@@ -1,11 +1,11 @@
-# ORPI v0 — Open Robotics Primitive Interface
+# ORPI v0.1 — Open Robotics Primitive Interface
 
-**Status: v0, explicitly unstable.** Freeze to v1 only after the interface survives the
+**Status: v0.1, explicitly unstable.** Freeze to v1 only after the interface survives the
 Phase 15 cross-substrate port (the validation event). Standards extracted from n=1 substrates
-ossify the wrong abstractions; v0 exists to be broken by the second substrate, deliberately.
+ossify the wrong abstractions; v0.1 exists to be broken by the second substrate, deliberately.
 
-This document is the authoritative contract/manifest/trace reference for ORPI. It is built and
-versioned alongside the code. The implementation roadmap lives in
+This document is the authoritative contract/manifest/procedure/trace reference for ORPI. It is built
+and versioned alongside the code. The implementation roadmap lives in
 [task_plan.md](task_plan.md) Phase 12.
 
 ---
@@ -106,12 +106,39 @@ One per substrate, registered at adapter init. Extends the existing `register_do
 - `risk_policy` — table mapping `safety_class` → required claim confidence, required verification
   tier, required validation hooks. **Policy is auditable manifest data, not buried thresholds.**
 - `primitives` — list of contracts (§4)
+- `bundled_procedures` — optional OEM-vouched procedure contracts (§6)
 
 Registration is **fail-closed in spirit**: validation is permissive only before any manifest is
 registered, and a conformance probe must assert each adapter registers at init, so the permissive
 window is provably never live.
 
-## 6. The Trace (Outbound Half)
+## 6. Procedures
+
+ORPI v0.1 includes `OrpiProcedure` for vouched-for recipes that a substrate or embodiment vendor
+can expose as first-class interface objects. A procedure is not a second recipe hierarchy; it is the
+serialized interface view over the existing recipe/plan-cache record.
+
+Serialized fields:
+
+- `name`
+- `steps` — ordered primitive references by name plus effect/postcondition metadata
+- `declared_postconditions`
+- `declared_preconditions`
+- `provenance` — `oem | synthesized | operator`
+- `safety_class` — max risk class across constituent primitives
+- `authority_level` — max authority requirement across constituent primitives
+- `substrate_fingerprint`
+
+`OrpiManifest.bundled_procedures` is reserved for OEM-vouched procedures only. Manifest validation
+rejects any bundled entry whose provenance is not `oem`, and rejects any procedure step that does
+not reference a primitive present in the same manifest. Synthesized and operator procedures may be
+recorded and traced, but they are not allowed to masquerade as substrate-bundled OEM capability.
+
+Planner parity rule: a bundled procedure is selectable by declared postcondition alongside primitive
+contracts. Once selected, it expands to primitive handles before ticket issuance and readiness/
+authority checks, so procedure selection never bypasses per-primitive gates.
+
+## 7. The Trace (Outbound Half)
 
 Every turn emits a `LabelledEpisode`. It is a thin aggregator/serializer over existing trace
 machinery (`OperatorIntent`, `RequestPlan`, `ReadinessGraph`, `CommandResult`, `FailureOutcome`,
@@ -121,6 +148,7 @@ machinery (`OperatorIntent`, `RequestPlan`, `ReadinessGraph`, `CommandResult`, `
 intent          — OperatorIntent as compiled (+ verifier verdict)
 grounding       — claims consumed, with provenance/confidence/freshness at read time
 plan            — RequestPlan + ReadinessGraph verdicts per step
+                  + candidate kind/provenance (primitive vs procedure)
 authority       — tickets issued, scope, issuer
 execution       — per-step CommandResult, incl. typed FailureOutcome
 verification    — postcondition_primitive results vs. predicted postconditions  [*]
@@ -128,32 +156,51 @@ attribution     — on failure: which contract was violated                     
                   (stale_claim | miscompiled_intent | unmet_postcondition |
                    missing_authority | substrate_fault)
 steering        — any operator interventions in this episode (Phase 13 ask-for-help)
+                  + KB writes and per-scope KB reuse counters
 ```
 
-**[*] v0 proxy note.** `verification` and `attribution` are the highest-value fields for
-component-level credit assignment — and the ones most incomplete in v0.
+**[*] Closed in Phase 12D.** `verification` and `attribution` were the highest-value fields for
+component-level credit assignment — and the most incomplete in v0.
 
-- `verification` currently reflects `final_state.task_complete` and boolean `final_claims`,
-  *not* the result of invoking each contract's `postcondition_primitive` against its predicted
-  object-centric Δg. MiniGrid's degenerate case (`postcondition_primitive=None` for most
-  primitives) makes this survivable for v0, but the wiring to the actual checker is missing.
-- `attribution` passes through the raw `FailureOutcome.category` (`stuck | progress | timeout |
-  blocking_claim`), not the ORPI attribution taxonomy (`stale_claim | miscompiled_intent |
-  unmet_postcondition | missing_authority | substrate_fault`). Mapping from `FailureOutcome` to
-  the ORPI taxonomy is Phase 13 work.
+- `verification` now invokes the contract's named `postcondition_primitive` (
+  `sensing.parse_grid_objects` for MiniGrid action primitives) and records the checker name. The
+  degenerate case (`postcondition_primitive=None`) is labelled explicitly as `"degenerate_boolean"`.
+- `attribution` maps `FailureOutcome.category` through the ORPI taxonomy:
+  `stuck | progress → unmet_postcondition`, `blocking_claim → stale_claim`,
+  `timeout → substrate_fault`. The raw category is preserved alongside.
 
-These are deliberately left as stubs in v0 so the outbound trace exists and round-trips; the
-real checker and attribution mapper land in Phase 13 when the derived-claim layer gives them
-something meaningful to verify.
+Rich Δg verification (invoking the checker against a re-observed state rather than the execution
+result already in `final_state`) is Phase 13 work — it requires the derived-claim layer.
 
 The trace is the product's audit story ("what did the operator tell it, when, and did the robot
 honour it") and the learning story (component-level credit assignment for deployment loops) in one
 artifact. Failed episodes are **kept**, with attribution — failures are future skills if properly
 labelled.
 
-## 7. Conformance
+## 8. Knowledge Scope
 
-A substrate is ORPI-v0 conformant when:
+Durable knowledge records carry a transfer scope. This is the falsifiable replacement for an
+informal information/knowledge/wisdom ladder:
+
+| Scope | Invalidated by | Default for |
+|---|---|---|
+| `episodic` | scene change | claims only; not stored in `KnowledgeBase` |
+| `site` | site/map change | operator-taught facts and constraints |
+| `embodiment` | substrate fingerprint change | OEM procedures and recipes naming morphology-specific primitives |
+| `universal` | task ontology change | recipes expressed purely in postcondition/effect vocabulary |
+
+`KnowledgeBase` rejects `episodic` records. `derive_scope(record, manifest)` deterministically
+derives broader scopes from ORPI contracts: direct substrate-fingerprinted primitive references are
+`embodiment`; effect-only recipes whose steps stay inside the manifest effect vocabulary can be
+`universal`; OEM bundled procedures are always `embodiment`.
+
+`KnowledgeChannel` is the gated write/read surface used by station/orchestration paths. It enforces
+writer identity by scope, emits durable KB writes into `LabelledEpisode.steering.knowledge`, and
+records per-scope reuse counters for Phase 13 transfer metrics.
+
+## 9. Conformance
+
+A substrate is ORPI-v0.1 conformant when:
 1. Every capability is registered through a contract; no side-channel capabilities.
 2. The manifest is registered at init (probe-enforced).
 3. All postconditions are object-centric deltas; all actuation primitives with `safety_class ≠ query`
@@ -167,12 +214,18 @@ A substrate is ORPI-v0 conformant when:
    runtime in `CortexSession.plan` (raises `SchemaValidationError` on violation) and covered by
    a probe. (v0 probe: exercises the enforcement path with a synthetic deliberative plan. Full
    AST static check of all plan-build paths is deferred to v1.)
+7. Any bundled procedure is OEM-provenance only and references only primitive contracts present in
+   the same manifest.
+8. Durable KB writes use the scope-gated knowledge channel; `episodic` records are not persisted in
+   the KB.
 
-## 8. Versioning Policy
+## 10. Versioning Policy
 
 - v0: in-process, Python dataclasses, MiniGrid is the only conformant substrate. Breaking changes
   allowed freely.
-- The Phase 15 port (second substrate) is the validation event. Every place v0 bends or breaks during
+- v0.1: adds `OrpiProcedure`, optional `bundled_procedures`, and scoped knowledge traces without
+  changing the primitive contract compatibility bridge.
+- The Phase 15 port (second substrate) is the validation event. Every place v0.1 bends or breaks during
   the port is recorded as a spec issue.
 - v1 freeze happens only after the second substrate is conformant. From v1: additive changes only;
   breaking changes require a major version.

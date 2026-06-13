@@ -8,6 +8,7 @@ from jeenom.capability_registry import CapabilityRegistry
 from jeenom.knowledge_base import KnowledgeBase
 from jeenom.memory import OperationalMemory
 from jeenom.readiness_graph import evaluate_request_plan
+from jeenom.turn_orchestrator import KnowledgeChannel
 from jeenom.schemas import (
     ClaimRecord,
     GroundedObjectEntry,
@@ -25,7 +26,7 @@ class TestPhase9ERepresentation(unittest.TestCase):
 
         return RepresentationStore(
             memory=OperationalMemory(root=Path(tempfile.mkdtemp())),
-            knowledge_base=KnowledgeBase(storage_path=None),
+            knowledge_channel=KnowledgeChannel(KnowledgeBase(storage_path=None)),
         )
 
     def test_claim_record_validates_kind(self):

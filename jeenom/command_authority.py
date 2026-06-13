@@ -83,6 +83,7 @@ class CommandAuthority:
         compiler_name: str,
         pending_context: dict[str, Any] | None = None,
         last_result: dict[str, Any] | None = None,
+        manifest: Any = None,
     ) -> CommandResult:
         envelope = self._make_envelope(
             "envelope", utterance, intent, plan, graph, compiler_name, dict(pending_context or {})
@@ -116,7 +117,9 @@ class CommandAuthority:
         )
         from .orpi import LabelledEpisode
 
-        command_result.labelled_episode = LabelledEpisode.from_command_result(command_result)
+        command_result.labelled_episode = LabelledEpisode.from_command_result(
+            command_result, manifest=manifest
+        )
         return command_result
 
     def pending_clarification_trace(

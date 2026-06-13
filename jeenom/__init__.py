@@ -9,7 +9,8 @@ from .minigrid_domain_helper import MiniGridDomainHelper
 from .minigrid_operational_context import MiniGridOperationalContext
 from .minigrid_runtime_package import build_minigrid_runtime_package
 from .operator_station import OperatorStationSession, classify_utterance
-from .orpi import LabelledEpisode, OrpiContract, OrpiManifest
+from .knowledge_base import derive_scope
+from .orpi import LabelledEpisode, OrpiContract, OrpiManifest, OrpiProcedure
 from .planning_semantics import PlanningSemantics
 from .representation import RepresentationStore
 from .runtime_package import RuntimePackage
@@ -18,7 +19,7 @@ from .sense import MiniGridSense
 from .side_effect_authority import SideEffectAuthority
 from .spine import MiniGridSpine
 from .substrate_adapter import SubstrateAdapter
-from .turn_orchestrator import TurnOrchestrator
+from .turn_orchestrator import KnowledgeChannel, TurnOrchestrator
 
 __all__ = [
     "Cortex",
@@ -33,7 +34,9 @@ __all__ = [
     "OperationalMemory",
     "OrpiContract",
     "OrpiManifest",
+    "OrpiProcedure",
     "LabelledEpisode",
+    "KnowledgeChannel",
     "PlanningSemantics",
     "PrimitiveDefinitionRequest",
     "RepresentationStore",
@@ -45,4 +48,5 @@ __all__ = [
     "build_compiler",
     "build_minigrid_runtime_package",
     "classify_utterance",
+    "derive_scope",
 ]

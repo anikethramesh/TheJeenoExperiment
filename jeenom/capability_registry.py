@@ -238,6 +238,53 @@ class CapabilityRegistry:
             if layer is None or spec.layer == layer
         )
 
+    def candidates_for_postcondition(
+        self,
+        postcondition: str,
+        *,
+        orpi_manifest: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return primitive/procedure candidates that declare a postcondition."""
+
+        candidates: list[dict[str, Any]] = []
+        for spec in self.manifest.primitives:
+            if postcondition in set(spec.postconditions) | set(spec.outputs):
+                candidates.append(
+                    {
+                        "kind": "primitive",
+                        "name": spec.name,
+                        "postconditions": list(spec.postconditions or spec.outputs),
+                        "provenance": "registry",
+                    }
+                )
+        if orpi_manifest is not None:
+            for procedure in getattr(orpi_manifest, "bundled_procedures", []):
+                if postcondition in procedure.declared_postconditions:
+                    candidates.append(
+                        {
+                            "kind": "procedure",
+                            "name": procedure.name,
+                            "postconditions": list(procedure.declared_postconditions),
+                            "preconditions": list(procedure.declared_preconditions),
+                            "provenance": procedure.provenance,
+                            "steps": procedure.primitive_step_names(),
+                        }
+                    )
+        return candidates
+
+    def expand_procedure_candidate(
+        self,
+        procedure_name: str,
+        *,
+        orpi_manifest: Any,
+    ) -> list[str]:
+        """Expand a bundled ORPI procedure to primitive handles before execution."""
+
+        for procedure in getattr(orpi_manifest, "bundled_procedures", []):
+            if procedure.name == procedure_name:
+                return procedure.primitive_step_names()
+        return []
+
     def register_synthesized(self, handle: str, fn: Any) -> bool:
         """Promote a synthesized primitive from synthesizable to implemented.
 

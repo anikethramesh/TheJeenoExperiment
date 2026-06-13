@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .capability_matcher import default_matcher
+from .knowledge_base import KnowledgeBase, NamedConcept, derive_scope
 from .schemas import (
     ApprovedCommand,
     CorticalEnvelope,
@@ -74,6 +75,141 @@ class PendingPrimitiveDefinition:
     request_plan: RequestPlan
     readiness_graph: ReadinessGraph
     mission_plan: MissionExecutionPlan | None = None
+
+
+class KnowledgeChannel:
+    """Scoped, writer-gated access surface for durable named concepts."""
+
+    def __init__(self, knowledge_base: KnowledgeBase) -> None:
+        self.knowledge_base = knowledge_base
+        self._write_events: list[dict[str, Any]] = []
+        self._reuse_counters: dict[str, int] = {
+            "episodic": 0,
+            "site": 0,
+            "embodiment": 0,
+            "universal": 0,
+        }
+
+    def _check_write_policy(
+        self,
+        *,
+        scope: str,
+        writer: str,
+        record: Any,
+        manifest: Any = None,
+    ) -> None:
+        if scope == "episodic":
+            raise ValueError("episodic records live in the claim store, not KnowledgeBase")
+        if scope == "site" and writer != "operator":
+            raise PermissionError("site knowledge writes require writer='operator'")
+        if scope == "embodiment" and writer not in {"manifest", "synthesizer"}:
+            raise PermissionError(
+                "embodiment knowledge writes require manifest registration or synthesizer"
+            )
+        if scope == "universal":
+            if writer != "synthesizer":
+                raise PermissionError("universal knowledge writes require writer='synthesizer'")
+            if derive_scope(record, manifest) != "universal":
+                raise PermissionError("universal write failed derive_scope verification")
+
+    def teach(
+        self,
+        name: str,
+        utterance: str,
+        *,
+        plan: Any | None = None,
+        writer: str = "operator",
+        scope: str | None = "site",
+        manifest: Any = None,
+    ) -> NamedConcept:
+        probe = NamedConcept(name=name, utterance=utterance, plan=plan, scope=scope or "site")
+        resolved_scope = scope or derive_scope(probe, manifest)
+        self._check_write_policy(
+            scope=resolved_scope,
+            writer=writer,
+            record=probe,
+            manifest=manifest,
+        )
+        concept = self.knowledge_base.teach(
+            name,
+            utterance,
+            plan=plan,
+            scope=resolved_scope,
+            manifest=manifest,
+        )
+        self._write_events.append(
+            {
+                "event": "knowledge_write",
+                "name": concept.name,
+                "scope": concept.scope,
+                "writer": writer,
+                "concept_type": concept.concept_type,
+            }
+        )
+        return concept
+
+    def forget(self, name: str, *, writer: str = "operator") -> bool:
+        if writer != "operator":
+            raise PermissionError("forget requires writer='operator'")
+        removed = self.knowledge_base.forget(name)
+        if removed:
+            self._write_events.append(
+                {
+                    "event": "knowledge_forget",
+                    "name": KnowledgeBase._normalize_name(name),
+                    "writer": writer,
+                }
+            )
+        return removed
+
+    def recall(self, name: str) -> NamedConcept | None:
+        concept = self.knowledge_base.recall(name)
+        if concept is not None:
+            self._reuse_counters[concept.scope] = self._reuse_counters.get(concept.scope, 0) + 1
+        return concept
+
+    def search(self, query: str) -> list[NamedConcept]:
+        concepts = self.knowledge_base.search(query)
+        for concept in concepts:
+            self._reuse_counters[concept.scope] = self._reuse_counters.get(concept.scope, 0) + 1
+        return concepts
+
+    def all_concepts(self) -> list[NamedConcept]:
+        return self.knowledge_base.all_concepts()
+
+    def is_sequence(self, utterance: str) -> list[str] | None:
+        return self.knowledge_base._is_sequence(utterance)
+
+    def invalidate_site(self, *, reason: str = "site_change") -> int:
+        removed = self.knowledge_base.purge_scope("site")
+        if removed:
+            self._write_events.append(
+                {"event": "knowledge_scope_invalidated", "scope": "site", "count": removed, "reason": reason}
+            )
+        return removed
+
+    def invalidate_substrate(self, *, reason: str = "substrate_fingerprint_change") -> int:
+        removed = self.knowledge_base.purge_scope("embodiment")
+        if removed:
+            self._write_events.append(
+                {
+                    "event": "knowledge_scope_invalidated",
+                    "scope": "embodiment",
+                    "count": removed,
+                    "reason": reason,
+                }
+            )
+        return removed
+
+    def consume_write_events(self) -> list[dict[str, Any]]:
+        events = [dict(event) for event in self._write_events]
+        self._write_events.clear()
+        return events
+
+    def consume_reuse_counters(self) -> dict[str, int]:
+        counters = dict(self._reuse_counters)
+        self._reuse_counters = {key: 0 for key in self._reuse_counters}
+        return counters
 
 
 @dataclass
@@ -237,7 +373,7 @@ class TurnOrchestrator:
             name = (intent.concept_name or "").strip()
             if not name:
                 return _approved("clarification", utterance, "Please specify the concept name to recall.")
-            concept = station.knowledge_base.recall(name)
+            concept = station.knowledge_channel.recall(name)
             if concept is None:
                 return ApprovedCommand(
                     kind="clarification",

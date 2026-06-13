@@ -60,6 +60,7 @@ def _claims_status(
     active_claims: StationActiveClaims | None,
     claims_valid: bool,
     claims_produced_by_dependency: bool = False,
+    manifest_min_confidence: float | None = None,
 ) -> tuple[str | None, str | None]:
     if not step.scene_fingerprint_required:
         return None, None
@@ -69,7 +70,7 @@ def _claims_status(
         return "stale_claims", "Step needs ActiveClaims, but none are available yet."
     if not claims_valid:
         return "stale_claims", "ActiveClaims exist but do not match the current scene."
-    min_confidence = step.constraints.get("min_claim_confidence")
+    min_confidence = step.constraints.get("min_claim_confidence", manifest_min_confidence)
     if min_confidence is not None:
         try:
             required_confidence = float(min_confidence)
@@ -159,6 +160,7 @@ def evaluate_request_plan(
     claims_valid: bool = False,
     environment_identity: EnvironmentIdentity | None = None,
     knowledge_snapshot: KnowledgeSnapshot | None = None,
+    risk_policy: dict[str, object] | None = None,
 ) -> ReadinessGraph:
     if knowledge_snapshot is not None:
         if active_claims is None:
@@ -203,11 +205,25 @@ def evaluate_request_plan(
                     read in dependency_outputs
                     for read in step.memory_reads
                 )
+                manifest_min_confidence = None
+                if risk_policy is not None and step.required_handle is not None:
+                    spec = registry.lookup(step.required_handle)
+                    policy = (
+                        risk_policy.get(spec.safety_class)
+                        if spec is not None
+                        else None
+                    )
+                    if isinstance(policy, dict) and "min_confidence" in policy:
+                        try:
+                            manifest_min_confidence = float(policy["min_confidence"])
+                        except (TypeError, ValueError):
+                            manifest_min_confidence = None
                 claims_status, claims_reason = _claims_status(
                     step,
                     active_claims=active_claims,
                     claims_valid=claims_valid,
                     claims_produced_by_dependency=claims_produced_by_dependency,
+                    manifest_min_confidence=manifest_min_confidence,
                 )
                 if claims_status is not None:
                     status = claims_status

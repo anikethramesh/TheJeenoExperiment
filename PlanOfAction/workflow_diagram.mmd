@@ -78,6 +78,6 @@ flowchart LR
 
   SUB -. "publishes capability contracts" .-> ORPI
   ORPI -. "registered manifest" .-> REG
-  KB -->|emit per executed turn| EP
+  OP -->|emit per executed turn (CommandAuthority.record_result)| EP
   CONF -. "gates contract boundary" .-> ORPI
   CONF -. "turn round-trips to valid trace" .-> EP

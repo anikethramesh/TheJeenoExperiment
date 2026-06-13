@@ -28,9 +28,11 @@ class CortexSession:
         self,
         registry: CapabilityRegistry,
         planning_semantics: PlanningSemantics,
+        risk_policy: dict[str, Any] | None = None,
     ) -> None:
         self.registry = registry
         self.planning_semantics = planning_semantics
+        self.risk_policy = risk_policy
 
     def plan(
         self,
@@ -61,6 +63,7 @@ class CortexSession:
             active_claims=active_claims,
             claims_valid=claims_valid,
             environment_identity=environment_identity,
+            risk_policy=self.risk_policy,
         )
         return plan, graph
 
@@ -79,4 +82,5 @@ class CortexSession:
             active_claims=active_claims,
             claims_valid=claims_valid,
             environment_identity=environment_identity,
+            risk_policy=self.risk_policy,
         )

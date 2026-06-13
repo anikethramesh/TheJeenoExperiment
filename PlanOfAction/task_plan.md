@@ -26,9 +26,19 @@ Elon-algorithm rule for this repo:
 ## Current Known State
 
 - Current phase: **Phase 13 - Steered Curriculum under Partial Observability**.
-  Phase 11A, 11B, 11C, and Phase 12 are complete for the MiniGrid boundary.
-  MiniGrid is ORPI-v0 conformant and Phase 13 may now build on that stable
-  contract/manifest/trace surface.
+  Phase 12D is complete: ORPI v0.1 label unified, `LabelledEpisode` attribution +
+  verification wired (ORPI taxonomy, named checker path), leak audit produced with
+  curriculum-touching leaks removed (`llm_compiler.py` color_pattern derived from
+  manifest, `_startup_warmup_instruction` fallback derived from manifest vocabulary).
+  Phase 13 gate cleared — 70/70 evals green.
+  Phase order from here: **13 Steered Curriculum (proves steering on MiniGrid) -> 14
+  Cheap Leak Removal + AI2-THOR spike (proves substrate-independence) -> 15
+  Cross-Substrate & v1 Freeze -> 16 Operational Hardening (absorbs the deferred
+  station de-bloat) -> 17 Capability Stress**.
+  Steering and substrate-independence are validated on separate substrates so
+  neither signal masks the other. `operator_station.py` bloat is orthogonal to
+  both proofs and is parked for Phase 16; any station extraction is gated by a
+  reviewed decomposition design first.
 - Phase 9D is complete. Operator turns now route through typed envelopes,
   request plans, readiness graphs, approved commands, and tickets.
 - Phase 9E is complete. Architecture blocks, message schemas, and the knowledge
@@ -63,15 +73,16 @@ Elon-algorithm rule for this repo:
   (import partition, domain purge, TurnOrchestrator dispatch extraction,
   knowledge-type rerouting, IntentCache, Readiness deletion, eval naming
   contract, hardware schema fields). See Phase 11C section below.
-- Phase 12 is complete for MiniGrid ORPI v0: `OrpiContract`, `OrpiManifest`,
-  `LabelledEpisode`, compatibility mapping from legacy primitive layers to
-  `{sense, actuation, meta}`, MiniGrid manifest metadata, JSON-serializable
+- Phase 12 is complete for MiniGrid ORPI v0.1: `OrpiContract`,
+  `OrpiProcedure`, `OrpiManifest`, `LabelledEpisode`, compatibility mapping from
+  legacy primitive layers to `{sense, actuation, meta}`, bundled-procedure
+  validation, MiniGrid manifest metadata, knowledge scoping, JSON-serializable
   labelled episodes, and the `orpi` eval suite are green.
 - Current verification signal:
-  - `python evals/eval_master.py --suite orpi`: 7/7 passing
-  - `python evals/eval_master.py`: 67/67 passing
-  - `python evals/eval_master.py --suite cleanup`: all cleanup probes passing
-  - `python -m pytest -q tests`: 265 passed, 1 warning, 9 subtests passed
+  - `python evals/eval_master.py --suite orpi`: 9/9 passing
+  - `python evals/eval_master.py`: 70/70 passing
+  - `python evals/eval_master.py --suite cleanup`: 30/30 passing
+  - `python -m pytest -q tests`: 267 passed, 1 warning, 9 subtests passed
 - Eval naming contract is now enforced: all registered eval files use
   capability-based prefixes. The naming contract probe fails on violation.
 - Whole-repo `pytest` is not the main project signal right now because the local
@@ -1195,7 +1206,7 @@ After Phase 11B:
 
 - The hostile ladder is green and Phase 12 proceeded.
 - Phase 12 ORPI contract/manifest/trace boundary is stable for MiniGrid; Phase
-  13 evidence planning may proceed from the ORPI-v0 surface.
+  13 evidence planning may proceed from the ORPI-v0.1 surface.
 
 ### Phase 11C - Architecture Surgery
 
@@ -1282,9 +1293,9 @@ Measured outcome:
 - `python evals/eval_master.py`: 60/60 passing.
 - All 7 operations landed with zero regressions.
 
-## Phase 12 - ORPI v0 - Open Robotics Primitive Interface
+## Phase 12 - ORPI v0.1 - Open Robotics Primitive Interface
 
-Status: done for MiniGrid ORPI v0. Authoritative spec:
+Status: done for MiniGrid ORPI v0.1. Authoritative spec:
 `PlanOfAction/orpi_spec.md`.
 
 Goal: extract the typed interface standard between the cognition layer (JEENOM)
@@ -1340,8 +1351,8 @@ composition), never grounding itself.
 ### Implemented Phase 12 surface
 
 1. `jeenom/orpi.py`: serializable `OrpiContract`, `OrpiManifest`,
-   JSON-serializable `LabelledEpisode`, plus a no-deliberative-meta
-   plan-reference helper.
+   `OrpiProcedure`, JSON-serializable `LabelledEpisode`, plus a
+   no-deliberative-meta plan-reference helper.
 2. `schemas.PrimitiveSpec`: `mode`, `cadence`, and `invariant_level` fields with
    MiniGrid-compatible defaults.
 3. MiniGrid ORPI manifest metadata: `symbol_mappings`, `frames`, `units`, and
@@ -1351,11 +1362,24 @@ composition), never grounding itself.
    view over every registered capability.
 5. `LabelledEpisode` emission is attached to every `CommandResult` through
    `CommandAuthority.record_result`.
-6. `PlanOfAction/orpi_spec.md` remains the versioned ORPI-v0 reference.
+6. `OrpiManifest.bundled_procedures` carries OEM-vouched procedure recipes.
+   Manifest validation rejects synthesized/operator procedures in bundled OEM
+   slots and fails if a bundled step references a primitive missing from the
+   same manifest.
+7. `CapabilityRegistry` can surface primitive and procedure candidates by
+   declared postcondition, and `LabelledEpisode.plan.candidates` records whether
+   a selected candidate was a primitive or procedure plus its provenance.
+8. `NamedConcept.scope` and `derive_scope()` give durable knowledge records a
+   falsifiable transfer scope: `site`, `embodiment`, or `universal`;
+   `episodic` remains outside the KB.
+9. `KnowledgeChannel` is the gated KB access surface for station/orchestrator
+   paths. It enforces writer-by-scope policy, emits KB writes into
+   `LabelledEpisode.steering.knowledge`, and records per-scope reuse counters.
+10. `PlanOfAction/orpi_spec.md` remains the versioned ORPI-v0.1 reference.
 
 ### Conformance
 
-A substrate is ORPI-v0 conformant when (1) every capability is registered through
+A substrate is ORPI-v0.1 conformant when (1) every capability is registered through
 a contract - no side channels; (2) the manifest is registered at init; (3) all
 postconditions are object-centric deltas and every actuation primitive with
 `safety_class != query` names a `postcondition_primitive`; (4) cadence
@@ -1366,13 +1390,13 @@ every executed turn emits a `LabelledEpisode`; (6) no compiled plan references a
 ### ORPI conformance probes
 
 These probes are registered in `evals/manifest.py` under the `orpi` suite and
-pass against the completed MiniGrid ORPI-v0 boundary.
+pass against the completed MiniGrid ORPI-v0.1 boundary.
 
 - `substrate_orpi_contract_coverage_probe.py` - conformance 1: every capability
   is registered through a contract; no side-channel capabilities.
 - `substrate_orpi_manifest_registration_probe.py` - conformance 2: manifest is
   registered at adapter init; the permissive validation window is provably never
-  live.
+  live; bundled procedures and manifest risk policy are validated.
 - `substrate_orpi_postcondition_probe.py` - conformance 3: all postconditions are
   object-centric Δg; every actuation with `safety_class != query` names a
   `postcondition_primitive`.
@@ -1385,26 +1409,147 @@ pass against the completed MiniGrid ORPI-v0 boundary.
 - `pipeline_orpi_labelled_episode_probe.py` - conformance 5: full success,
   refusal, and task turns round-trip to valid, JSON-serializable
   `LabelledEpisode` artifacts with verification evidence.
+- `pipeline_procedure_selection_probe.py` - procedure parity: primitives and OEM
+  procedures are selectable by postcondition, selected procedures expand to
+  primitive handles, and readiness is not bypassed.
+- `claim_custody_knowledge_scope_probe.py` - scope custody: named concepts
+  carry transfer scope, persisted legacy records migrate to `site`, and
+  `derive_scope()` distinguishes universal/effect-only recipes from
+  embodiment-bound recipes.
 - `regression_orpi_primitive_type_migration_probe.py` - the taxonomy remap leaves
   the existing eval suite green (migration safety net).
 
 ### Acceptance criteria
 
-- MiniGrid is ORPI-v0 conformant against all six conformance items.
+- MiniGrid is ORPI-v0.1 conformant against all eight conformance items.
 - The three NEW fields exist with degenerate MiniGrid defaults; no other
   substrate semantics leak into the schema.
 - Every executed turn round-trips to a valid `LabelledEpisode`, failed episodes
   included with attribution, and serializes as JSON.
-- Known v0 proxy: `LabelledEpisode.verification` reflects `task_complete` /
-  boolean claims, not `postcondition_primitive` invocation against predicted Δg.
-  `LabelledEpisode.attribution` passes through `FailureOutcome.category`, not the
-  ORPI attribution taxonomy. Both are completed in Phase 13.
+- Known v0 proxy (closed in Phase 12D, not 13): `LabelledEpisode.verification`
+  reflects `task_complete` / boolean claims, not `postcondition_primitive`
+  invocation against predicted Δg. `LabelledEpisode.attribution` passes through
+  `FailureOutcome.category`, not the ORPI attribution taxonomy. Phase 12D lands
+  the attribution-taxonomy mapping and the `postcondition_primitive` verification
+  wiring for the named-checker case; rich Δg verification that depends on the
+  derived-claim layer completes in Phase 13.
 - The taxonomy compatibility layer lands with zero regressions on the existing
   eval suite.
+- OEM procedure bundling is schema-backed without adding a parallel recipe
+  hierarchy.
+- Knowledge transfer scope is explicit and write-gated before Phase 13 consumes
+  per-scope reuse metrics.
+- `universal` scope is a correct but degenerate case for MiniGrid: all compiled
+  plans reference concrete primitive names (`action.turn_left`, not
+  `"agent direction changes"`), so no real MiniGrid plan will ever derive
+  `universal` scope. `derive_scope` returns `universal` only when every
+  `required_handle` in the plan matches a postcondition/output string in the
+  manifest's effect vocabulary — i.e., the plan is expressed by effect, not by
+  primitive name. That representation requires the cross-substrate planner in
+  Phase 15. The `claim_custody_knowledge_scope_probe.py` constructs a synthetic
+  plan to demonstrate the mechanism exists; the transfer fixture in 12C.3 tests
+  `site` vs `embodiment` invalidation only. Phase 15 provides the first real
+  `universal`-scope concept.
+
+## Phase 12D - Consolidation + Leak Audit
+
+Status: complete.
+
+Goal: close ORPI v0.1 cleanly and produce the audit that decides the order of the
+phases that follow. No new capability, no architecture redesign. Three workstreams,
+each behind the green suite.
+
+### 12D.1 - Doc fixes
+
+- Unify the version label: the interface is **v0.1** everywhere (code already
+  shipped procedures and knowledge scopes beyond the original v0 spec). Reconcile
+  `orpi_spec.md`, `blueprint.md`, and `task_plan.md`.
+- Fix `workflow_diagram.mmd`: the `LabelledEpisode` emission node is wired to the
+  KnowledgeBase, but emission happens in `CommandAuthority.record_result`. Repoint
+  it.
+- Parity-check the three docs: §4 field table, §7/§9 conformance list, probe
+  names, and phase numbers must agree.
+
+### 12D.2 - LabelledEpisode completion
+
+- `attribution`: map `FailureOutcome.category` -> the ORPI attribution taxonomy
+  (`stale_claim | miscompiled_intent | unmet_postcondition | missing_authority |
+  substrate_fault`). Pure mapping, no dependency on the derived-claim layer.
+- `verification`: invoke a contract's `postcondition_primitive` against its
+  predicted Δg where one is named; keep the boolean only for MiniGrid's degenerate
+  `postcondition_primitive=None` case and label it as such. Rich Δg verification
+  that needs the derived-claim layer is explicitly left to Phase 13 - it is not
+  faked here.
+- Red bar: extend `pipeline_orpi_labelled_episode_probe.py` to assert the ORPI
+  attribution taxonomy is used and that a named `postcondition_primitive` is
+  actually invoked.
+
+### 12D.3 - Leak audit (the ordering-relevant deliverable)
+
+Catalog every place MiniGrid/domain vocabulary is baked into generically-named
+code. The audit separates **two orthogonal problems** and treats them differently:
+
+**Substrate coupling (the boundary - on the critical path).** Per coupling site,
+record two axes:
+
+- `{cheap | structural}` - is removal a surgical edit, or does it require real
+  rework (e.g. replacing `llm_compiler.py`'s hardcoded `go to the <color> door`
+  grammar with `OperationalContext`-derived patterns)?
+- `{curriculum-touching | not}` - **does the Phase 13 steering/PO work build on
+  top of this leak?**
+
+The product table `{cheap|structural} x {curriculum-touching|not}` decides phase
+order:
+
+- **Curriculum-touching leaks are removed before Phase 13**, regardless of
+  cheap/structural. The curriculum must not be built on top of a leak it would
+  then entrench. This is the one ordering question not yet settled - the audit
+  decides it, not an assumption that the curriculum can safely precede leak
+  removal.
+- **Non-curriculum-touching leaks stay in the Phase 14 cheap-removal pass** as
+  planned.
+- Any leak flagged `structural` is a go/no-go flag for its phase's scope.
+
+Known concentrations to classify (from the pre-audit survey, to be confirmed):
+`llm_compiler.py` (~116 lines, real fast-path grammar - the prime structural
+suspect and the leak most likely to block the spike), `operator_station.py` (~67
+lines, mostly live paths), `primitive_library.py` (~33, the MiniGrid primitive
+set in a generic file), `sense.py`/`spine.py` (`MiniGridSense`/`MiniGridSpine`
+role bindings), `request_planner.py` (`rank_scene_doors`).
+
+**Structural bloat (orthogonal - parked).** The `operator_station.py` size
+(~5,613 lines / 178 methods, of which only ~67 are substrate-coupled) is a
+*different* problem. It blocks neither proof - steering or substrate-independence
+- so it does **not** compete for position in the phase order. The audit still
+catalogs it as the worklist for the eventual cut, but **de-bloating is deferred to
+Operational Hardening (Phase 16) in full**. Wanting the file smaller is not a
+reason to take on a 5,600-line refactor ahead of either proof.
+
+**Hard prerequisite:** any `operator_station.py` extraction - whenever it happens,
+in Phase 16 or pulled forward by a `structural` + `curriculum-touching` audit
+verdict - is gated by a decomposition design (target modules, shared-state map,
+ordered green-able extraction sequence) written and reviewed *first*. No station
+code moves before that design exists.
+
+### Acceptance criteria
+
+- Version label is `v0.1` across all docs; the diagram emission node is correct.
+- `LabelledEpisode` uses the ORPI attribution taxonomy and invokes named
+  `postcondition_primitive` checkers; the deferred rich-Δg case is documented.
+- The leak audit exists as a doc artifact with the
+  `{cheap|structural} x {curriculum-touching|not}` table populated, and a
+  separately-parked bloat worklist.
+- The audit's verdict on curriculum-touching leaks is explicit enough to order
+  Phase 13 vs the leak-removal work without further guessing.
+- Full eval suite green; golden path preserved.
 
 ## Phase 13 - Steered Curriculum under Partial Observability
 
-Status: current.
+Status: next (after any curriculum-touching leaks flagged by the 12D audit are
+removed). This phase proves **steering** on MiniGrid only - substrate-independence
+is a separate proof, validated later on the AI2-THOR spike. The two are
+deliberately not conflated: a clean steering signal on a known substrate, then a
+clean substrate-independence signal on a new one.
 
 Goal: prove JEENOM can collaborate about uncertainty without building a giant
 ontology, and that it improves with operator steering across a curriculum it has
@@ -1432,7 +1577,7 @@ Minimal additions:
 
 New for the steered curriculum:
 
-- Derived-claim layer: deterministic `meta` primitives (per ORPI v0) infer claims
+- Derived-claim layer: deterministic `meta` primitives (per ORPI v0.1) infer claims
   from observed claims (e.g. reachability, "behind", "searched region") instead
   of asking the substrate for omniscient answers.
 - Ask-for-help: when evidence is missing or ambiguous, JEENOM emits a typed
@@ -1446,15 +1591,14 @@ New for the steered curriculum:
 - MTBCI metric: mean turns between clarification/intervention - the headline
   measure that JEENOM is getting steered less as it learns the curriculum.
 
-Pressure tests:
+Pressure tests (MiniGrid only - steering, not substrate-independence):
 
 - MiniGrid visible-only query:
   - "closest/farthest door" must answer with scope or ask to search.
   - no omniscient full-grid answer unless the substrate explicitly provides that
     as an authorized HOW.
-- Robotics-like mock:
-  - path-planner primitive returns reachable/unreachable/path.
-  - JEENOM converts that into claims and plan decisions.
+- Partial-observability ladder: each rung hides more of the grid, forcing
+  search/ask over omniscient answers.
 
 Acceptance criteria:
 
@@ -1464,17 +1608,99 @@ Acceptance criteria:
 - Operator steering changes typed plan constraints.
 - MTBCI improves across repeated runs of the same ladder rung as KB reuse kicks
   in.
-- MiniGrid and robotics-like mock both use the same cognition loop.
+- Steering is proven on MiniGrid. Cross-substrate sameness is explicitly out of
+  scope here - it is the AI2-THOR spike's job (post-Phase-14), so a steering
+  failure can never be confused with a substrate leak.
 
-## Phase 14 - Operational Hardening
+## Phase 14 - Cheap Leak Removal
+
+Status: later (after Phase 13). Scope is **gated by the 12D leak audit** - this
+phase removes the leaks the audit tagged `cheap` and `not curriculum-touching`
+(curriculum-touching leaks were already removed before Phase 13). Any leak the
+audit tagged `structural` is handled per its go/no-go flag, not silently absorbed
+here.and we fix that going 
+
+Goal: make the substrate boundary clean *before* the AI2-THOR spike, so the spike
+produces a clean substrate-independence signal - a spike failure means the
+architecture leaked, not that we walked in with known dirt.
+
+Planned work (final list comes from the audit table):
+
+- Remove cataloged `cheap` coupling sites (e.g. `request_planner.py`
+  `rank_scene_doors`, stray `"door"` literals in generic paths).
+- Surgically remove the ~67 station-internal coupling lines that are live paths
+  (a scalpel pass, not the 5,613-line extraction - that stays deferred to
+  Phase 16).
+- Decide `llm_compiler.py`'s hardcoded grammar: if the audit flagged it
+  `structural`, pull the `OperationalContext`-derived rewrite forward into this
+  phase, because it is the leak most likely to block the spike.
+- Widen `substrate_static_architecture_probe.py` to guard the now-cleaner core.
+
+Acceptance criteria:
+
+- Every `cheap`/`not curriculum-touching` leak from the audit is removed.
+- No MiniGrid vocabulary remains in the files the audit scoped as the generic
+  boundary; the static-architecture probe enforces it.
+- Golden path preserved; full suite green.
+- The `operator_station.py` bloat is untouched beyond the surgical leak scalpel -
+  no early de-bloat.
+
+### AI2-THOR substrate-independence spike (parallel branch)
+
+A `ai2thor` branch is cut after Phase 14 lands the clean boundary. It is an
+**exploratory requirements-discovery spike, not a committed port** - so it never
+blocks `master`.
+
+- It tests **only substrate-independence**: can the same kernel, ORPI
+  contract/manifest/trace, and orchestration flow drive AI2-THOR? Steering is
+  already proven (Phase 13), so any failure here isolates to the substrate
+  boundary.
+- Every place ORPI v0.1 bends or breaks is filed as a spec issue against
+  `orpi_spec.md` and as a concrete kernel requirement.
+- Output feeds Phase 15: the spike's findings drive a **second, targeted leak
+  removal pass** before hardening - spike-discovered blockers, not just
+  pre-audited ones.
+- Prerequisite to note now: AI2-THOR is a heavyweight Unity-backed simulator, not
+  a pip-light gym env. An environment/install check is a gate before the branch is
+  viable.
+
+## Phase 15 - Cross-Substrate Demonstration & ORPI v1 Freeze
+
+Status: later. The AI2-THOR spike is the exploratory precursor; Phase 15 is the
+committed port that merges the spike's learnings and freezes the interface.
+
+Goal: prove the same architecture and the same ORPI contract/manifest/trace work
+on MiniGrid and AI2-THOR - and use that port to freeze ORPI v0.1 to v1.
+
+Pointer requirements:
+
+- Same `OperatorIntent`, `RequestPlan`, `ReadinessGraph`, claims, tickets, and
+  orchestration kernel; only the substrate adapter HOW differs.
+- Both substrates register an ORPI manifest and pass the ORPI conformance items.
+- The spike's filed spec issues are resolved or consciously deferred; a
+  spike-driven second targeted leak-removal pass lands before this phase closes.
+
+Acceptance criteria (also the v1 freeze gate):
+
+- Second substrate is ORPI conformant; one MiniGrid task and one AI2-THOR task
+  follow the same cognitive flow.
+- Differences are confined to the substrate adapter and domain helpers; no
+  MiniGrid vocabulary leaks into the generic kernel.
+- ORPI freezes to v1: from v1, additive changes only; breaking changes require a
+  major version.
+
+## Phase 16 - Operational Hardening
 
 Status: later.
 
-Goal: make the architecture reliable after the extraction and cross-substrate
-proofs exist.
+Goal: make the architecture reliable after the steering and cross-substrate proofs
+exist. **This phase absorbs the deferred `operator_station.py` de-bloat in full**
+(per the 12D bloat worklist), gated by the decomposition-design prerequisite.
 
 Planned work:
 
+- `operator_station.py` extraction into a substrate-independent orchestration
+  kernel plus adapters - decomposition design written and reviewed first.
 - repair metrics
 - synthesis provenance
 - intervention counts
@@ -1482,33 +1708,7 @@ Planned work:
 - missing primitive / ambiguity / no-path handling
 - render-time guarantees preserved across substrates
 
-## Phase 15 - Cross-Substrate Demonstration & ORPI v1 Freeze
-
-Status: later. Not specced beyond this pointer - the second substrate is the
-validation event, and specifying the port now would ossify v0's n=1 abstractions.
-
-Goal: prove the same architecture and the same ORPI contract/manifest/trace work
-on MiniGrid and a second, robotics-like substrate - and use that port to freeze
-ORPI v0 to v1.
-
-Pointer requirements:
-
-- Same `OperatorIntent`, `RequestPlan`, `ReadinessGraph`, claims, tickets, and
-  orchestration kernel; only the substrate adapter HOW differs.
-- Both substrates register an ORPI manifest and pass all six conformance items.
-- Every place ORPI v0 bends or breaks during the port is recorded as a spec issue
-  against `orpi_spec.md`.
-
-Acceptance criteria (also the v1 freeze gate):
-
-- Second substrate is ORPI-v0 conformant; one MiniGrid task and one robotics-like
-  task follow the same cognitive flow.
-- Differences are confined to the substrate adapter and domain helpers; no
-  MiniGrid vocabulary leaks into the generic kernel.
-- ORPI freezes to v1: from v1, additive changes only; breaking changes require a
-  major version.
-
-## Phase 16 - Capability Stress Tests
+## Phase 17 - Capability Stress Tests
 
 Status: later.
 
