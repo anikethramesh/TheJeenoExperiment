@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
 
+from . import fingerprint as _fp
 from .capability_registry import CapabilityRegistry
 from .planning_semantics import PlanningSemantics
 from .readiness_graph import evaluate_request_plan
@@ -170,8 +170,7 @@ def _metric_expression_name(expression: dict[str, Any]) -> str:
 
 
 def _mission_id_for(utterance: str, handle: str) -> str:
-    digest = hashlib.sha256(f"{utterance}|{handle}".encode("utf-8")).hexdigest()
-    return f"mission:{digest[:12]}"
+    return f"mission:{_fp.stable_hash(f'{utterance}|{handle}', length=12)}"
 
 
 def _continuation_intent(

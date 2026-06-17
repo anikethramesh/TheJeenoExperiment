@@ -13,11 +13,11 @@ is unchanged.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+from . import fingerprint as _fp
 
 if TYPE_CHECKING:
     from .capability_registry import CapabilityRegistry
@@ -31,7 +31,7 @@ def _step_constraint_fingerprint(constraints: dict[str, Any]) -> str:
         for k in ("color", "exclude_colors", "metric", "order", "ordinal", "threshold", "comparison")
         if (v := constraints.get(k)) is not None
     }
-    return json.dumps(relevant, sort_keys=True, separators=(",", ":"))
+    return _fp.canonical_json(relevant)
 
 
 def plan_semantic_key(plan: RequestPlan) -> str:
@@ -50,11 +50,11 @@ def plan_semantic_key(plan: RequestPlan) -> str:
         )
         for step in plan.steps
     ]
-    payload = json.dumps(
+    return _fp.fingerprint(
         {"objective_type": plan.objective_type, "steps": steps_sig},
-        separators=(",", ":"),
+        sort_keys=False,
+        length=16,
     )
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 @dataclass

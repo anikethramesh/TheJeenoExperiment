@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import geometry
+from .turn_state import TURN_STATE_FIELDS, TurnState
 from .capability_arbitrator import ArbitratorBackend, build_arbitrator
 from .cortex_session import CortexSession
 from .capability_matcher import CapabilityMatchResult, CapabilityMatcher, default_matcher
@@ -39,7 +40,12 @@ from .plan_reuse import PlanReuseCache, ReuseVerdict, plan_semantic_key
 from .repair_loop import RepairEvent, RepairLoop
 from .representation import RepresentationStore
 from .runtime_package import RuntimePackage
-from .semantic_normalizer import infer_direction_from_utterance, normalize_distance_ordinal
+from .semantic_normalizer import (
+    detect_metric,
+    infer_direction_from_utterance,
+    mentions_metric,
+    normalize_distance_ordinal,
+)
 from .side_effect_authority import SideEffectAuthority
 from .substrate_adapter import SubstrateAdapter
 from .intent_cache import IntentCache, SEQUENCE_STEP_PREFIX, SEQUENCE_STEP_SUFFIX, parse_metric_query, seed_intent_cache
@@ -333,10 +339,10 @@ class OperatorStationSession:
         self.render_mode = render_mode
         self.max_loops = max_loops
         self.verbose = verbose
-        self.last_result: dict[str, Any] | None = None
-        # Active steering directive for the turn in flight. Initialized here (not only in
-        # handle_utterance) so direct-dispatch paths that read it never hit AttributeError.
-        self.active_steering_directive: SteeringDirective | None = None
+        # The full per-turn trace lives on one typed object (see jeenom/turn_state.py),
+        # surfaced field-by-field as delegating properties below. Set first so any later
+        # per-turn write in __init__ resolves; guarantees init (no read-before-set).
+        self.turn_state = TurnState()
         self.runtime_package = runtime_package or build_minigrid_runtime_package(
             env_id=self.env_id,
             render_mode=self.render_mode,
@@ -407,27 +413,10 @@ class OperatorStationSession:
             self.plan_cache,
         )
         self.startup_prewarm_summary: dict[str, Any] | None = None
-        self.last_mission_execution_plan: MissionExecutionPlan | None = None
-        self.last_execution_ticket: ExecutionTicket | None = None
-        self.last_memory_write_ticket: MemoryWriteTicket | None = None
-        self.last_raw_motor_ticket: RawMotorTicket | None = None
-        self.last_sense_ticket: SenseTicket | None = None
-        self.last_operator_intent: OperatorIntent | None = None
-        self.last_cortical_envelope: CorticalEnvelope | None = None
-        self.last_approved_command: ApprovedCommand | None = None
-        self.last_command_result: CommandResult | None = None
-        self.current_environment_identity: EnvironmentIdentity | None = None
-        self.last_environment_invalidation_reason: str | None = None
-        self.last_request_plan: RequestPlan | None = None
-        self.last_readiness_graph: ReadinessGraph | None = None
         self.request_plan_reuse_cache: PlanReuseCache = (
             request_plan_reuse_cache if request_plan_reuse_cache is not None else PlanReuseCache()
         )
-        self.last_plan_reuse_verdict: ReuseVerdict | None = None
-        self.last_operational_mismatches: list[OperationalMismatch] = []
-        self.last_repair_events: list[RepairEvent] = []
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
-        self.last_arbitration_trace: ArbitrationTrace | None = None
         self.synthesizer: SynthesizerBackend = build_synthesizer(compiler_name)
         self.validator: PrimitiveValidator = default_validator
 
@@ -1769,7 +1758,7 @@ class OperatorStationSession:
         )
         if not mentions_ranked_distance:
             return None
-        if "manhattan" in normalized or "euclidean" in normalized:
+        if mentions_metric(normalized):
             return None
         self.pending_clarification = PendingClarification(
             clarification_type="semantic_query_missing_field",
@@ -2430,7 +2419,7 @@ class OperatorStationSession:
         if not handle:
             # Infer handle from metric in plan
             metric = plan.get("metric", "euclidean") or "euclidean"
-            handle = f"claims.filter.threshold.{metric}"
+            handle = self.planning_semantics.capability_handle("filter_threshold", metric=metric)
 
         fn = self.capability_registry.get_synthesized_callable(handle)
         if fn is None:
@@ -2515,7 +2504,7 @@ class OperatorStationSession:
         """Call a registered claims-filter fn(entries, condition) and route the result."""
         plan = intent.grounding_query_plan or {}
         metric = plan.get("metric") or "manhattan"
-        expected_ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
+        expected_ranked_handle = self.planning_semantics.capability_handle("ranked", metric=metric)
         if (
             self.active_claims is None
             or not self.active_claims.ranked_scene_doors
@@ -2806,13 +2795,7 @@ class OperatorStationSession:
             comparison = "at_most"
         else:
             comparison = "above"
-        metric = (
-            "euclidean"
-            if "euclidean" in normalized
-            else "manhattan"
-            if "manhattan" in normalized
-            else handle.rsplit(".", 1)[-1]
-        )
+        metric = detect_metric(normalized) or handle.rsplit(".", 1)[-1]
         return {
             "threshold": float(number_match.group(1)),
             "comparison": comparison,
@@ -3131,7 +3114,7 @@ class OperatorStationSession:
         ranked_handle = self._ranked_handle_from_verification(verif_result)
         if "euclidean" in normalized and ranked_handle is None:
             # Use the synthesized euclidean handle if it has already been registered.
-            euc = "grounding.all_doors.ranked.euclidean.agent"
+            euc = self.planning_semantics.capability_handle("ranked", metric="euclidean")
             spec = self.capability_registry.lookup(euc)
             if spec is not None and spec.implementation_status == "implemented":
                 ranked_handle = euc
@@ -3235,7 +3218,7 @@ class OperatorStationSession:
         request_plan: RequestPlan | None = None,
         readiness_graph: ReadinessGraph | None = None,
     ) -> StationActiveClaims | str:
-        handle = handle or "grounding.all_doors.ranked.manhattan.agent"
+        handle = handle or self.planning_semantics.capability_handle("ranked", metric="manhattan")
         spec = self.capability_registry.lookup(handle)
         if spec is None:
             return f"Capability '{handle}' is not registered. I cannot compose that result."
@@ -3894,7 +3877,7 @@ class OperatorStationSession:
             if metric != "manhattan":
                 # Check whether a synthesized callable exists for this metric
                 if metric is not None:
-                    synth_handle = f"grounding.closest_door.{metric}.agent"
+                    synth_handle = self.planning_semantics.capability_handle("closest", metric=metric)
                     fn = self.capability_registry.get_synthesized_callable(synth_handle)
                     if fn is not None:
                         return self._ground_with_synthesized_callable(fn, selector)
@@ -4380,7 +4363,7 @@ class OperatorStationSession:
 
     def _infer_offer_action(self, missing_handles: list[str]) -> str:
         """Return the registered primitive handle that best serves as an offer action."""
-        return "grounding.all_doors.ranked.manhattan.agent"
+        return self.planning_semantics.capability_handle("ranked", metric="manhattan")
 
     def resume_arbitration_offer(self, handle: str) -> str:
         """Execute the grounding primitive named by handle and return a display string.
@@ -5643,6 +5626,27 @@ class OperatorStationSession:
         if self.last_result is None:
             return None
         return bool(self.last_result["final_state"]["task_complete"])
+
+
+def _turn_field(name: str) -> property:
+    """A property that delegates a per-turn attribute to ``self.turn_state`` (TurnState).
+    Preserves the public ``session.<name>`` read/write API while the trace lives in one
+    typed object."""
+    def getter(self: "OperatorStationSession") -> Any:
+        return getattr(self.turn_state, name)
+
+    def setter(self: "OperatorStationSession", value: Any) -> None:
+        setattr(self.turn_state, name, value)
+
+    getter.__name__ = name
+    return property(getter, setter)
+
+
+# Surface every TurnState field on the session as a delegating property, so the ~19
+# per-turn attributes have one typed home without changing any call site.
+for _field_name in TURN_STATE_FIELDS:
+    setattr(OperatorStationSession, _field_name, _turn_field(_field_name))
+del _field_name
 
 
 def _final_record(loop_records: Iterable[dict[str, Any]]) -> dict[str, Any] | None:

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Mapping
 
+from . import fingerprint as _fp
 from . import geometry
 
 
@@ -2111,8 +2111,7 @@ class EnvironmentIdentity:
             "substrate_fingerprint": self.substrate_fingerprint,
             "summary": self.summary,
         }
-        payload = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return _fp.fingerprint(stable, default=str)
 
 
 @dataclass
@@ -2273,8 +2272,7 @@ class OperationalContext:
             "procedure_hints": self.procedure_hints,
             "metadata": self.metadata,
         }
-        payload = json.dumps(stable, sort_keys=True, separators=(",", ":"), default=str)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return _fp.fingerprint(stable, default=str)
 
     def compact_slice(self, utterance: str | None = None) -> dict[str, Any]:
         task_families = [

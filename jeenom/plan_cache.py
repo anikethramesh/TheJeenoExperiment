@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from . import fingerprint as _fp
 from .schemas import (
     EvidenceFrame,
     ExecutionContext,
@@ -38,7 +38,7 @@ def normalize_semantic_params(params: dict[str, Any] | None) -> str:
         "object_type": params.get("object_type"),
         "target_location_required": params.get("target_location") is not None,
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return _fp.canonical_json(payload)
 
 
 def procedure_key(task_request: TaskRequest) -> str:
@@ -46,7 +46,7 @@ def procedure_key(task_request: TaskRequest) -> str:
         "task_type": task_request.task_type,
         "params": normalize_semantic_params(task_request.params),
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return _fp.canonical_json(payload)
 
 
 def sense_key(
@@ -61,7 +61,7 @@ def sense_key(
         "active_skill": execution_context.active_skill,
         "params": normalize_semantic_params(merged_params),
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return _fp.canonical_json(payload)
 
 
 def skill_key(execution_contract: ExecutionContract) -> str:
@@ -69,7 +69,7 @@ def skill_key(execution_contract: ExecutionContract) -> str:
         "skill": execution_contract.skill,
         "params": normalize_semantic_params(execution_contract.params),
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return _fp.canonical_json(payload)
 
 
 class PlanCache:

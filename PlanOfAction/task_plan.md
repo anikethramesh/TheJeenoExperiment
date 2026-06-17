@@ -25,8 +25,10 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 13 - Steerable Cognition Layer** (sub-phase **13B** next;
-  **13A complete**). 13A delivered the typed, constraint-first steering layer
+- Current phase: **Phase 13 - Steerable Cognition Layer** (**13A complete**, incl. **13A.1**
+  coordinate-system abstraction and the **13A.2** cleanup spike — all 4 slices landed
+  (fingerprint, capability-handle grammar, metric-name detection, typed TurnState); **13B**
+  next). 13A delivered the typed, constraint-first steering layer
   (`SteeringDirective`: budget/scope/risk/stopping-rule) that demonstrably reshapes plan
   assembly — risk withdraws actuation authority via `needs_authorization`, budget caps
   the Spine stepping loop as `FailureOutcome(category="budget_exhausted")`, and the active
@@ -1652,6 +1654,153 @@ matching the 12D v0.1 unification (was a stale `"0"`).
 
 Verification: full `pytest -q tests` 273 passed / 0 failed, `eval_master` all green
 (`--suite cleanup`, `--suite orpi` included).
+
+#### 13A.2 - Cleanup spike: centralize scattered logic + fragmented turn state
+
+Status: **complete — all 4 slices landed.** 13A.2.1 ✅, 13A.2.2 ✅ (re-scoped: control-plane
+part; `llm_compiler` left to Phase 14), 13A.2.3 ✅ (scoped: detection consolidated
+behavior-preserving; behavior-laden defaults/supported-lists left untouched), 13A.2.4 ✅. A
+spike, so spike discipline applied: per slice, a red-bar probe landed **before** the
+consolidating edit; full `eval_master` + `pytest` green between slices (final: `pytest`
+290 passed, all eval suites green). Ordered lowest-blast-radius first so value landed early.
+
+Motivation: 13A.1 exposed a debt *class* — a single concept hand-rolled across many files,
+each copy free to drift (the int-truncation / 2D-only bug). An audit found more of the same
+shape, plus per-turn state managed as 25 loose session attributes (the `active_steering_directive`
+`AttributeError` was one symptom). This spike pays down that class. Scope is **concept
+consolidation** (one concept → one home) and **state consolidation** — explicitly **not** the
+parked `operator_station.py` file-decomposition (Phase 16) and **not** substrate-vocabulary
+deleaking (Phase 14/15).
+
+##### 13A.2.1 - Stable-fingerprint helper (quick, contained) — ✅ done
+
+Delivered `jeenom/fingerprint.py` (`canonical_json` with a `sort_keys` flag —
+`plan_semantic_key` legitimately needs `sort_keys=False`; `stable_hash`; `fingerprint`).
+All four sites delegate; `import hashlib` dropped from the three hashing sites.
+Behavior-preserving (verified byte-for-byte). Probe: `tests/test_fingerprint_consolidation.py`
+(red-bar AST guard: no site calls `hashlib.sha256` directly).
+
+- Problem: `mission_cortex.py`, `plan_cache.py`, `plan_reuse.py`, `schemas.py` each roll their
+  own `hashlib` + `json.dumps(sort_keys=...)` fingerprint.
+- Fix: one `stable_fingerprint(obj) -> str` home; the four sites delegate. Behavior-preserving
+  (identical digest inputs → identical digests).
+- Red-bar: probe/test asserts the four sites produce digests equal to the shared helper for
+  representative inputs; fails while any site still hand-rolls hashing.
+
+##### 13A.2.2 - Capability-handle grammar (route through the home that already exists) — ✅ done (re-scoped)
+
+Delivered, but **re-scoped on contact with the code**: the handle debt is more entangled
+with the Phase 14 door-leak than the original plan implied. `llm_compiler.py` holds no
+`PlanningSemantics` instance and is the MiniGrid compiler *profile* (Phase 14), so it stays
+out. This slice routed the cleanly-separable part — `operator_station.py`'s 6 construction
+sites (3 f-strings + 3 bare literals) — through `self.planning_semantics.capability_handle(...)`
+(the non-validating composer; `ranked_handle` would have gated synthesized metrics). The
+MiniGrid context templates are byte-identical to the old literals, so cache keys / lookups
+don't shift. Probe: `tests/test_handle_grammar_consolidation.py` (byte-for-byte equivalence +
+AST guard: no handle f-strings in `operator_station.py`). `llm_compiler`'s ~39 handle strings
+remain Phase 14 work.
+
+- Problem: ~13 files hand-build handle strings (`grounding.all_doors.ranked.manhattan.agent`
+  hardcoded 8×, plus `f"...ranked.{metric}.agent"` variants), **bypassing**
+  `PlanningSemantics.{ranked_handle,filter_handle,capability_handle}` — which already exists and
+  is substrate-parameterized (`{object_type_plural}`). This is the 13A.1 pattern exactly.
+- Fix: route every generic-core handle *construction* through `PlanningSemantics`; delete the
+  hand-built literals/f-strings. Handle *comparison/parsing* is untouched (`metric_from_grounding_handle`
+  stays the parse home).
+- Probe (`substrate_*`): fails if a raw `"grounding.`/`"claims.`/`"task.` handle literal or
+  f-string is constructed outside `planning_semantics.py`, the `*_operational_context`, or the
+  capability registry.
+- Blast radius: **medium** — handles are string-*compared* in many places; only construction is
+  centralized. Per-site review, not blind replace.
+- Interplay note: because the home takes `object_type`, this shrinks the Phase 14 door-leak
+  surface as a side effect — but full vocabulary deleaking stays Phase 14; this slice only moves
+  construction onto the existing parameterized home.
+
+##### 13A.2.3 - Distance-metric-name handling (control plane only) — ✅ done (behavior-preserving, scoped)
+
+Delivered, scoped to the one genuinely behavior-preserving consolidation: text **detection**.
+`semantic_normalizer._detect_metric` is now the public `detect_metric` + `mentions_metric`,
+with the known-metric SET sourced from the canonical `OPERATOR_DISTANCE_METRICS` and the
+**euclidean-first** priority preserved exactly (ambiguous text mentioning both metrics still
+resolves to euclidean — pinned by `tests/test_metric_vocabulary_consolidation.py` so a
+manhattan-first regression is caught). `operator_station`'s two inline euclidean-first detection
+sites route through these (`mentions_metric` for "any metric mentioned"; `detect_metric(...) or
+fallback` for the pick).
+
+Left untouched **on purpose** (behavior-laden, not duplication): the divergent per-site default
+metrics (filter→`euclidean`, ranked→`manhattan`), the deliberately-narrow supported lists
+(`["manhattan"]`), the `metric == "manhattan"` compute-branch, the plan-mismatch logic, and
+`intent_verifier`'s own PlanningSemantics-driven detector (the substrate-neutral path). Bare
+`"manhattan" in normalized` substring checks were *not* routed — they are not equivalent to
+`detect_metric == "manhattan"` under euclidean-first. Full substrate-neutral metric names
+(PlanningSemantics-driven per substrate) remain Phase 14/15.
+
+- Problem: `OPERATOR_DISTANCE_METRICS` exists, but the control plane re-checks raw
+  `"manhattan"`/`"euclidean"` (`operator_station.py` ~24, `turn_orchestrator.py`, `intent_cache.py`,
+  `semantic_normalizer.py`).
+- Fix: a small resolver/validator sourced from `OPERATOR_DISTANCE_METRICS`; control-plane checks
+  call it. **Out of scope:** `llm_compiler.py`'s metric mentions are prompt text, which the
+  blueprint explicitly permits — left alone.
+
+##### 13A.2.4 - Typed turn state (the structural slice; doubles as the de-bloat gate artifact) — ✅ done
+
+Delivered `jeenom/turn_state.py` (`TurnState` dataclass + `TURN_STATE_FIELDS`). The 19 bare
+per-turn attributes (`last_*` / `current_environment_identity` / `active_steering_directive`)
+moved onto one typed object, initialized once in `__init__`; the session surfaces each field
+as a delegating property (`_turn_field`, attached in a loop over `TURN_STATE_FIELDS`), so every
+internal write and the ~40 evals reading `session.last_*` keep working unchanged. Initialization
+is now guaranteed — the `active_steering_directive` `AttributeError` bug class is structurally
+gone. Scope notes from the code: `active_claims` and the `pending_*` continuation state were
+already property-backed (own homes, left alone); `LabelledEpisode` is already projected from
+`command_result`, not the loose attrs, so no projection rewrite was needed. Probe:
+`tests/test_turn_state_consolidation.py` (fields complete; each surfaced as a property;
+delegation both ways; AST guard that `__init__` no longer bare-assigns the 19).
+
+- Problem: 25 loose per-turn session attributes (`last_*` / `active_*` / `current_*` / `pending_*`)
+  are **one concept** — the turn in flight plus the pending-continuation machine — scattered as
+  bare fields. `TurnOrchestrator` reaches into 58 session members, ~40 evals assert on them,
+  un-initialized ones bug out, and the same trace is **re-assembled** as `LabelledEpisode`
+  (duplication: live attributes during the turn, `LabelledEpisode` at the end).
+- Deliverable A (the spike's review artifact): a **shared-state map** — every reader/writer of
+  each of the 25 attributes across `operator_station.py`, `turn_orchestrator.py`,
+  `mission_cortex.py`, and evals/tests.
+- Deliverable B: a typed `TurnState`
+  (`envelope → intent → plan → graph → command → tickets → result → repair/mismatch`) owned by the
+  session, plus a `PendingState` for the continuation machine; `LabelledEpisode` is **projected
+  from** `TurnState` (single source of the turn trace).
+- Migration: preserve the public `session.last_*`/`pending_*` reads via thin properties delegating
+  to `TurnState`, so the ~40 dependent evals stay green while internal writers move onto the object.
+- Probe: fails if `TurnOrchestrator`/`MissionCortex` read or write raw `last_*`/`pending_*` instead
+  of going through `TurnState`; fails if any per-turn field is read before initialization.
+- Payoff: kills the un-initialized-attribute bug *class*, turns the station↔orchestrator
+  god-object coupling into a typed hand-off, and **this map + object is exactly the "shared-state
+  map" the Phase 16 decomposition-design gate requires** — so it advances the de-bloat without
+  front-running it.
+
+Explicitly OUT of 13A.2 (deferred with cause):
+
+- **Dispatch-pipeline unification** — the ~15 parallel `command_from_*` / `_run_*` methods are
+  genuine logic repetition, but collapsing them *is* most of the station decomposition. It rides
+  with the gated Phase 16 refactor; 13A.2.4 produces the prerequisite state map, it does not
+  collapse the pipeline.
+- **Claim-type unification** — the 6 claim-ish types (`ClaimRecord`, `ObservationClaim`,
+  `ExecutionClaim`, `StationActiveClaims`, `GroundedObjectEntry`, `NamedConcept`) are tempting to
+  merge, but blueprint rule 16 forbids a new schema family until an eval proves the current
+  representation is lossy. Deferred.
+- **`door`/color substrate vocabulary** — already catalogued and sequenced (Phase 14 cheap,
+  Phase 15 structural). 13A.2.2 reduces its surface but must not front-run it.
+
+Acceptance criteria (whole spike):
+
+- Each slice: red-bar probe lands first, then goes green; `eval_master` + `pytest -q tests` green
+  between every slice.
+- No concept among { coordinate metric (13A.1 ✅), stable fingerprint, capability handle,
+  distance-metric name } is hand-rolled outside its single home — a probe enforces each.
+- Per-turn state flows through one typed `TurnState`; `LabelledEpisode` is projected from it; no
+  raw `last_*`/`pending_*` poking across the station↔orchestrator boundary.
+- Public `session` attribute reads preserved via compat properties; MiniGrid golden path intact.
+- The shared-state map (13A.2.4 Deliverable A) is committed as a doc, reusable verbatim as the
+  Phase 16 de-bloat gate artifact.
 
 ### 13B - Partial observability + ask-for-help + meta primitives
 

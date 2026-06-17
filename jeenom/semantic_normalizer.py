@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .schemas import OPERATOR_DISTANCE_METRICS
+
 
 _ORDINALS: dict[str, int] = {
     "first": 1,
@@ -89,14 +91,14 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
 
     Handles phrases such as "second highest manhattan distance" and
     "third smallest distance" without making an LLM output the authority.
-    Gate: a detectable metric (via _detect_metric) or the generic word
+    Gate: a detectable metric (via detect_metric) or the generic word
     "distance" must appear — otherwise the semantics are too incomplete to act on.
-    _detect_metric is the substrate-coupling point; it should eventually read
+    detect_metric is the substrate-coupling point; it should eventually read
     registered metric names from PlanningSemantics rather than hardcoding them.
     """
 
     normalized = re.sub(r"\s+", " ", text.strip().lower())
-    if _detect_metric(normalized) is None and "distance" not in normalized:
+    if detect_metric(normalized) is None and "distance" not in normalized:
         return None
     extracted = _extract_ordinal(normalized)
     if extracted is None:
@@ -112,7 +114,7 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
                 ordinal=ordinal_val,
                 order="descending",
                 direction_term=term,
-                metric=_detect_metric(normalized),
+                metric=detect_metric(normalized),
             )
 
     for term in _ASCENDING_DISTANCE_TERMS:
@@ -122,22 +124,33 @@ def normalize_distance_ordinal(text: str) -> DistanceOrdinalSemantics | None:
                 ordinal=ordinal_val,
                 order="ascending",
                 direction_term=term,
-                metric=_detect_metric(normalized),
+                metric=detect_metric(normalized),
             )
 
     return None
 
 
 # ── Substrate coupling boundary ──────────────────────────────────────────────
-# _detect_metric names substrate-registered metric names directly.
-# Future fix: derive known metric names from PlanningSemantics so this stays
-# substrate-neutral when a second substrate is added.
-def _detect_metric(normalized: str) -> str | None:
-    if "euclidean" in normalized:
-        return "euclidean"
-    if "manhattan" in normalized:
-        return "manhattan"
+# The known-metric SET is sourced from the canonical OPERATOR_DISTANCE_METRICS, so metric
+# names live in one place. Detection priority is euclidean-first (preserved from the original
+# detect_metric: ambiguous text mentioning both metrics resolves to euclidean). Full
+# substrate neutrality (PlanningSemantics-driven names per substrate) remains Phase 14/15.
+_METRIC_DETECTION_PRIORITY: tuple[str, ...] = tuple(
+    sorted(OPERATOR_DISTANCE_METRICS, key=lambda metric: metric != "euclidean")
+)
+
+
+def detect_metric(normalized: str) -> str | None:
+    """Return the metric named in `normalized` (euclidean-first on ambiguity), else None."""
+    for metric in _METRIC_DETECTION_PRIORITY:
+        if metric in normalized:
+            return metric
     return None
+
+
+def mentions_metric(normalized: str) -> bool:
+    """True if `normalized` names any known distance metric."""
+    return detect_metric(normalized) is not None
 
 
 def infer_direction_from_utterance(text: str) -> str | None:
