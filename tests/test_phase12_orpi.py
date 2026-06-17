@@ -92,7 +92,7 @@ class TestPhase12Orpi(unittest.TestCase):
         payload = manifest.as_dict()
         names = {contract["name"] for contract in payload["primitives"]}
         self.assertEqual(payload["substrate_id"], "minigrid")
-        self.assertEqual(payload["orpi_version"], "0")
+        self.assertEqual(payload["orpi_version"], "0.1")
         self.assertIn("door", payload["object_vocabulary"])
         self.assertIn("object_index", payload["symbol_mappings"])
         self.assertIn("grid", payload["frames"])

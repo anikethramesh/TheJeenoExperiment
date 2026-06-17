@@ -24,6 +24,8 @@ import types
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from jeenom import geometry
+
 
 @dataclass
 class ValidationFixture:
@@ -413,6 +415,7 @@ class PrimitiveValidator:
                 __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)  # type: ignore[arg-type]
             )},
             "math": math,
+            "geometry": geometry,
         }
         try:
             exec(compile(code, f"<synthesized:{function_name}>", "exec"), namespace)  # noqa: S102

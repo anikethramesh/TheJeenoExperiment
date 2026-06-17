@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Mapping
 
+from . import geometry
+
 
 SENSE_TEMPLATE_ALLOWED_INPUTS = (
     "observation",
@@ -867,7 +869,7 @@ class GroundingQueryPlan:
     ordinal: int | None = None
     color: str | None = None
     exclude_colors: list[str] = field(default_factory=list)
-    distance_value: int | None = None
+    distance_value: float | None = None  # a metric threshold; float-capable for euclidean
     comparison: str | None = None
     tie_policy: str | None = "clarify"
     answer_fields: list[str] = field(default_factory=list)
@@ -1933,17 +1935,23 @@ class WorldModelSample:
 class SceneObject:
     object_type: str
     color: str | None
-    x: int
-    y: int
+    x: float
+    y: float
     state: int | None = None
+    z: float | None = None  # absent on 2D substrates (MiniGrid); set on 3D ones
+
+    @property
+    def coord(self) -> tuple[float, ...]:
+        """(x, y) on a 2D substrate, (x, y, z) when a depth axis is present."""
+        return (self.x, self.y) if self.z is None else (self.x, self.y, self.z)
 
 
 @dataclass
 class SceneModel:
     """Structured snapshot of the last sensed scene, projected from WorldModelSample."""
 
-    agent_x: int
-    agent_y: int
+    agent_x: float
+    agent_y: float
     agent_dir: int
     grid_width: int
     grid_height: int
@@ -1952,6 +1960,14 @@ class SceneModel:
     env_id: str | None = None
     seed: int | None = None
     step_count: int = 0
+    agent_z: float | None = None  # absent on 2D substrates; set on 3D ones
+
+    @property
+    def agent_coord(self) -> tuple[float, ...]:
+        """(x, y) on a 2D substrate, (x, y, z) when a depth axis is present."""
+        if self.agent_z is None:
+            return (self.agent_x, self.agent_y)
+        return (self.agent_x, self.agent_y, self.agent_z)
 
     def find(
         self,
@@ -1969,8 +1985,8 @@ class SceneModel:
             result = [o for o in result if o.color not in exclude_colors]
         return result
 
-    def manhattan_distance_from_agent(self, obj: SceneObject) -> int:
-        return abs(obj.x - self.agent_x) + abs(obj.y - self.agent_y)
+    def manhattan_distance_from_agent(self, obj: SceneObject) -> float:
+        return geometry.manhattan(obj.coord, self.agent_coord)
 
     @classmethod
     def from_world_model_sample(
@@ -1987,16 +2003,19 @@ class SceneModel:
             SceneObject(
                 object_type=obj["type"],
                 color=obj.get("color"),
-                x=int(obj["x"]),
-                y=int(obj["y"]),
+                x=geometry.as_coord(obj["x"]),
+                y=geometry.as_coord(obj["y"]),
                 state=obj.get("state"),
+                z=geometry.as_coord(obj["z"]) if obj.get("z") is not None else None,
             )
             for obj in (sample.grid_objects or [])
         ]
+        agent_z = agent_pose.get("z")
         return cls(
-            agent_x=int(agent_pose.get("x", 0)),
-            agent_y=int(agent_pose.get("y", 0)),
+            agent_x=geometry.as_coord(agent_pose.get("x", 0)),
+            agent_y=geometry.as_coord(agent_pose.get("y", 0)),
             agent_dir=int(agent_pose.get("dir", 0)),
+            agent_z=geometry.as_coord(agent_z) if agent_z is not None else None,
             grid_width=int(grid_w),
             grid_height=int(grid_h),
             objects=objects,
@@ -2010,8 +2029,8 @@ class SceneModel:
 @dataclass
 class GroundedObjectEntry:
     color: str | None
-    x: int
-    y: int
+    x: float
+    y: float
     distance: float  # float for Euclidean and other non-integer metrics
     object_type: str = "unknown"
     metric: str | None = None       # e.g. "manhattan", "euclidean"

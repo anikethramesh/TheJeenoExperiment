@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import geometry
 from .capability_arbitrator import ArbitratorBackend, build_arbitrator
 from .cortex_session import CortexSession
 from .capability_matcher import CapabilityMatchResult, CapabilityMatcher, default_matcher
@@ -333,6 +334,9 @@ class OperatorStationSession:
         self.max_loops = max_loops
         self.verbose = verbose
         self.last_result: dict[str, Any] | None = None
+        # Active steering directive for the turn in flight. Initialized here (not only in
+        # handle_utterance) so direct-dispatch paths that read it never hit AttributeError.
+        self.active_steering_directive: SteeringDirective | None = None
         self.runtime_package = runtime_package or build_minigrid_runtime_package(
             env_id=self.env_id,
             render_mode=self.render_mode,
@@ -1444,7 +1448,7 @@ class OperatorStationSession:
         if metric == "manhattan":
             return float(scene.manhattan_distance_from_agent(obj))
         if metric == "euclidean":
-            return math.sqrt((obj.x - scene.agent_x) ** 2 + (obj.y - scene.agent_y) ** 2)
+            return geometry.euclidean(obj.coord, scene.agent_coord)
         fn = self.capability_registry.get_synthesized_callable(self.capability_registry.ranked_handle_for(metric))
         if fn is not None:
             ranked = fn(scene, {"object_type": "door", "color": None, "exclude_colors": []})

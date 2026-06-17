@@ -151,7 +151,7 @@ class LLMSynthesizer(SynthesizerBackend):
         "        return []\n"
         "    return sorted(\n"
         "        [\n"
-        "            (abs(d.x - scene.agent_x) + abs(d.y - scene.agent_y), d)\n"
+        "            (geometry.manhattan(d.coord, scene.agent_coord), d)\n"
         "            for d in doors\n"
         "        ],\n"
         "        key=lambda pair: (pair[0], pair[1].color or ''),\n"
@@ -222,7 +222,10 @@ class LLMSynthesizer(SynthesizerBackend):
                 "You are the JEENOM primitive synthesizer. Your task is to generate a pure Python "
                 "function body for a missing grounding primitive.\n\n"
                 "HARD RULES:\n"
-                "  - Only use: math, standard Python built-ins, and the scene/selector inputs.\n"
+                "  - Only use: math, geometry, standard Python built-ins, and the scene/selector inputs.\n"
+                "  - For distance, prefer geometry.manhattan/geometry.euclidean over coord pairs\n"
+                "    (e.g. geometry.manhattan(d.coord, scene.agent_coord)) — these are N-dimensional\n"
+                "    and float-capable, so they work on 2D and 3D substrates without change.\n"
                 "  - Do NOT import gymnasium, minigrid, numpy, torch, or any external library.\n"
                 "  - Do NOT access the filesystem or network.\n"
                 "  - Do NOT call env.step() or any robot action.\n"
@@ -234,7 +237,7 @@ class LLMSynthesizer(SynthesizerBackend):
                 "Put the complete function in function_body: start with exactly this def line, "
                 "then all indented body lines. Return only syntactically valid Python code in "
                 "function_body. Do not include Markdown fences. Do not include import statements — "
-                "use math.sqrt etc. inline.\n"
+                "use math.sqrt / geometry.euclidean etc. inline.\n"
             )
         if validation_error and previous_code:
             system_prompt += (

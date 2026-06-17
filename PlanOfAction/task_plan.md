@@ -1616,6 +1616,43 @@ Deferred within 13A: decomposition/method guidance reuses the existing
 `concept_teach` / `sequence_instruction` / `mission_contract` rails; the richer
 "compose primitives from a described method" version depends on the 13B `meta` layer.
 
+#### 13A.1 - Coordinate-system abstraction (bugfix, AI2-THOR unblock)
+
+Status: **complete**. Surfaced by the AI2-THOR branch: a continuous 3D substrate
+needs float, N-dimensional coordinates, but coordinates were hardcoded `int` 2D and
+distance math was hand-rolled (`obj.x - agent_x`) across ~16 files. This is
+*coordinate* debt, distinct from (and not addressed by) the parked `operator_station.py`
+de-bloat — only ~9 of the station's lines were coordinate-coupled.
+
+Delivered (every live distance computation now flows through one home — no hand-rolled
+coordinate math remains, including in synthesized primitives):
+
+- New `jeenom/geometry.py`: the single home for coordinate metrics. `manhattan`/
+  `euclidean` are N-dimensional (`zip` over coord tuples → 2D or 3D, no special-casing);
+  `as_coord()` keeps integral coords `int` (MiniGrid display/equality unchanged) while
+  preserving genuine floats. Pure stdlib — importable by `schemas` with no cycle.
+- `schemas.py`: `SceneObject`/`SceneModel`/`GroundedObjectEntry` coords `int → float`;
+  optional `z`/`agent_z` (absent on 2D substrates) with `coord`/`agent_coord` properties;
+  `manhattan_distance_from_agent` delegates to geometry; `from_world_model_sample` stops
+  truncating via `int(...)` (uses `as_coord`, reads optional `z`); `distance_value` widened.
+- `operator_station.py`: the inline euclidean now calls `geometry.euclidean`.
+- Synthesized-primitive path made geometry-backed and 3D-ready: `primitive_validator`
+  pre-injects `geometry` into the runtime exec namespace; the synthesizer's canonical
+  example and both synth/arbitrator prompt API docs now use
+  `geometry.manhattan(d.coord, scene.agent_coord)` and advertise float coords + `.coord`/
+  `.agent_coord`, so a synthesized metric is no longer silently 2D-only on a 3D substrate.
+- `tests/test_geometry_coordinates.py` (eval-first): 2D/3D metrics, float preservation,
+  int-collapse, schema integration, and the MiniGrid integral-path-unchanged contract.
+
+Two latent bugs from the 13A base commit fixed in passing (both surfaced by the full
+suite, neither caused by this work): `OperatorStationSession.active_steering_directive`
+is now initialized in `__init__` (was only set in `handle_utterance`, so direct-dispatch
+paths hit `AttributeError`); `test_phase12_orpi` now asserts `orpi_version == "0.1"`
+matching the 12D v0.1 unification (was a stale `"0"`).
+
+Verification: full `pytest -q tests` 273 passed / 0 failed, `eval_master` all green
+(`--suite cleanup`, `--suite orpi` included).
+
 ### 13B - Partial observability + ask-for-help + meta primitives
 
 Status: next. Makes steering *necessary* (omniscient answers become impossible, so
