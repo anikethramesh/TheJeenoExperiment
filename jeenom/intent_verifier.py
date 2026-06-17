@@ -21,7 +21,7 @@ from .planning_semantics import PlanningSemantics, default_planning_semantics
 from .semantic_normalizer import infer_direction_from_utterance, normalize_distance_ordinal
 
 if TYPE_CHECKING:
-    from .schemas import OperatorIntent, SelectionObjective
+    from .schemas import OperatorIntent, SelectionObjective, SteeringDirective
 
 SIGNAL_SUPERLATIVE = "superlative"   # farthest, furthest, most distant
 SIGNAL_CARDINALITY = "cardinality"   # all objects, sort/rank/list by distance
@@ -134,12 +134,25 @@ class IntentVerifier:
         self,
         utterance: str,
         intent: "OperatorIntent",
+        steering_directive: "SteeringDirective | None" = None,
     ) -> tuple["OperatorIntent", IntentVerificationResult]:
-        """Return (enriched_intent, result). Primary API for the station."""
+        """Return (enriched_intent, result). Primary API for the station.
+
+        A parsed SteeringDirective (Phase 13A) is attached here — the gate — and only
+        when coherent with the intent (steering shapes *action* intents). An incoherent
+        directive (e.g. steering a control/query turn) is dropped, never silently
+        applied, so a misparse cannot reshape a plan it has no business touching.
+        """
         import dataclasses
 
         signals, inversion_detected, inversion_reason = self._analyze(utterance, intent)
-        if not signals and not inversion_detected:
+        attach_steering = (
+            steering_directive is not None
+            and intent.steering_directive is None
+            and intent.knowledge_type == "action"
+        )
+
+        if not signals and not inversion_detected and not attach_steering:
             return intent, IntentVerificationResult()
 
         existing = set(intent.required_capabilities or [])
@@ -148,9 +161,13 @@ class IntentVerifier:
             for signal in signals
             if signal.required_handle not in existing
         ]
-        enriched = dataclasses.replace(
-            intent,
-            required_capabilities=list(existing) + to_inject,
+        replace_kwargs: dict = {}
+        if to_inject:
+            replace_kwargs["required_capabilities"] = list(existing) + to_inject
+        if attach_steering:
+            replace_kwargs["steering_directive"] = steering_directive
+        enriched = (
+            dataclasses.replace(intent, **replace_kwargs) if replace_kwargs else intent
         )
         return enriched, IntentVerificationResult(
             signals=signals,

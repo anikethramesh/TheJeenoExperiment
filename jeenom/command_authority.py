@@ -84,6 +84,7 @@ class CommandAuthority:
         pending_context: dict[str, Any] | None = None,
         last_result: dict[str, Any] | None = None,
         manifest: Any = None,
+        failure_outcome: Any = None,
     ) -> CommandResult:
         envelope = self._make_envelope(
             "envelope", utterance, intent, plan, graph, compiler_name, dict(pending_context or {})
@@ -114,6 +115,7 @@ class CommandAuthority:
             command=command,
             ticket=ticket,
             result=result_payload,
+            failure_outcome=failure_outcome,
         )
         from .orpi import LabelledEpisode
 

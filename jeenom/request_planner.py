@@ -17,6 +17,32 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+# Phase 13A: layers whose steps actuate / execute and therefore carry steering teeth.
+_STEERABLE_LAYERS = frozenset({"task", "action"})
+
+
+def _fold_steering(steps: list[RequestPlanStep], directive: Any) -> None:
+    """Fold a SteeringDirective into the constraints of actuating steps (in place).
+
+    Readiness reads `steering_risk` to gate side effects; the Spine loop reads
+    `steering_budget` to cap execution. Mirrors how SelectionObjective fields land in
+    RequestPlanStep.constraints — typed values, no vocabulary scanning downstream.
+    """
+    if directive is None:
+        return
+    for step in steps:
+        if step.layer not in _STEERABLE_LAYERS:
+            continue
+        if directive.risk is not None:
+            step.constraints["steering_risk"] = directive.risk
+        if directive.budget:
+            step.constraints["steering_budget"] = dict(directive.budget)
+        if directive.stopping_rule is not None:
+            step.constraints["steering_stopping_rule"] = directive.stopping_rule
+        if directive.scope is not None:
+            step.constraints["steering_scope"] = directive.scope
+
+
 def _objective_type(intent: OperatorIntent) -> str:
     if intent.intent_type == "task_instruction":
         return "task"
@@ -206,6 +232,8 @@ def build_request_plan(
     comparison = _comparison_from_text_or_plan(utterance, plan)
     distance_value = _distance_value_from_text_or_plan(utterance, plan)
     ranked_claims_output = semantics.ranked_claims_output
+    steering_directive = getattr(intent, "steering_directive", None)
+    steering_payload = steering_directive.as_dict() if steering_directive is not None else None
 
     if objective_type == "motor_control":
         steps.append(
@@ -221,6 +249,7 @@ def build_request_plan(
                 constraints={"raw_motor": True},
             )
         )
+        _fold_steering(steps, steering_directive)
         return RequestPlan(
             request_id=request_id,
             original_utterance=utterance,
@@ -229,6 +258,7 @@ def build_request_plan(
             steps=steps,
             preservation_signals=semantics.preservation_signals(utterance),
             expected_response=expected_response,
+            steering=steering_payload,
         )
 
     if objective_type == "control":
@@ -355,6 +385,7 @@ def build_request_plan(
         )
 
     ranked_handle = None
+    rank_step_id: str | None = None
     if plan is not None:
         ranked_handle = plan.get("primitive_handle")
         required = list(plan.get("required_capabilities") or [])
@@ -364,15 +395,15 @@ def build_request_plan(
                 semantics.ranked_handle(metric, object_type=plan.get("object_type")),
             )
         if plan.get("operation") in {"rank", "list", "answer", "filter", "select"}:
+            _obj_type = plan.get("object_type") or semantics.default_object_type or "object"
+            rank_step_id = f"rank_scene_{semantics.pluralize(_obj_type)}"
             steps.append(
                 RequestPlanStep(
-                    step_id="rank_scene_doors",
+                    step_id=rank_step_id,
                     layer="grounding",
                     operation="rank",
                     required_handle=ranked_handle,
-                    inputs={
-                        "object_type": plan.get("object_type", semantics.default_object_type)
-                    },
+                    inputs={"object_type": _obj_type},
                     outputs=[ranked_claims_output],
                     constraints={
                         "metric": metric,
@@ -397,7 +428,7 @@ def build_request_plan(
         )
 
     if plan is not None and distance_value is not None:
-        depends = ["rank_scene_doors"] if any(s.step_id == "rank_scene_doors" for s in steps) else []
+        depends = [rank_step_id] if rank_step_id is not None else []
         steps.append(
             RequestPlanStep(
                 step_id="filter_distance_threshold",
@@ -516,6 +547,7 @@ def build_request_plan(
             )
         )
 
+    _fold_steering(steps, steering_directive)
     return RequestPlan(
         request_id=request_id,
         original_utterance=utterance,
@@ -525,4 +557,5 @@ def build_request_plan(
         preservation_signals=semantics.preservation_signals(utterance),
         expected_response=expected_response,
         environment_assumptions=environment_assumptions,
+        steering=steering_payload,
     )

@@ -9,8 +9,25 @@ from .schemas import (
     ReadinessNode,
     RequestPlan,
     RequestPlanStep,
+    STEERING_RISK_ALLOWED_SAFETY,
     StationActiveClaims,
 )
+
+
+def _steering_risk_block(step: RequestPlanStep, safety_class: str) -> str | None:
+    """Phase 13A: a risk directive that does not authorize a step's safety class is an
+    authorization withdrawal. Returns a reason when blocked, else None. Reuses the
+    existing `needs_authorization` status — no new readiness value."""
+    risk = step.constraints.get("steering_risk")
+    if risk is None:
+        return None
+    allowed = STEERING_RISK_ALLOWED_SAFETY.get(risk)
+    if allowed is None or safety_class in allowed:
+        return None
+    return (
+        f"Steering risk '{risk}' withdraws authority for a '{safety_class}' step "
+        f"({step.step_id})."
+    )
 
 
 def _status_for_primitive(
@@ -26,6 +43,10 @@ def _status_for_primitive(
             and step.operation == "execute"
             and bool(step.constraints.get("raw_motor"))
         ):
+            # Raw motor is actuation — a query/reversible-only risk directive withdraws it.
+            blocked = _steering_risk_block(step, "actuation")
+            if blocked is not None:
+                return "needs_authorization", blocked
             return "executable", "Raw motor primitive is explicitly authorized by plan."
         return "needs_clarification", "Plan step is missing a required primitive handle."
 
@@ -33,6 +54,9 @@ def _status_for_primitive(
     if spec is None:
         return "missing_skills", f"Primitive '{handle}' is not present in the registry."
     if spec.implementation_status == "implemented":
+        blocked = _steering_risk_block(step, spec.safety_class)
+        if blocked is not None:
+            return "needs_authorization", blocked
         if (
             spec.authority_level in {"restricted", "admin"}
             and not bool(step.constraints.get("authority_granted"))

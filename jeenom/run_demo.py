@@ -112,6 +112,13 @@ def _assemble_result(
     render_adapter=None,
 ):
     compiler_usage = compiler.usage_summary()
+    budget_exhausted = any(
+        isinstance(lr.get("report"), dict)
+        and lr["report"].get("reason") == "budget_exhausted"
+        for lr in loop_records
+    )
+    final_state = dict(cortex.execution_state)
+    final_state["budget_exhausted"] = budget_exhausted
     result = {
         "compiler_backend": compiler.active_backend,
         "compiler_logs": list(compiler.logs),
@@ -125,7 +132,7 @@ def _assemble_result(
         "readiness": asdict(readiness),
         "loop_records": loop_records,
         "final_claims": dict(cortex.claims),
-        "final_state": dict(cortex.execution_state),
+        "final_state": final_state,
         "persisted_knowledge": dict(memory.knowledge),
         "episodic_memory": dict(memory.episodic_memory),
         "last_world_sample": cortex.last_world_sample.summary() if cortex.last_world_sample else None,
@@ -376,6 +383,7 @@ def run_episode(
     progress_callback=None,
     task_override: TaskRequest | None = None,
     procedure_override: ProcedureRecipe | None = None,
+    step_budget: int | None = None,
 ):
     compiler = compiler or build_compiler(compiler_name)
     memory = memory or OperationalMemory(root=memory_root)
@@ -383,7 +391,7 @@ def run_episode(
     cache_enabled = plan_cache.enabled
     cortex = Cortex(memory, compiler, plan_cache=plan_cache)
     sense = MiniGridSense(memory, compiler, plan_cache=plan_cache)
-    spine = MiniGridSpine(memory, None, compiler, plan_cache=plan_cache)
+    spine = MiniGridSpine(memory, None, compiler, plan_cache=plan_cache, step_budget=step_budget)
 
     loop_records = []
     jit_prewarm = False

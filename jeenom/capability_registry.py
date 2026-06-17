@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from .minigrid_primitive_library import MINIGRID_GROUNDING_PRIMITIVES
 from .primitive_library import (
     ACTION_PRIMITIVES,
     CLAIMS_FILTER_PRIMITIVES,
@@ -166,9 +167,10 @@ def minigrid_manifest_dict() -> dict[str, Any]:
             runtime_binding=None,
         ),
     ]
+    _all_grounding = {**GROUNDING_PRIMITIVES, **MINIGRID_GROUNDING_PRIMITIVES}
     for layer, library in (
         ("task", TASK_PRIMITIVES),
-        ("grounding", GROUNDING_PRIMITIVES),
+        ("grounding", _all_grounding),
         ("sensing", SENSING_PRIMITIVES),
         ("action", ACTION_PRIMITIVES),
         ("claims", CLAIMS_FILTER_PRIMITIVES),

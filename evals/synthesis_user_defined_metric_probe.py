@@ -269,6 +269,41 @@ def _run_inline_sum_task(metrics: dict[str, bool], details: dict[str, Any]) -> N
     )
 
 
+def _run_multiword_name_definition(metrics: dict[str, bool], details: dict[str, Any]) -> None:
+    # Regression guard: a metric NAME of more than one word (e.g. "anvitan distance")
+    # must still parse as a primitive-definition, normalizing to a single handle token.
+    # Every other case in this probe uses single-token names; this is the gap that let
+    # "create a metric called anvitan distance as ..." fall through to 'unsupported'.
+    session = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
+    expected_handle = "grounding.all_doors.ranked.anvitan_distance.agent"
+
+    proposal = session.handle_utterance(
+        "create a metric called anvitan distance as the sum of manhattan distance "
+        "and euclidean distance"
+    )
+    details["multiword_proposal"] = first_line(proposal)
+    details["multiword_pending_type"] = type(_pending_definition(session)).__name__
+    lower = proposal.lower()
+    metrics["multiword_name_request_is_not_plain_unsupported"] = not _is_unresolved(proposal)
+    metrics["multiword_name_creates_definition_proposal"] = (
+        _looks_like_definition_proposal(proposal)
+        and _pending_definition(session) is not None
+    )
+    metrics["multiword_name_proposal_preserves_dependencies"] = (
+        "anvitan" in lower and "manhattan" in lower and "euclidean" in lower
+    )
+
+    approval = session.handle_utterance("yes")
+    details["multiword_approval"] = first_line(approval)
+    metrics["multiword_name_approval_registers_normalized_handle"] = (
+        expected_handle in _handles(session)
+    )
+    metrics["multiword_name_metric_supported_after_approval"] = _metric_supported(
+        session,
+        "anvitan_distance",
+    )
+
+
 def _run_negative_controls(metrics: dict[str, bool], details: dict[str, Any]) -> None:
     undefined = make_session(env_id="MiniGrid-GoToDoor-16x16-v0", seed=8)
     undefined_response = undefined.handle_utterance("rank all doors by ramesian")
@@ -342,6 +377,7 @@ def main() -> int:
         _run_convenient_definition(metrics, details)
         _run_manclid_equals_definition(metrics, details)
         _run_inline_sum_task(metrics, details)
+        _run_multiword_name_definition(metrics, details)
         _run_negative_controls(metrics, details)
     except Exception as exc:  # pragma: no cover - emitted as eval detail
         details["error"] = f"{type(exc).__name__}: {exc}"
@@ -373,6 +409,11 @@ def main() -> int:
             "inline_sum_approval_resumes_original_task",
             "inline_sum_resume_uses_custom_handle",
             "inline_sum_resume_records_task_plan",
+            "multiword_name_request_is_not_plain_unsupported",
+            "multiword_name_creates_definition_proposal",
+            "multiword_name_proposal_preserves_dependencies",
+            "multiword_name_approval_registers_normalized_handle",
+            "multiword_name_metric_supported_after_approval",
             "undefined_metric_does_not_fallback_to_builtin",
             "undefined_metric_reports_missing_definition",
             "rejected_metric_was_actually_proposed",

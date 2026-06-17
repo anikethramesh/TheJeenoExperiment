@@ -56,6 +56,7 @@ from .schemas import (
     CorticalEnvelope,
     EnvironmentIdentity,
     ExecutionTicket,
+    FailureOutcome,
     GroundedObjectEntry,
     MemoryUpdate,
     MemoryWriteTicket,
@@ -473,11 +474,27 @@ class OperatorStationSession:
         if self.verbose:
             print(f"[station] {message}", flush=True)
 
+    def _compiler_status_banner(self) -> str:
+        """One loud line stating whether the LLM compiler is actually live, so a silent
+        fallback to the deterministic compiler is never invisible again."""
+        compiler = self.compiler
+        if hasattr(compiler, "fallback_reason"):
+            reason = getattr(compiler, "fallback_reason", None)
+            model = getattr(compiler, "model", "?")
+            if reason:
+                return (
+                    f"LLM compiler INACTIVE — every turn uses the deterministic fallback. "
+                    f"reason: {reason}"
+                )
+            return f"LLM compiler LIVE: model={model} (api key detected)"
+        return f"deterministic compiler '{compiler.active_backend}' (no LLM in use)"
+
     def startup(self) -> str:
         self.log(
             f"initializing env={self.env_id} seed={self.seed} "
             f"compiler={self.compiler.active_backend} render={self.render_mode}"
         )
+        self.log(self._compiler_status_banner())
         self.open_preview()
         self.startup_prewarm_summary = self.prewarm_known_task_family()
         if self.startup_prewarm_summary is not None:
@@ -552,6 +569,16 @@ class OperatorStationSession:
             base["object_vocabulary"] = manifest_dict.get("object_vocabulary", [])
         return base
 
+    def _budget_failure_outcome(self) -> FailureOutcome | None:
+        """Phase 13A: a budget-exhausted episode surfaces as a typed FailureOutcome so the
+        LabelledEpisode attributes it to the steering authority limit, not a substrate fault."""
+        if not getattr(self, "_turn_budget_exhausted", False):
+            return None
+        return FailureOutcome(
+            category="budget_exhausted",
+            detail="Execution halted: steering step budget reached before task completion.",
+        )
+
     def _record_command_result(
         self,
         utterance: str,
@@ -589,6 +616,7 @@ class OperatorStationSession:
                 "kb_reuse_counters": self.knowledge_channel.consume_reuse_counters(),
             },
             last_result=self.last_result,
+            failure_outcome=self._budget_failure_outcome(),
         )
         self.last_cortical_envelope = command_result.envelope
         self.last_approved_command = command_result.command
@@ -613,6 +641,11 @@ class OperatorStationSession:
         self.last_cortical_envelope = None
         self.last_approved_command = None
         self.last_command_result = None
+        # Phase 13A: steering attached this turn (set in dispatch after verification);
+        # budget exhaustion is scoped to this turn so a stale last_result never leaks
+        # a FailureOutcome into a later non-task turn.
+        self.active_steering_directive = None
+        self._turn_budget_exhausted = False
         previous_plan = self.last_request_plan
         previous_graph = self.last_readiness_graph
         message = self.turn_orchestrator.handle_utterance_text(self, utterance)
@@ -645,12 +678,29 @@ class OperatorStationSession:
             ),
             pending_proposal=pending_proposal,
         )
+        self._log_compiler_fallback("compile_operator_intent")
         self.log(
             "operator intent: "
             f"type={intent.intent_type} confidence={intent.confidence:.2f} "
             f"reason={intent.reason}"
         )
         return self.turn_orchestrator.dispatch(self, intent, utterance)
+
+    def _log_compiler_fallback(self, method_name: str) -> None:
+        """Surface, per turn, when an LLM compile silently fell back to the deterministic
+        path — the reason (no key, HTTP error, schema rejection) is otherwise buried in
+        the compiler's in-memory log and never printed."""
+        history = getattr(self.compiler, "call_history", None)
+        if not history:
+            return
+        for call in reversed(history):
+            if call.get("method_name") == method_name:
+                if call.get("used_fallback"):
+                    self.log(
+                        f"WARNING: LLM compile fell back to deterministic compiler "
+                        f"({call.get('reason')})"
+                    )
+                return
 
     def _record_request_state(
         self,
@@ -813,6 +863,7 @@ class OperatorStationSession:
             required_capabilities=["task.go_to_object.door"],
             confidence=1.0,
             reason="Deterministic go-to-object task instruction.",
+            steering_directive=getattr(self, "active_steering_directive", None),
         )
         self._record_request_plan(utterance, intent)
 
@@ -832,6 +883,7 @@ class OperatorStationSession:
             required_capabilities=["task.go_to_object.door"],
             confidence=1.0,
             reason="Deterministic go-to-object task instruction.",
+            steering_directive=getattr(self, "active_steering_directive", None),
         )
 
     def _local_task_plan_and_graph(
@@ -1418,24 +1470,24 @@ class OperatorStationSession:
         if op == "min":
             values = [
                 self._base_metric_distance(scene, obj, str(metric))
-                for metric in expression.get("metrics", [])
+                for metric in (expression.get("metrics") or [])
             ]
             return min(values)
         if op == "max":
             values = [
                 self._base_metric_distance(scene, obj, str(metric))
-                for metric in expression.get("metrics", [])
+                for metric in (expression.get("metrics") or [])
             ]
             return max(values)
         if op == "sum":
             values = [
                 self._base_metric_distance(scene, obj, str(metric))
-                for metric in expression.get("metrics", [])
+                for metric in (expression.get("metrics") or [])
             ]
             return sum(values)
         if op == "mod":
             base = self._base_metric_distance(scene, obj, str(expression.get("metric")))
-            constant = float(expression.get("constant"))
+            constant = float(expression.get("constant") or 0)
             if constant == 0:
                 raise ValueError("mod constant must be non-zero")
             return base % constant
@@ -1444,15 +1496,15 @@ class OperatorStationSession:
                 scene,
                 obj,
                 str(expression.get("metric")),
-            ) + float(expression.get("constant"))
+            ) + float(expression.get("constant") or 0)
         if op == "subtract":
             return self._base_metric_distance(
                 scene,
                 obj,
                 str(expression.get("metric")),
-            ) - float(expression.get("constant"))
+            ) - float(expression.get("constant") or 0)
         if op in {"abs_diff", "abs_diff_plus"}:
-            metrics = list(expression.get("metrics", []))
+            metrics = list(expression.get("metrics") or [])
             if len(metrics) < 2:
                 raise ValueError("abs_diff requires two metrics")
             value = abs(
@@ -1460,7 +1512,7 @@ class OperatorStationSession:
                 - self._base_metric_distance(scene, obj, str(metrics[1]))
             )
             if op == "abs_diff_plus":
-                value += float(expression.get("constant"))
+                value += float(expression.get("constant") or 0)
             return value
         raise ValueError(f"Unsupported metric expression op: {op}")
 
@@ -4766,6 +4818,18 @@ class OperatorStationSession:
             raise TypeError("run_task requires an ExecutionTicket")
         return self._run_task_with_ticket(ticket)
 
+    @staticmethod
+    def _step_budget_from_ticket(ticket: ExecutionTicket) -> int | None:
+        """Phase 13A: read the steering step budget off the ticket's plan, if any."""
+        plan = getattr(ticket, "request_plan", None)
+        steering = getattr(plan, "steering", None) or {}
+        budget = steering.get("budget") if isinstance(steering, dict) else None
+        if isinstance(budget, dict):
+            max_steps = budget.get("max_steps")
+            if isinstance(max_steps, int):
+                return max_steps
+        return None
+
     def _run_task_with_ticket(self, ticket: ExecutionTicket) -> dict[str, Any]:
         self.last_execution_ticket = ticket
         instruction = ticket.instruction
@@ -4793,6 +4857,10 @@ class OperatorStationSession:
             progress_callback=self._progress_callback,
             task_override=task_override,
             procedure_override=procedure_override,
+            step_budget=self._step_budget_from_ticket(ticket),
+        )
+        self._turn_budget_exhausted = bool(
+            self.last_result.get("final_state", {}).get("budget_exhausted")
         )
         if self.last_result["final_state"]["task_complete"]:
             self.store_successful_task_memory(self.last_result)

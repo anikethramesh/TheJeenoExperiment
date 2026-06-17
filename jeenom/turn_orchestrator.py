@@ -240,7 +240,11 @@ class TurnOrchestrator:
         # Runs unconditionally on ALL LLM outputs before any routing.
         # Blueprint Rule 9: deterministic gate between compiler output and
         # CapabilityMatcher — regardless of what the LLM declared.
-        intent, verif_result = station.intent_verifier.enrich(utterance, intent)
+        parsed_steering = getattr(station, "_parsed_steering_directive", None)
+        station._parsed_steering_directive = None
+        intent, verif_result = station.intent_verifier.enrich(
+            utterance, intent, steering_directive=parsed_steering
+        )
         promoted_intent = station._promote_verified_query_intent(
             utterance,
             intent,
@@ -253,6 +257,10 @@ class TurnOrchestrator:
             )
             intent = promoted_intent
         station.last_operator_intent = intent
+        if intent.steering_directive is not None:
+            # Verified + attached: persist for this turn so the instruction-based plan
+            # rebuild (and the execution ticket) carry the same directive.
+            station.active_steering_directive = intent.steering_directive
         if verif_result.injected_handles:
             station.log(f"intent verifier injected: {verif_result.summary()}")
         if verif_result.inversion_detected:
@@ -486,6 +494,21 @@ class TurnOrchestrator:
     def _handle_action(
         self, station: Any, intent: Any, utterance: str, cap_match: Any
     ) -> ApprovedCommand:
+        if intent.intent_type == "steering_directive":
+            # Safety net for an LLM-emitted standalone steering intent (the deterministic
+            # path handles it earlier). Acknowledge without planning a task.
+            directive = intent.steering_directive
+            active = ", ".join(
+                f"{k}={v}"
+                for k, v in (directive.as_dict() if directive else {}).items()
+                if v is not None
+            )
+            return _approved(
+                "steering_directive",
+                utterance,
+                payload={"message": f"STEERING NOTED: {active}."},
+            )
+
         if intent.intent_type == "motor_command":
             action = (intent.action_name or "").strip()
             count = max(1, intent.repeat_count or 1)
@@ -609,6 +632,22 @@ class TurnOrchestrator:
                 instruction = intent.canonical_instruction or f"go to the {color} {object_type}"
             else:
                 return ApprovedCommand(command_type="unsupported", utterance=utterance)
+            # Phase 13A: honor a steering risk withdrawal — the readiness graph (recorded
+            # during dispatch from the steering-bearing intent) is non-executable, so do
+            # not attempt to issue an ExecutionTicket. Surface the block instead.
+            if station.active_steering_directive is not None:
+                graph = station.last_readiness_graph
+                if graph is not None and graph.next_action == "ask_authorization":
+                    return _approved(
+                        "unsupported",
+                        utterance,
+                        payload={
+                            "message": (
+                                f"STEERING BLOCKED: {graph.explanation} "
+                                "No execution ticket was issued."
+                            )
+                        },
+                    )
             return ApprovedCommand(command_type="task_instruction", utterance=instruction)
 
         return ApprovedCommand(command_type="unsupported", utterance=utterance)
@@ -656,9 +695,44 @@ class TurnOrchestrator:
 
     def handle_utterance_text(self, station: Any, utterance: str) -> str:
         from .schemas import OperatorIntent as _OI
+        from .steering_parser import parse_steering_clauses
 
         station.last_repair_events = []
         station.last_operational_mismatches = []
+
+        # Phase 13A: split the steering HOW off the WHAT before any compilation, so the
+        # core parser sees clean text and a misparse cannot ride inline shadow regex into
+        # the plan. The directive is stashed for IntentVerifier (the gate) to validate and
+        # attach; the residual drives the normal pipeline.
+        steering_directive, residual = parse_steering_clauses(utterance)
+        station._parsed_steering_directive = steering_directive
+        if steering_directive is not None:
+            if not residual:
+                # Standalone steering turn (no WHAT) has nothing to reshape yet —
+                # steering a *pending* plan is a later phase. Acknowledge the parsed,
+                # typed directive (recorded as last_operator_intent so the turn still
+                # traces) without routing into the task planner.
+                station._parsed_steering_directive = None
+                station.last_operator_intent = _OI(
+                    intent_type="steering_directive",
+                    steering_directive=steering_directive,
+                    confidence=1.0,
+                    reason="standalone steering directive",
+                )
+                active = ", ".join(
+                    f"{k}={v}"
+                    for k, v in steering_directive.as_dict().items()
+                    if v is not None
+                )
+                return (
+                    f"STEERING NOTED: {active}. "
+                    "Issue a task to steer (mid-plan steering arrives in a later phase)."
+                )
+            # Embedded steering: route the residual WHAT through the compiler + dispatch
+            # path so IntentVerifier (the gate) validates and attaches the directive —
+            # never via the deterministic fast path, which skips verification.
+            command = station.command_from_llm_intent(residual)
+            return self.execute_command(station, command)
 
         # IntentCache fast path: regex patterns that produce OperatorIntent and route
         # through dispatch (IntentVerifier + knowledge-type routing) just like LLM intents.
@@ -869,6 +943,8 @@ class TurnOrchestrator:
                 record_plan=True,
             )
             return station.result_summary(result)
+        if command.kind == "steering_directive":
+            return command.payload.get("message", "STEERING NOTED.")
         if command.kind == "unsupported":
             return command.payload.get(
                 "message",

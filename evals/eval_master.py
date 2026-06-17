@@ -3,7 +3,7 @@ import sys
 import subprocess
 from pathlib import Path
 
-from manifest import EVAL_SPECS, select_eval_specs
+from manifest import EVAL_SPECS, EXPECTED_FAIL_SUITE, select_eval_specs
 
 
 def main():
@@ -51,11 +51,17 @@ def main():
             print(f"  - {path.name} [{suites}]")
         sys.exit(0)
     
+    # Expected-fail suite: a probe's FAILURE is the clean state; a PASS means the feature
+    # landed and the probe should graduate into EVAL_SPECS.
+    expected_fail = args.suite == EXPECTED_FAIL_SUITE
     print(f"Found {len(eval_files)} eval scripts to run for suite={args.suite}.")
-    
+    if expected_fail:
+        print("(expected-fail suite: a failing probe is the EXPECTED state; a pass graduates.)")
+
     failures = []
+    graduates = []
     fallback_enabled = []
-    
+
     for eval_file in eval_files:
         print(f"\n{'='*60}")
         cmd = [sys.executable, str(eval_file)]
@@ -69,27 +75,43 @@ def main():
         mode = "offline fallback allowed" if "--allow-fallback" in cmd else "strict/offline"
         print(f"Running {eval_file.name} ({mode})...")
         print(f"{'='*60}")
-            
+
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
+        passed = result.returncode == 0
+
+        if expected_fail:
+            if passed:
+                print(f"🎓 GRADUATE → {eval_file.name} now PASSES; move its spec into EVAL_SPECS.")
+                graduates.append(eval_file.name)
+            else:
+                print(f"🔴 expected-fail ✓: {eval_file.name} (red as designed)")
+        elif not passed:
             print(f"❌ FAILED: {eval_file.name}")
             print(result.stdout)
             print(result.stderr)
             failures.append((eval_file.name, result.returncode))
         else:
             print(f"✅ PASSED: {eval_file.name}")
-            # Optionally print stdout if you want to see details, but keeping it quiet for passes
-            # is usually better for a master script. We'll just show pass.
-            
+
     print(f"\n{'='*60}")
     print("EVALUATION SUMMARY")
     print(f"{'='*60}")
     print(f"Total run: {len(eval_files)}")
+    print(f"Fallback-enabled probes: {len(fallback_enabled)}")
+
+    if expected_fail:
+        print(f"Expected-fail (red as designed): {len(eval_files) - len(graduates)}")
+        print(f"Graduated (now passing): {len(graduates)}")
+        if graduates:
+            print("\nProbes ready to graduate into EVAL_SPECS:")
+            for name in graduates:
+                print(f"  - {name}")
+            sys.exit(1)
+        print("\nAll expected-fail probes are red as designed. ✅")
+        sys.exit(0)
+
     print(f"Passed: {len(eval_files) - len(failures)}")
     print(f"Failed: {len(failures)}")
-    print(f"Fallback-enabled probes: {len(fallback_enabled)}")
-    
     if failures:
         print("\nFailed scripts:")
         for name, code in failures:

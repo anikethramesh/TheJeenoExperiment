@@ -60,6 +60,7 @@ OPERATOR_INTENT_TYPES = (
     "conditional_sense_motor",
     "mission_contract",
     "metric_query",
+    "steering_directive",
     "reset",
     "quit",
     "accept_proposal",
@@ -242,6 +243,27 @@ PRIMITIVE_IMPLEMENTATION_STATUSES = (
 PRIMITIVE_SAFETY_CLASSES = ("query", "memory", "actuation", "hazardous")
 PRIMITIVE_AUTHORITY_LEVELS = ("none", "operator", "restricted", "admin")
 SELECTION_DIRECTIONS = ("minimum", "maximum")
+
+# Phase 13A steering vocabulary. A SteeringDirective is the typed, separable layer
+# the operator uses to shape HOW a task is approached (distinct from the WHAT). Like
+# SelectionObjective, the meaning lives in these enums — validation is pure enum logic,
+# never vocabulary scanning. Adding a risk tier means changing only these tuples + the
+# steering parser's clause patterns, not the readiness/planner logic.
+STEERING_SCOPES = ("visible_only", "search_allowed", "full")
+STEERING_RISK_LEVELS = ("query_only", "reversible_only", "operator_authorized")
+STEERING_STOPPING_RULES = (
+    "first_match",
+    "exhaustive",
+    "on_budget_exhausted",
+    "on_ambiguity",
+)
+# safety_class sets each risk tier authorizes. A step whose primitive falls outside the
+# authorized set is an authorization withdrawal (readiness -> needs_authorization).
+STEERING_RISK_ALLOWED_SAFETY: dict[str, frozenset[str]] = {
+    "query_only": frozenset({"query"}),
+    "reversible_only": frozenset({"query", "memory"}),
+    "operator_authorized": frozenset({"query", "memory", "actuation", "hazardous"}),
+}
 
 
 def orpi_primitive_type_for(primitive_type: str) -> str:
@@ -1014,6 +1036,8 @@ class RequestPlan:
     preservation_signals: list[str] = field(default_factory=list)
     expected_response: str = "refuse"
     environment_assumptions: list[EnvironmentAssumption] = field(default_factory=list)
+    # Phase 13A: the active SteeringDirective (as_dict) that shaped this plan, if any.
+    steering: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> RequestPlan:
@@ -1057,6 +1081,7 @@ class RequestPlan:
                 EnvironmentAssumption.from_dict(item)
                 for item in raw_assumptions
             ],
+            steering=mapping.get("steering"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -1072,6 +1097,7 @@ class RequestPlan:
                 assumption.as_dict()
                 for assumption in self.environment_assumptions
             ],
+            "steering": dict(self.steering) if self.steering else None,
         }
 
 
@@ -1326,6 +1352,81 @@ class SelectionObjective:
 
 
 @dataclass
+class SteeringDirective:
+    """Typed, separable steering layer (Phase 13A): how the operator constrains the
+    approach to a task — budget, scope, risk, stopping rule — distinct from the WHAT.
+
+    Mirrors SelectionObjective: typed fields, enum-validated, no vocabulary scanning.
+    On the fully-observable substrate, `risk` (gates actuation via readiness) and
+    `budget`/`stopping_rule` (cap execution in the Spine loop) have teeth; `scope` is
+    carried + validated but its enforcement is degenerate until partial observability
+    (Phase 13B).
+    """
+
+    budget: dict[str, Any] | None = None  # {"max_steps": int, "max_clarifications": int}
+    scope: str | None = None
+    risk: str | None = None
+    stopping_rule: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "SteeringDirective | None":
+        if data is None:
+            return None
+        d = _ensure_mapping(data, "SteeringDirective")
+        budget = cls._ensure_budget(d.get("budget"), "SteeringDirective.budget")
+        directive = cls(
+            budget=budget,
+            scope=_ensure_optional_str_enum(
+                d.get("scope"), STEERING_SCOPES, "SteeringDirective.scope"
+            ),
+            risk=_ensure_optional_str_enum(
+                d.get("risk"), STEERING_RISK_LEVELS, "SteeringDirective.risk"
+            ),
+            stopping_rule=_ensure_optional_str_enum(
+                d.get("stopping_rule"),
+                STEERING_STOPPING_RULES,
+                "SteeringDirective.stopping_rule",
+            ),
+        )
+        if directive.is_empty():
+            raise SchemaValidationError(
+                "SteeringDirective must set at least one of budget/scope/risk/stopping_rule"
+            )
+        return directive
+
+    @staticmethod
+    def _ensure_budget(value: Any, label: str) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        mapping = _ensure_mapping(value, label)
+        budget: dict[str, Any] = {}
+        for key in ("max_steps", "max_clarifications"):
+            raw = mapping.get(key)
+            if raw is None:
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                raise SchemaValidationError(f"{label}.{key} must be a non-negative integer")
+            budget[key] = raw
+        return budget or None
+
+    def is_empty(self) -> bool:
+        return (
+            not self.budget
+            and self.scope is None
+            and self.risk is None
+            and self.stopping_rule is None
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "budget": dict(self.budget) if self.budget else None,
+            "scope": self.scope,
+            "risk": self.risk,
+            "stopping_rule": self.stopping_rule,
+        }
+
+
+@dataclass
 class PrimitiveDefinitionRequest:
     """Typed operator request to define a query-only primitive."""
 
@@ -1452,6 +1553,8 @@ class OperatorIntent:
     mission_steps: list[str] | None = None  # raw utterance for each task in the mission
     # structured distillation of the selection objective; drives objective-based validation
     selection_objective: SelectionObjective | None = None
+    # Phase 13A: typed steering layer attached to an action intent (or standalone turn)
+    steering_directive: SteeringDirective | None = None
 
     _KNOWLEDGE_TYPE_MAP: ClassVar[dict[str, str]] = {
         "status_query": "claim",
@@ -1470,6 +1573,7 @@ class OperatorIntent:
         "conditional_sense_motor": "action",
         "mission_contract": "action",
         "metric_query": "claim",
+        "steering_directive": "action",
         "reset": "control",
         "quit": "control",
         "accept_proposal": "control",
@@ -1601,6 +1705,9 @@ class OperatorIntent:
         selection_objective = SelectionObjective.from_dict(
             mapping.get("selection_objective")
         )
+        steering_directive = SteeringDirective.from_dict(
+            mapping.get("steering_directive")
+        )
 
         intent = cls(
             intent_type=intent_type,
@@ -1631,6 +1738,7 @@ class OperatorIntent:
             repeat_count=repeat_count,
             mission_steps=mission_steps,
             selection_objective=selection_objective,
+            steering_directive=steering_directive,
         )
         intent._validate_supported_shape()
         return intent
@@ -1708,6 +1816,11 @@ class OperatorIntent:
             if not self.mission_steps or len(self.mission_steps) < 2:
                 raise SchemaValidationError(
                     "mission_contract requires mission_steps with at least 2 task utterances"
+                )
+        elif self.intent_type == "steering_directive":
+            if self.steering_directive is None:
+                raise SchemaValidationError(
+                    "steering_directive requires a steering_directive payload"
                 )
 
 
@@ -2758,7 +2871,7 @@ class FailureOutcome:
     downstream learning systems to distinguish stuck/progress/blocking/timeout.
     """
 
-    category: str  # "stuck" | "progress" | "blocking_claim" | "timeout"
+    category: str  # "stuck" | "progress" | "blocking_claim" | "timeout" | "budget_exhausted"
     detail: str | None = None
     blocking_claim_handle: str | None = None
 
@@ -2795,6 +2908,23 @@ class CommandResult(str):
         return obj
 
 
+def _decode_memory_value(value: Any) -> Any:
+    """Decode a memory-update value off the wire.
+
+    The strict LLM schema transports `value` as a JSON-encoded string (strict mode
+    cannot carry free-form objects). Parse it back to native here. A bare scalar
+    string that is not valid JSON (e.g. 'red') is kept verbatim. Non-string values
+    — the deterministic path constructs MemoryUpdate directly with native values —
+    pass through untouched.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return value
+
+
 @dataclass
 class MemoryUpdate:
     scope: str
@@ -2808,7 +2938,7 @@ class MemoryUpdate:
         return cls(
             scope=_ensure_str(mapping.get("scope"), "MemoryUpdate.scope"),
             key=_ensure_str(mapping.get("key"), "MemoryUpdate.key"),
-            value=mapping.get("value"),
+            value=_decode_memory_value(mapping.get("value")),
             reason=_ensure_str(mapping.get("reason", ""), "MemoryUpdate.reason"),
         )
 
@@ -2962,7 +3092,14 @@ def memory_updates_json_schema() -> dict[str, Any]:
                         },
                         "key": {"type": "string"},
                         "value": {
-                            "type": ["string", "number", "boolean", "object", "array", "null"],
+                            "type": "string",
+                            "description": (
+                                "The value to store, JSON-encoded as a string. Scalars may be "
+                                "given verbatim (e.g. 'red', '5'); objects and arrays MUST be "
+                                "valid JSON text (e.g. '[3, 4]', '{\"x\": 1}'). Strict mode "
+                                "cannot carry free-form objects, so everything is transported "
+                                "as a string and decoded on receipt."
+                            ),
                         },
                         "reason": {"type": "string"},
                     },
@@ -3114,7 +3251,28 @@ def operator_intent_json_schema() -> dict[str, Any]:
                         "type": "string",
                         "pattern": "^[a-z][a-z0-9_]*$",
                     },
-                    "expression": {"type": "object"},
+                    "expression": {
+                        "type": "object",
+                        "properties": {
+                            "op": {
+                                "type": "string",
+                                "enum": [
+                                    "alias", "min", "max", "sum",
+                                    "mod", "add", "subtract",
+                                    "abs_diff", "abs_diff_plus",
+                                ],
+                            },
+                            "metric": {"type": ["string", "null"]},
+                            "metrics": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
+                            },
+                            "constant": {"type": ["number", "null"]},
+                            "reason": {"type": ["string", "null"]},
+                        },
+                        "required": ["op", "metric", "metrics", "constant", "reason"],
+                        "additionalProperties": False,
+                    },
                     "dependencies": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -3126,7 +3284,22 @@ def operator_intent_json_schema() -> dict[str, Any]:
                     "proposed_handle": {"type": "string"},
                     "safety_class": {"type": "string", "enum": ["query"]},
                     "authority_level": {"type": "string", "enum": ["operator"]},
-                    "provenance": {"type": "object"},
+                    "provenance": {
+                        "type": "object",
+                        "properties": {
+                            "operator_utterance": {"type": ["string", "null"]},
+                            "formula": {"type": ["string", "null"]},
+                            "approval_utterance": {"type": ["string", "null"]},
+                            "registered_handle": {"type": ["string", "null"]},
+                        },
+                        "required": [
+                            "operator_utterance",
+                            "formula",
+                            "approval_utterance",
+                            "registered_handle",
+                        ],
+                        "additionalProperties": False,
+                    },
                 },
                 "required": [
                     "definition_type",
@@ -3256,6 +3429,34 @@ def operator_intent_json_schema() -> dict[str, Any]:
                     "Requires at least 2 steps. Null for all other intents."
                 ),
             },
+            "steering_directive": {
+                "type": ["object", "null"],
+                "properties": {
+                    "budget": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "max_steps": {"type": ["integer", "null"], "minimum": 0},
+                            "max_clarifications": {"type": ["integer", "null"], "minimum": 0},
+                        },
+                        "required": ["max_steps", "max_clarifications"],
+                        "additionalProperties": False,
+                    },
+                    "scope": {"type": ["string", "null"], "enum": [*STEERING_SCOPES, None]},
+                    "risk": {"type": ["string", "null"], "enum": [*STEERING_RISK_LEVELS, None]},
+                    "stopping_rule": {
+                        "type": ["string", "null"],
+                        "enum": [*STEERING_STOPPING_RULES, None],
+                    },
+                },
+                "required": ["budget", "scope", "risk", "stopping_rule"],
+                "additionalProperties": False,
+                "description": (
+                    "Typed steering layer: HOW to approach the task, separate from WHAT. "
+                    "Set budget.max_steps to cap execution, risk to gate side effects "
+                    "(query_only forbids actuation), scope for search bounds, stopping_rule "
+                    "for when to stop. Null when the operator gives no steering."
+                ),
+            },
         },
         "required": [
             "intent_type",
@@ -3272,9 +3473,18 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "primitive_definition",
             "capability_status",
             "required_capabilities",
+            "selection_objective",
             "clear_memory",
             "confidence",
             "reason",
+            "concept_name",
+            "concept_utterance",
+            "concept_steps",
+            "utterance_steps",
+            "action_name",
+            "repeat_count",
+            "mission_steps",
+            "steering_directive",
         ],
         "additionalProperties": False,
     }

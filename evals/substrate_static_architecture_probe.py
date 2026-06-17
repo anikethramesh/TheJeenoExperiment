@@ -27,7 +27,8 @@ SUBSTRATE_FILES = [
     "jeenom/planning_semantics.py",
     "jeenom/primitive_library.py",
     "jeenom/primitive_synthesizer.py",
-    "jeenom/capability_registry.py",
+    # capability_registry.py is intentionally MiniGrid-coupled (owns minigrid_default() /
+    # minigrid_manifest_dict()); it is NOT a substrate-neutral file and must not be listed here.
 ]
 
 DOMAIN_MODULE_PREFIXES = ("minigrid",)  # external package or internal jeenom/minigrid_*.py

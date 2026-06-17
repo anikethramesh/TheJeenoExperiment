@@ -1,11 +1,15 @@
 """Explicit eval manifest for eval_master.py.
 
 Suites:
-  all          - every probe in this manifest
+  all          - every probe in EVAL_SPECS (the all-green gate)
   architecture - invariant and architecture probes
   cleanup      - Phase 9 cleanup red-bar probes
   orpi         - Phase 12 ORPI-v0 conformance probes
   smoke        - historical smoke/regression probes
+  expected_fail - eval-first red-bar probes whose FAILURE is the expected (clean) state;
+                  kept OUT of EVAL_SPECS so `all` stays green. eval_master inverts the
+                  verdict for this suite. A probe here that PASSES is the graduation signal:
+                  move its spec into EVAL_SPECS and it joins the main green count.
 """
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ EVAL_SPECS: list[dict[str, object]] = [
     # ── intent fidelity ───────────────────────────────────────────────────────
     {"file": "intent_fidelity_cache_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "intent_fidelity_concept_probe.py", "suites": ["architecture"]},
+    {"file": "intent_fidelity_llm_schema_strict_probe.py", "suites": ["architecture"]},
     {"file": "intent_fidelity_motor_command_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "intent_fidelity_motor_count_probe.py", "suites": ["architecture"]},
     {"file": "intent_fidelity_motor_implicit_probe.py", "suites": ["architecture"]},
@@ -50,6 +55,7 @@ EVAL_SPECS: list[dict[str, object]] = [
     # ── pipeline ──────────────────────────────────────────────────────────────
     {"file": "pipeline_dispatch_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "pipeline_orpi_labelled_episode_probe.py", "suites": ["architecture", "orpi"]},
+    {"file": "pipeline_steering_directive_probe.py", "suites": ["architecture", "orpi"]},
     {"file": "pipeline_procedure_selection_probe.py", "suites": ["architecture", "orpi"]},
     {"file": "pipeline_request_plan_probe.py", "suites": ["architecture"]},
     {"file": "pipeline_turn_orchestrator_probe.py", "suites": ["architecture", "cleanup"]},
@@ -92,7 +98,20 @@ EVAL_SPECS: list[dict[str, object]] = [
 ]
 
 
+# Eval-first red-bar probes that are EXPECTED to fail until their phase implements them.
+# Kept separate from EVAL_SPECS so the all-green gate never includes a known-red probe.
+# eval_master runs this suite with an inverted verdict (failure = clean). A pass here means
+# the feature landed — graduate the spec into EVAL_SPECS.
+EXPECTED_FAIL_SPECS: list[dict[str, object]] = [
+    {"file": "claim_custody_unverifiable_freshness_probe.py", "suites": ["expected_fail"]},
+]
+
+EXPECTED_FAIL_SUITE = "expected_fail"
+
+
 def select_eval_specs(suite: str) -> list[dict[str, object]]:
+    if suite == EXPECTED_FAIL_SUITE:
+        return list(EXPECTED_FAIL_SPECS)
     if suite == "all":
         return list(EVAL_SPECS)
     return [

@@ -97,13 +97,16 @@
         "object_type.door"
       ],
       "expected_response": "execute_task",
-      "environment_assumptions": []
+      "environment_assumptions": [],
+      "steering": null
     },
     "stored_at": 1779362566.0032835,
-    "recall_count": 9,
+    "recall_count": 11,
     "tags": [],
+    "claim_scope": "operator",
     "concept_type": "atomic",
-    "steps": []
+    "steps": [],
+    "scope": "site"
   },
   {
     "name": "scout",
@@ -146,13 +149,16 @@
         "object_type.door"
       ],
       "expected_response": "execute_task",
-      "environment_assumptions": []
+      "environment_assumptions": [],
+      "steering": null
     },
     "stored_at": 1779391645.4780068,
     "recall_count": 2,
     "tags": [],
+    "claim_scope": "operator",
     "concept_type": "atomic",
-    "steps": []
+    "steps": [],
+    "scope": "site"
   },
   {
     "name": "bongo",
@@ -212,12 +218,15 @@
         "object_type.door"
       ],
       "expected_response": "answer_query",
-      "environment_assumptions": []
+      "environment_assumptions": [],
+      "steering": null
     },
     "stored_at": 1781268274.3081079,
-    "recall_count": 4,
+    "recall_count": 6,
     "tags": [],
+    "claim_scope": "operator",
     "concept_type": "atomic",
-    "steps": []
+    "steps": [],
+    "scope": "site"
   }
 ]

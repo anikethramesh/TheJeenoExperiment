@@ -19,12 +19,16 @@ VEC_TO_DIR = {value: key for key, value in DIR_TO_VEC.items()}
 
 
 class MiniGridSpine:
-    def __init__(self, memory, adapter, compiler, plan_cache=None):
+    def __init__(self, memory, adapter, compiler, plan_cache=None, step_budget=None):
         self.memory = memory
         self.adapter = adapter
         self.compiler = compiler
         self.plan_cache = plan_cache
         self.active_skill = None
+        # Phase 13A: operator-steered cap on cumulative env actions for the task.
+        # Enforced in the stepping loop (execute_plan), not at the authorization gate.
+        self.step_budget = step_budget
+        self._steps_taken = 0
 
     def tick(
         self,
@@ -146,6 +150,9 @@ class MiniGridSpine:
     def execute_plan(self, execution_contract, plan, percepts):
         runtime = {"planned_action_names": [], "path": []}
 
+        if self._budget_exhausted():
+            return self._budget_exhausted_report(execution_contract)
+
         for step in plan:
             if step.name not in ACTION_PRIMITIVES:
                 return ExecutionReport(
@@ -216,6 +223,20 @@ class MiniGridSpine:
             rationale=f"Corrected invalid {skill} template to canonical registry definition.",
         )
 
+    def _budget_exhausted(self) -> bool:
+        return self.step_budget is not None and self._steps_taken >= self.step_budget
+
+    def _budget_exhausted_report(self, execution_contract) -> ExecutionReport:
+        return ExecutionReport(
+            status="failed",
+            reason="budget_exhausted",
+            progress={
+                "contract": execution_contract.skill,
+                "steps_taken": self._steps_taken,
+                "step_budget": self.step_budget,
+            },
+        )
+
     def _execute_env_action(self, action_name, execution_contract, runtime):
         action_spec = ACTION_PRIMITIVES.get(action_name)
         if action_spec is None or action_spec.runtime_kind != "env_action":
@@ -225,7 +246,12 @@ class MiniGridSpine:
                 progress={"contract": execution_contract.skill},
             )
 
+        # Steering budget: refuse to spend an env action once the cap is reached.
+        if self._budget_exhausted():
+            return self._budget_exhausted_report(execution_contract)
+
         observation, reward, terminated, truncated, info = self.adapter.act(int(action_spec.runtime_value))
+        self._steps_taken += 1
         done = terminated or truncated
 
         if execution_contract.skill == "done":

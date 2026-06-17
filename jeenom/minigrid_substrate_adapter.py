@@ -138,6 +138,7 @@ class MiniGridSubstrateAdapter:
         progress_callback: Any,
         task_override: Any = None,
         procedure_override: Any = None,
+        step_budget: int | None = None,
     ) -> dict[str, Any]:
         render_adapter = self.preview_adapter
         skip_reset = False
@@ -168,6 +169,7 @@ class MiniGridSubstrateAdapter:
             progress_callback=progress_callback,
             task_override=task_override,
             procedure_override=procedure_override,
+            step_budget=step_budget,
         )
         self.task_adapter = result.pop("_render_adapter", None)
         return result

@@ -118,6 +118,8 @@ _FAILURE_CATEGORY_TO_ORPI_ATTRIBUTION: dict[str, str] = {
     "progress": "unmet_postcondition",
     "blocking_claim": "stale_claim",
     "timeout": "substrate_fault",
+    # Phase 13A: a budget stop is a steering-imposed authorization limit, not a fault.
+    "budget_exhausted": "missing_authority",
 }
 
 
@@ -531,6 +533,9 @@ class LabelledEpisode:
                 "readiness_status": graph.get("graph_status") if graph is not None else None,
             },
             steering={
+                "steering_directive": (
+                    intent.get("steering_directive") if isinstance(intent, dict) else None
+                ),
                 "pending_context": pending_context,
                 "knowledge": list(pending_context.get("knowledge_writes", []) or []),
                 "kb_reuse_counters": dict(

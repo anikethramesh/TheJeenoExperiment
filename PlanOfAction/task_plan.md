@@ -25,13 +25,18 @@ Elon-algorithm rule for this repo:
 
 ## Current Known State
 
-- Current phase: **Phase 13 - Steered Curriculum under Partial Observability**.
-  Phase 12D is complete: ORPI v0.1 label unified, `LabelledEpisode` attribution +
-  verification wired (ORPI taxonomy, named checker path), leak audit produced with
-  curriculum-touching leaks removed (`llm_compiler.py` color_pattern derived from
-  manifest, `_startup_warmup_instruction` fallback derived from manifest vocabulary).
-  Phase 13 gate cleared — 70/70 evals green.
-  Phase order from here: **13 Steered Curriculum (proves steering on MiniGrid) -> 14
+- Current phase: **Phase 13 - Steerable Cognition Layer** (sub-phase **13B** next;
+  **13A complete**). 13A delivered the typed, constraint-first steering layer
+  (`SteeringDirective`: budget/scope/risk/stopping-rule) that demonstrably reshapes plan
+  assembly — risk withdraws actuation authority via `needs_authorization`, budget caps
+  the Spine stepping loop as `FailureOutcome(category="budget_exhausted")`, and the active
+  directive is recorded in `LabelledEpisode.steering`. Proven by the hostile
+  `pipeline_steering_directive_probe.py`; 71/71 evals green.
+  Phase 12D is complete (12D.1–12D.4): ORPI v0.1 label unified, `LabelledEpisode`
+  attribution + verification wired (ORPI taxonomy, named checker path), coupling
+  audit produced, curriculum-touching leaks removed, two cheap non-curriculum-touching
+  leaks removed early (see 12D.4).
+  Phase order from here: **13 Steerable Cognition (proves steering on MiniGrid) -> 14
   Cheap Leak Removal + AI2-THOR spike (proves substrate-independence) -> 15
   Cross-Substrate & v1 Freeze -> 16 Operational Hardening (absorbs the deferred
   station de-bloat) -> 17 Capability Stress**.
@@ -1531,109 +1536,249 @@ verdict - is gated by a decomposition design (target modules, shared-state map,
 ordered green-able extraction sequence) written and reviewed *first*. No station
 code moves before that design exists.
 
+### 12D.4 - Cheap non-curriculum-touching leaks (pulled forward)
+
+Two `cheap × not curriculum-touching` items from the Phase 14 table removed early
+since the boundary was already open and the edits were surgical:
+
+- `primitive_library.py` door grounding primitives (`visible_doors`, `closest_door.*`,
+  `unique_door.*`, `all_doors.ranked.*`) moved to `minigrid_primitive_library.py`.
+  `capability_registry.py` merges them in `minigrid_manifest_dict()`. `capability_registry.py`
+  removed from the static-architecture probe's substrate-neutral file list (it already owns
+  `minigrid_default()` and was never neutral).
+- `request_planner.py` `rank_scene_doors` step_id: was hardcoded; now
+  `f"rank_scene_{semantics.pluralize(object_type)}"` — derived from the manifest's object
+  vocabulary. For MiniGrid `object_type="door"` this yields `"rank_scene_doors"` unchanged.
+
 ### Acceptance criteria
 
 - Version label is `v0.1` across all docs; the diagram emission node is correct.
 - `LabelledEpisode` uses the ORPI attribution taxonomy and invokes named
   `postcondition_primitive` checkers; the deferred rich-Δg case is documented.
-- The leak audit exists as a doc artifact with the
-  `{cheap|structural} x {curriculum-touching|not}` table populated, and a
-  separately-parked bloat worklist.
-- The audit's verdict on curriculum-touching leaks is explicit enough to order
-  Phase 13 vs the leak-removal work without further guessing.
+- Coupling table populated (see Phase 14); curriculum-touching items removed;
+  bloat worklist parked in Phase 16.
 - Full eval suite green; golden path preserved.
 
-## Phase 13 - Steered Curriculum under Partial Observability
+## Phase 13 - Steerable Cognition Layer
 
-Status: next (after any curriculum-touching leaks flagged by the 12D audit are
-removed). This phase proves **steering** on MiniGrid only - substrate-independence
-is a separate proof, validated later on the AI2-THOR spike. The two are
-deliberately not conflated: a clean steering signal on a known substrate, then a
-clean substrate-independence signal on a new one.
+This phase proves **steering** on MiniGrid only - substrate-independence is a separate
+proof, validated later on the AI2-THOR spike. The two are deliberately not conflated.
+The make-or-break: the operator tells JEENOM *how* to approach a task and JEENOM
+assembles a typed plan accordingly. It is split so value lands early (13A) before the
+heavier substrate work (13B) and the longitudinal proof (13C).
 
-Goal: prove JEENOM can collaborate about uncertainty without building a giant
-ontology, and that it improves with operator steering across a curriculum it has
-not memorized. This phase absorbs the former "Minimal Representation and Evidence
-Planning" loop and runs it under genuine partial observability.
+Steering is **constraint-first**: a typed, separable `SteeringDirective`
+(budget/scope/risk/stopping-rule), following the `SelectionObjective` pattern (typed
+fields, enum validation, vocabulary only in prompts/parsers). Decomposition/method
+guidance layers on top afterward.
 
-Minimum loop (carried over):
+Minimum loop (carried across the sub-phases):
 
 1. Operator gives WHY.
 2. JEENOM turns it into WHAT.
 3. JEENOM checks claims it already has.
-4. If evidence is missing, JEENOM says what is unknown and how it could find out.
-5. Operator steers budget/scope/risk.
+4. If evidence is missing, JEENOM says what is unknown and how it could find out. (13B)
+5. Operator steers budget/scope/risk. (13A)
 6. JEENOM executes sensing/action through substrate HOW.
 7. JEENOM updates claims and tries the plan again.
 
-Minimal additions:
+### 13A - Steering core (constraint steering reshapes plan assembly)
 
-- Extend existing claims rather than adding many new classes.
-- Add `RequestPlan` evidence steps and a `ReadinessGraph` status/action for
-  `needs_evidence`.
-- Add simple typed steering constraints: budget, scope, risk, stopping rule.
-- Keep operator claims separate from observation/world claims.
-- Let procedures reuse solved decompositions only when the evidence supports it.
+Status: **complete**. Same WHAT + different typed steering => different typed
+`RequestPlan`/`ReadinessGraph`; a conflicting directive clarifies/refuses instead of
+executing. Proven by the hostile `pipeline_steering_directive_probe.py` (eval-first;
+71/71 green).
 
-New for the steered curriculum:
+Delivered:
 
-- Derived-claim layer: deterministic `meta` primitives (per ORPI v0.1) infer claims
-  from observed claims (e.g. reachability, "behind", "searched region") instead
-  of asking the substrate for omniscient answers.
-- Ask-for-help: when evidence is missing or ambiguous, JEENOM emits a typed
-  request for steering; the operator response is recorded in the
-  `LabelledEpisode` `steering` field.
-- MiniGrid map ladder: progressively harder partial-observability maps, where the
-  agent cannot see the whole grid and must search/ask rather than answer
-  omnisciently.
-- KB reuse: solved decompositions and operator claims carry forward across the
-  ladder when evidence still supports them.
-- MTBCI metric: mean turns between clarification/intervention - the headline
-  measure that JEENOM is getting steered less as it learns the curriculum.
+- `SteeringDirective` schema (`budget`/`scope`/`risk`/`stopping_rule`), enum-validated,
+  with `STEERING_SCOPES` / `STEERING_RISK_LEVELS` / `STEERING_STOPPING_RULES` and the
+  `STEERING_RISK_ALLOWED_SAFETY` map; `OperatorIntent.steering_directive` +
+  `RequestPlan.steering`. New `intent_type="steering_directive"`.
+- `steering_parser.py` is the single home for steering regex (no inline shadow NLU): it
+  splits the HOW off the WHAT at turn entry; the residual drives the normal compiler and
+  `IntentVerifier.enrich` (the gate) validates coherence and attaches the directive only
+  to action intents — a misparse cannot silently shape a plan. Standalone steering turns
+  are acknowledged (mid-plan steering of a *pending* plan is deferred to 13B).
+- `build_request_plan` folds the directive into actuating steps' constraints
+  (`steering_risk`/`steering_budget`/`steering_stopping_rule`) and records plan-level
+  `steering`.
+- Readiness enforcement: a `risk` that does not authorize a step's `safety_class` is an
+  authorization withdrawal — reuses the existing `needs_authorization` status (no new
+  status), so `query_only` on a go-to task refuses with no ExecutionTicket.
+- Budget enforcement lives in the stepping loop (`MiniGridSpine.execute_plan`), not the
+  authorization gate: cumulative env actions are capped; exceeding `max_steps` halts and
+  surfaces `FailureOutcome(category="budget_exhausted")`, mapped to `missing_authority`
+  in the ORPI attribution taxonomy (not the default `substrate_fault`).
+- `LabelledEpisode.steering` now carries the active typed directive (previously passive).
 
-Pressure tests (MiniGrid only - steering, not substrate-independence):
+Deferred within 13A: decomposition/method guidance reuses the existing
+`concept_teach` / `sequence_instruction` / `mission_contract` rails; the richer
+"compose primitives from a described method" version depends on the 13B `meta` layer.
 
-- MiniGrid visible-only query:
-  - "closest/farthest door" must answer with scope or ask to search.
-  - no omniscient full-grid answer unless the substrate explicitly provides that
-    as an authorized HOW.
-- Partial-observability ladder: each rung hides more of the grid, forcing
-  search/ask over omniscient answers.
+### 13B - Partial observability + ask-for-help + meta primitives
 
-Acceptance criteria:
+Status: next. Makes steering *necessary* (omniscient answers become impossible, so
+JEENOM must search/ask). Gives `scope` steering its teeth (`visible_only` vs
+`search_allowed`). Workstreams:
 
-- JEENOM can say: known, visible, inferred, stale, unknown, searchable, or
-  not-knowable.
-- Evidence gathering is represented as a plan, not a phrase branch.
-- Operator steering changes typed plan constraints.
-- MTBCI improves across repeated runs of the same ladder rung as KB reuse kicks
-  in.
-- Steering is proven on MiniGrid. Cross-substrate sameness is explicitly out of
-  scope here - it is the AI2-THOR spike's job (post-Phase-14), so a steering
-  failure can never be confused with a substrate leak.
+- MiniGrid FOV: stop parsing the whole grid in `sense.py`; introduce a
+  visible-vs-unseen distinction (the harness currently wraps in `FullyObsWrapper`).
+- `needs_evidence` readiness status + typed ask-for-help (a `ClarificationRequest`
+  schema parallel to `PrimitiveDefinitionRequest`); operator reply recorded in
+  `LabelledEpisode.steering`.
+- Minimal deterministic `meta` primitives (`mode="deterministic"` per ORPI v0.1):
+  `searched_region`, `reachability`, `behind` — infer claims from observed claims
+  (produces the `inferred` **status**).
+- Claim freshness under partial observability — the reviewed spike below.
+
+#### 13B spike — claim freshness under partial observability
+
+Spike-first: design reviewed and red-barred before any code. **No `FullyObsWrapper`
+or enum/predicate/helper/tick change until the red-bar probe is green-as-failing.**
+
+The problem: today claim validity is a single equality `StationActiveClaims.is_valid_for`
+over `(agent_x, agent_y, step_count)`, so **any agent move blanket-invalidates every
+grounding claim as `stale`** — conflating *the world changing* with *the agent merely
+looking away*.
+
+**Axes (locked):** keep the two relevant axes (`freshness`, `status`). `status` untouched
+(`inferred`/`hypothesis` already belong there). The only change is **one new freshness
+value**: `current | unverifiable | stale | unknown`. Rationale: *verifiable* =
+`freshness==current` (not stored); *not-knowable* = a property of the claim **kind** (not
+stored); only **unverifiable** — "fresh as far as I know, but I can't currently re-confirm
+it" — is unexpressible today. Do **not** add visible/verifiable/not-knowable as states.
+
+**1. Triggers — two causes, never conflated:**
+
+| Transition | Driver | Mechanism |
+|---|---|---|
+| `current → stale` | time/world-driven | world changed underneath the claim: env-identity fingerprint change, or a real scene mutation. **Not** mere agent movement. |
+| `current → unverifiable` | grounding-driven, action-triggered, instantaneous | agent pose change removes the claim's supporting cell from view. **Not a timer** — a TTL can't detect loss of line-of-sight. |
+| `current → current` | agent moved, cell still in view | **new**: today any move blanket-stales; the spike stops that. |
+| `unverifiable → unknown` | time/step-driven decay | the *only* timer (§3). Out-of-view claim degrades the longer it's unseen. |
+| `unverifiable → current` | snap-back, **free** | cell re-enters view **and** world fingerprint matches → restored from intact provenance, no re-grounding. Vouching for your own recent, unbroken observation. |
+| `unknown → current` | **fresh observation only** (NOT snap-back) | claim is dead. Past decay the world could have changed during the unseen window and you hold **no fingerprint proving it didn't** — re-sighting is a new grounding that **overwrites** the dead claim. Old provenance is lineage/audit only, never a restoration source. |
+
+**2. Mechanism — decompose the existing hook (no new subsystem).** Hook today:
+`_claims_valid_for_current_environment` → `is_valid_for` → one equality → blanket
+invalidation. Split the verdict into **three separate checks, never merged**:
+(a) env-identity fingerprint mismatch → `stale`; (b) world-mutation check → `stale` —
+*kept a distinct predicate even though static GoToDoor collapses it into (a) today, so 13C
+retrofits nothing when doors open*; (c) agent pose/own-step change, same world → **per
+grounding claim**, evaluate `framing_satisfiable(claim, pose) -> bool`: satisfiable ⇒
+stays `current`, else ⇒ `unverifiable`. Per-kind (§5), never a blanket "looked away →
+unverifiable" rule. Provenance retained so re-sighting is snap-back, not re-derivation.
+
+**3. TTL — decay-edge only.** The eternal/timed/conditional TTL helper **does not exist
+yet** (only inert `ClaimRecord.valid_until`); the spike specifies it as a small value type
+`{ eternal | timed(n_steps) | conditional(predicate) }` built on `valid_until`, read by
+**exactly one** call site: the `unverifiable → unknown` decay tick. Observation-gone-
+unverifiable ⇒ `timed(UNVERIFIABLE_DECAY_STEPS)`; `operator_assertion`/`fact`/`procedure`
+⇒ `eternal`. Transitions into/out of `unverifiable` are action-triggered; only the
+terminal decay is time-driven.
+
+**4. Do-not-collapse: `unverifiable` ≠ `hypothesis`.** `unverifiable` was observed →
+snaps back free, confidence decays toward `unknown`; `hypothesis` was never grounded,
+confidence climbs toward `confirmed`. Terminal of too-long-unseen is `unknown` (no false
+current value), not `hypothesis`. Provenance kept intact through `unverifiable` (free
+snap-back); at `unknown` the claim is dead (re-grounding overwrites, no restoration).
+`unverifiable` is **freshness**; `hypothesis`/`inferred` are **status** — orthogonal.
+
+**5. Per-claim-kind framing table** (framing = finite checklist of assumptions + checker):
+
+| kind | scope | framing assumptions | checked by | `unverifiable`? |
+|---|---|---|---|---|
+| `observation` | grounding | (a) supporting cell in view from pose; (b) world unchanged; (c) env identity unchanged | (a) **in-view predicate on pose hook → `unverifiable`**; (b)/(c) world & env fingerprint → `stale` | **YES (only kind)** |
+| `operator_assertion` | operator | (a) not retracted | retraction event only | **NO** — no line-of-sight; never unverifiable on look-away |
+| `fact` | episodic | (a) same env identity | env-identity fingerprint | **NO** |
+| `procedure` | procedure | (a) KB still defines the concept; (b) composed handles still registered | KB membership + capability registry | **NO** |
+
+Critical guard: only `observation` has an in-view predicate — the table prevents the
+look-away bug for the other three. Carry: `procedure`'s registered-handles framing is
+**embodiment-scope** — cross-reference `NamedConcept.scope` (site/embodiment/universal,
+`claim_custody_knowledge_scope_probe.py`) so the two "valid in this embodiment" notions
+don't drift.
+
+**6. Decay parameter.** Unit = **agent action steps** (discrete, deterministic, replayable
+— not wall-clock). Per `unverifiable` claim: a `steps_unseen` counter, ++ each agent step
+while the cell stays out of view, reset on snap-back. Threshold
+`UNVERIFIABLE_DECAY_STEPS`, default `16` — an underived tuning target, possibly
+manifest-driven later; the number is **not** a contract (probes assert behavior
+parameterized on the imported constant, never the literal). At threshold:
+`freshness → unknown`.
+
+**Scope fences (locked):** only `inferred` (status; meta-primitive workstream) and
+`unverifiable` (freshness; this spike) are forced by partial observability.
+`belief`/`hypothesis`/self-generated `unknown` stay enum-ready-but-inert. No `status`-axis
+changes here.
+
+**Probe triage — by reading, not by ripping out `FullyObsWrapper`.** 0 probes assume an
+omniscient grid (verified across all `claim_custody_*`). Re-read these 3 when `unverifiable`
+lands, to confirm none asserts `stale` on *mere agent-pose* change (each currently asserts
+stale on env/seed change, which correctly stays `stale`):
+`claim_custody_env_assumption_probe.py`, `claim_custody_plan_reuse_probe.py`,
+`claim_custody_stale_claim_probe.py`.
+
+**Red-bar:** `claim_custody_unverifiable_freshness_probe.py` (synthetic; expected-fail
+suite, graduates into the main suite when 13B turns it green).
+
+### 13C - Curriculum + KB reuse + MTBCI
+
+Status: later. The longitudinal learning proof.
+
+- Curriculum runner over the env-size ladder (`minigrid_envs.py`: 8/10/12/16/32) with
+  progressively harder partial-observability rungs.
+- KB reuse across rungs via `PlanReuseCache` + scoped `KnowledgeBase` (already mature).
+- MTBCI metric (mean turns between clarification/intervention), accumulated per episode,
+  with a `regression_` probe showing MTBCI improves as reuse kicks in.
+
+Acceptance criteria (whole phase):
+
+- Operator steering changes typed plan constraints. (13A ✅)
+- A grounding claim distinguishes `current` / `unverifiable` / `stale` / `unknown`, with
+  look-away → `unverifiable` (not `stale`) and out-of-view decay → `unknown`; non-spatial
+  kinds never go `unverifiable`. (13B) Note: the epistemic surface is the freshness axis
+  plus the `inferred` status — *not* a new visible/searchable/not-knowable state set.
+- Evidence gathering is represented as a plan, not a phrase branch. (13B)
+- MTBCI improves across repeated runs of the same ladder rung as KB reuse kicks in. (13C)
+- Steering is proven on MiniGrid. Cross-substrate sameness is explicitly out of scope
+  here - it is the AI2-THOR spike's job (post-Phase-14), so a steering failure can never
+  be confused with a substrate leak.
 
 ## Phase 14 - Cheap Leak Removal
 
-Status: later (after Phase 13). Scope is **gated by the 12D leak audit** - this
-phase removes the leaks the audit tagged `cheap` and `not curriculum-touching`
-(curriculum-touching leaks were already removed before Phase 13). Any leak the
-audit tagged `structural` is handled per its go/no-go flag, not silently absorbed
-here.and we fix that going 
+Status: later (after Phase 13). Removes leaks tagged `cheap` and `not
+curriculum-touching`; curriculum-touching leaks were removed before Phase 13.
+Any `structural` leak is handled per its go/no-go flag, not silently absorbed here.
 
-Goal: make the substrate boundary clean *before* the AI2-THOR spike, so the spike
-produces a clean substrate-independence signal - a spike failure means the
-architecture leaked, not that we walked in with known dirt.
+Goal: make the substrate boundary clean *before* the AI2-THOR spike, so a spike
+failure means architecture leaked — not that we walked in with known dirt.
 
-Planned work (final list comes from the audit table):
+### Coupling audit table
 
-- Remove cataloged `cheap` coupling sites (e.g. `request_planner.py`
-  `rank_scene_doors`, stray `"door"` literals in generic paths).
-- Surgically remove the ~67 station-internal coupling lines that are live paths
-  (a scalpel pass, not the 5,613-line extraction - that stays deferred to
-  Phase 16).
-- Decide `llm_compiler.py`'s hardcoded grammar: if the audit flagged it
-  `structural`, pull the `OperationalContext`-derived rewrite forward into this
-  phase, because it is the leak most likely to block the spike.
+Per site: `{cheap | structural}` × `{curriculum-touching | not}`.
+
+| Site | ~Lines | Classification | Status |
+|---|---|---|---|
+| `llm_compiler.py` — fast-path grammar | 13 | structural × curriculum-touching | ✅ 12D.3 |
+| `operator_station.py` — `_startup_warmup_instruction` | 22 | cheap × curriculum-touching | ✅ 12D.3 |
+| `primitive_library.py` — door grounding primitives | 60 | cheap × not curriculum-touching | ✅ 12D.4 |
+| `request_planner.py` — `rank_scene_doors` step_id | 8 | cheap × not curriculum-touching | ✅ 12D.4 |
+| `llm_compiler.py` — LLM prompt strings | ~100 | cheap × not curriculum-touching | remaining |
+| `operator_station.py` — MiniGrid imports + default env | ~8 | cheap × not curriculum-touching | remaining |
+| `operator_station.py` — request parsing (color/door) | ~30 | cheap × not curriculum-touching | remaining |
+| `sense.py` — `MiniGridSense` | ~100 | structural × not curriculum-touching | Phase 15 |
+| `spine.py` — `MiniGridSpine` | ~80 | structural × not curriculum-touching | Phase 15 |
+
+Planned work:
+
+- `llm_compiler.py` prompt strings: swap door/color vocabulary examples for
+  manifest-derived examples at session init.
+- `operator_station.py` MiniGrid imports + default env: inject runtime_package;
+  remove `minigrid_runtime_package` import from generic station module.
+- `operator_station.py` request parsing with color/door: derive from manifest
+  `symbol_mappings.object_index` / `color_index`.
 - Widen `substrate_static_architecture_probe.py` to guard the now-cleaner core.
 
 Acceptance criteria:
@@ -1700,13 +1845,28 @@ exist. **This phase absorbs the deferred `operator_station.py` de-bloat in full*
 Planned work:
 
 - `operator_station.py` extraction into a substrate-independent orchestration
-  kernel plus adapters - decomposition design written and reviewed first.
-- repair metrics
-- synthesis provenance
-- intervention counts
-- transfer evals
+  kernel plus adapters — decomposition design written and reviewed first.
+- repair metrics, synthesis provenance, intervention counts, transfer evals
 - missing primitive / ambiguity / no-path handling
 - render-time guarantees preserved across substrates
+
+### Bloat worklist (station extraction sketch — for design phase only)
+
+`operator_station.py` is ~5,613 lines / 178 methods; only ~67 are substrate-coupled
+(handled in Phase 14). The rest is substrate-independent orchestration.
+
+| Candidate module | ~Methods | Notes |
+|---|---|---|
+| Intent dispatch + knowledge routing | ~20 | `TurnOrchestrator` already exists; station could delegate fully |
+| Plan cache + reuse | ~15 | `PlanReuseCache` already separate; station holds glue only |
+| Clarification / synthesis / definition state | ~30 | Pending-state machine; self-contained |
+| Mission flow + continuation | ~25 | `MissionCortex` already separate |
+| Auth + ticket management | ~12 | `CommandAuthority` already separate |
+| Core `handle_utterance` orchestration | ~15 | Thin coordinator after extraction |
+
+**Hard prerequisite:** any extraction — in Phase 16 or pulled forward — requires a
+decomposition design (target modules, shared-state map, ordered green-able extraction
+sequence) written and reviewed first. No station code moves before that design exists.
 
 ## Phase 17 - Capability Stress Tests
 

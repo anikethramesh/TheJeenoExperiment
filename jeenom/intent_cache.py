@@ -28,14 +28,14 @@ _PRIM_DEF_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         _VERB_PREFIX
         + r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
-        r"(?:(?:called|named)\s+)?(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*=\s*"
+        r"(?:(?:called|named)\s+)?(?P<name>[A-Za-z][A-Za-z0-9_ ]*?)\s*=\s*"
         r"(?P<formula>.+)$",
         re.IGNORECASE,
     ),
     re.compile(
         _VERB_PREFIX
         + r"(?:a\s+|an\s+)?(?:new\s+)?(?:distance\s+)?metric\s+"
-        r"(?:called|named)\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\s+"
+        r"(?:called|named)\s+(?P<name>[A-Za-z][A-Za-z0-9_ ]*?)\s+"
         r"(?:as|to be|which is|that is|that|using|where|based on)\s+(?P<formula>.+)$",
         re.IGNORECASE,
     ),
@@ -43,7 +43,7 @@ _PRIM_DEF_PATTERNS: tuple[re.Pattern[str], ...] = (
         _VERB_PREFIX
         + r"(?:a\s+|an\s+)?(?:new\s+)?distance\s+metric\s+"
         r"(?:which is|that is|as)\s+(?P<formula>.+?)\s+"
-        r"(?:and\s+)?call\s+it\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)$",
+        r"(?:and\s+)?call\s+it\s+(?P<name>[A-Za-z][A-Za-z0-9_ ]*)$",
         re.IGNORECASE,
     ),
 )
