@@ -59,6 +59,7 @@ from .turn_orchestrator import (
 from .schemas import (
     ApprovedCommand,
     ArbitrationTrace,
+    ClarificationRequest,
     CommandResult,
     CorticalEnvelope,
     EnvironmentIdentity,
@@ -419,6 +420,7 @@ class OperatorStationSession:
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
         self.synthesizer: SynthesizerBackend = build_synthesizer(compiler_name)
         self.validator: PrimitiveValidator = default_validator
+        self.last_clarification_request: ClarificationRequest | None = None
 
     @property
     def active_claims(self) -> StationActiveClaims | None:
@@ -605,6 +607,11 @@ class OperatorStationSession:
                     if self.pending_primitive_definition is not None
                     else None
                 ),
+                "clarification_request": (
+                    self.last_clarification_request.as_dict()
+                    if self.last_clarification_request is not None
+                    else None
+                ),
                 "knowledge_writes": self.knowledge_channel.consume_write_events(),
                 "kb_reuse_counters": self.knowledge_channel.consume_reuse_counters(),
             },
@@ -634,6 +641,7 @@ class OperatorStationSession:
         self.last_cortical_envelope = None
         self.last_approved_command = None
         self.last_command_result = None
+        self.last_clarification_request = None
         # Phase 13A: steering attached this turn (set in dispatch after verification);
         # budget exhaustion is scoped to this turn so a stale last_result never leaks
         # a FailureOutcome into a later non-task turn.
@@ -727,12 +735,18 @@ class OperatorStationSession:
         claims_valid = self._claims_valid_for_current_environment()
 
         # Build plan and initial readiness through cortex_session (no LLM calls).
+        evidence_state = (
+            self._current_evidence_state()
+            if intent.grounding_query_plan is not None or intent.target_selector is not None
+            else None
+        )
         fresh_plan, readiness_graph = self.cortex_session.plan(
             utterance,
             intent,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
+            evidence_state=evidence_state,
         )
 
         cacheable_plan = self._request_plan_is_reusable(fresh_plan)
@@ -766,6 +780,7 @@ class OperatorStationSession:
                     active_claims=self.active_claims,
                     claims_valid=claims_valid,
                     environment_identity=self.current_environment_identity,
+                    evidence_state=evidence_state,
                 )
                 self.last_request_plan = fresh_plan
                 self.last_readiness_graph = readiness_graph
@@ -819,6 +834,7 @@ class OperatorStationSession:
                     active_claims=self.active_claims,
                     claims_valid=claims_valid,
                     environment_identity=self.current_environment_identity,
+                    evidence_state=evidence_state,
                 )
                 self.last_readiness_graph = readiness_graph
                 self._record_request_state(
@@ -1700,11 +1716,87 @@ class OperatorStationSession:
         if isinstance(handle, str) and handle.startswith("claims."):
             return self._dispatch_claims_filter(utterance, intent, cap_match)
 
+        evidence_command = self._maybe_start_needs_evidence_clarification(
+            utterance,
+            intent,
+        )
+        if evidence_command is not None:
+            return evidence_command
+
         return self._compose_grounding_query_plan(
             utterance,
             intent,
             plan,
             cap_match,
+        )
+
+    def _maybe_start_needs_evidence_clarification(
+        self,
+        utterance: str,
+        intent: OperatorIntent,
+    ) -> ApprovedCommand | None:
+        graph = self.last_readiness_graph
+        request_plan = self.last_request_plan
+        if graph is None or request_plan is None:
+            return None
+        if graph.graph_status != "needs_evidence":
+            return None
+        blocking = next(
+            (node for node in graph.nodes if node.step_id == graph.blocking_step_id),
+            None,
+        )
+        step = next(
+            (item for item in request_plan.steps if item.step_id == graph.blocking_step_id),
+            None,
+        )
+        target = dict(getattr(step, "inputs", {}) or {})
+        request = ClarificationRequest(
+            request_type="needs_evidence",
+            prompt=(
+                "I need more visible evidence before I can answer or execute that request."
+            ),
+            reason=blocking.reason if blocking is not None else graph.explanation,
+            resume_kind=(
+                "status_query"
+                if intent.intent_type in {"status_query", "claim_reference", "cache_query"}
+                else intent.intent_type
+            ),
+            evidence_scope="visible_only",
+            target=target,
+            options=["search_allowed", "visible_only"],
+            provenance={
+                "request_id": request_plan.request_id,
+                "blocking_step_id": graph.blocking_step_id,
+                "original_utterance": utterance,
+            },
+        )
+        self.last_clarification_request = request
+        self.pending_clarification = PendingClarification(
+            clarification_type="needs_evidence",
+            original_utterance=utterance,
+            resume_kind=request.resume_kind,
+            partial_selector=target,
+            missing_field="evidence_scope",
+            supported_values=list(request.options),
+            clarification_request=request,
+            **self._pending_clarification_trace(
+                utterance,
+                "needs_evidence",
+            ),
+        )
+        message = (
+            "NEEDS EVIDENCE\n"
+            f"{request.prompt}\n"
+            f"reason={request.reason}\n"
+            "Options: search_allowed, visible_only"
+        )
+        return _approved(
+            "clarification",
+            utterance,
+            payload={
+                "message": message,
+                "clarification_request": request.as_dict(),
+            },
         )
 
     def _grounding_query_plan_needs_distance_metric(self, plan: dict[str, Any]) -> bool:
@@ -4530,6 +4622,26 @@ class OperatorStationSession:
             self.current_environment_identity = self._build_environment_identity(scene)
         return scene
 
+    def _current_evidence_state(self) -> dict[str, Any] | None:
+        scene = self._ensure_scene_model()
+        if scene is None:
+            return None
+        return {
+            "observation_model": scene.observation_model,
+            "visible_objects": [
+                {
+                    "object_type": obj.object_type,
+                    "type": obj.object_type,
+                    "color": obj.color,
+                    "x": obj.x,
+                    "y": obj.y,
+                }
+                for obj in scene.objects
+            ],
+            "visible_cell_count": len(scene.visible_cells),
+            "unseen_cell_count": len(scene.unseen_cells),
+        }
+
     def _task_family_for_env(self) -> str | None:
         if "GoToDoor" in self.env_id:
             return "go_to_object"
@@ -5407,8 +5519,20 @@ class OperatorStationSession:
         self.log(f"motor_execute: {action_name} × {count}")
         result = self.substrate.run_motor_actions(seed=self.seed, actions=actions)
         self.last_result = result
+        if result.get("success", False):
+            self._refresh_scene_model_after_motion()
         label = action_name.replace("_", " ")
         return f"MOTOR COMPLETE ({label} × {count}): {result.get('steps_taken', count)} steps executed."
+
+    def _refresh_scene_model_after_motion(self) -> None:
+        try:
+            self.substrate.sense_idle_scene(self.sense, seed=self.seed)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"post-motion sense refresh failed: {type(exc).__name__}: {exc}")
+            return
+        scene = self.memory.scene_model
+        if scene is not None:
+            self.current_environment_identity = self._build_environment_identity(scene)
 
     def _run_motor_sequence_command(
         self, sequence: list[dict[str, Any]], original_utterance: str

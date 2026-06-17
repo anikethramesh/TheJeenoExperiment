@@ -408,12 +408,19 @@ def build_request_plan(
                     constraints={
                         "metric": metric,
                         "reference": plan.get("reference") or "agent",
+                        "evidence_scope": "visible_only",
+                        "requires_visible_objects": [_obj_type],
                     },
                     environment_assumption_ids=environment_assumption_ids,
                 )
             )
     elif intent.target_selector is not None:
         handle = semantics.target_handle(intent)
+        selector_object_type = (
+            intent.target_selector.get("object_type")
+            if isinstance(intent.target_selector, dict)
+            else None
+        )
         steps.append(
             RequestPlanStep(
                 step_id="ground_target",
@@ -422,7 +429,13 @@ def build_request_plan(
                 required_handle=handle,
                 inputs={"target_selector": intent.target_selector},
                 outputs=["grounded_target"],
-                constraints=dict(intent.target_selector),
+                constraints={
+                    **dict(intent.target_selector),
+                    "evidence_scope": "visible_only",
+                    "requires_visible_objects": [
+                        selector_object_type or semantics.default_object_type
+                    ],
+                },
                 environment_assumption_ids=environment_assumption_ids,
             )
         )

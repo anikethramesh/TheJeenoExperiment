@@ -8,6 +8,7 @@ from .capability_matcher import default_matcher
 from .knowledge_base import KnowledgeBase, NamedConcept, derive_scope
 from .schemas import (
     ApprovedCommand,
+    ClarificationRequest,
     CorticalEnvelope,
     MissionExecutionPlan,
     PrimitiveDefinitionRequest,
@@ -44,6 +45,28 @@ def _normalize_utterance(utterance: str) -> str:
         text = stripped
 
 
+_NEW_INTENT_COMMAND_KINDS = {
+    "ambiguous",
+    "claim_reference",
+    "concept_forget",
+    "concept_teach",
+    "ground_target_query",
+    "knowledge_update",
+    "metric_query",
+    "mission_execute",
+    "motor_execute",
+    "motor_sequence_execute",
+    "primitive_definition",
+    "procedure_execute",
+    "sequence_execute",
+    "status_query",
+    "steering_directive",
+    "task_instruction",
+    "task_selector",
+    "unsupported",
+}
+
+
 @dataclass
 class PendingClarification:
     clarification_type: str
@@ -56,6 +79,7 @@ class PendingClarification:
     request_plan: RequestPlan | None = None
     readiness_graph: ReadinessGraph | None = None
     pending_envelope: CorticalEnvelope | None = None
+    clarification_request: ClarificationRequest | None = None
 
 
 @dataclass
@@ -410,6 +434,16 @@ class TurnOrchestrator:
             usteps = list(intent.utterance_steps or [])
             if not usteps:
                 return _approved("clarification", utterance, "Please specify the task steps to execute in sequence.")
+            from .llm_compiler import _parse_motor_command as _pmc
+            motor_steps = [_pmc(step) for step in usteps]
+            if all(step is not None for step in motor_steps):
+                sequence = [
+                    {"action": str(action), "count": int(count)}
+                    for action, count in motor_steps
+                    if action is not None
+                ]
+                station.log(f"sequence_instruction resolved as motor_sequence: {len(sequence)} actions")
+                return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
             station.log(f"sequence_instruction: steps={usteps}")
             return _approved("sequence_execute", utterance, payload={"steps": usteps})
 
@@ -595,6 +629,12 @@ class TurnOrchestrator:
                 )
                 if readiness_command is not None:
                     return readiness_command
+                evidence_command = station._maybe_start_needs_evidence_clarification(
+                    utterance,
+                    intent,
+                )
+                if evidence_command is not None:
+                    return evidence_command
                 grounded = station.ground_target_selector(intent.target_selector)
                 if not grounded["ok"]:
                     if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
@@ -732,6 +772,14 @@ class TurnOrchestrator:
             # path so IntentVerifier (the gate) validates and attaches the directive —
             # never via the deterministic fast path, which skips verification.
             command = station.command_from_llm_intent(residual)
+            if station.pending_clarification is not None:
+                pending_response = self.handle_pending_clarification(
+                    station,
+                    utterance,
+                    command,
+                )
+                if pending_response is not None:
+                    return pending_response
             return self.execute_command(station, command)
 
         # IntentCache fast path: regex patterns that produce OperatorIntent and route
@@ -745,6 +793,14 @@ class TurnOrchestrator:
                 else:
                     # ApprovedCommand from cache (error cases, e.g. unsafe formula)
                     command = cached
+                if station.pending_clarification is not None:
+                    pending_response = self.handle_pending_clarification(
+                        station,
+                        utterance,
+                        command,
+                    )
+                    if pending_response is not None:
+                        return pending_response
                 return self.execute_command(station, command)
 
         command = self.classify_utterance(utterance)
@@ -837,14 +893,7 @@ class TurnOrchestrator:
         if command.kind == "unresolved":
             station.log("deterministic fast path unresolved; compiling operator intent")
             command = station.command_from_llm_intent(utterance)
-        if command.kind in {
-            "task_instruction",
-            "task_selector",
-            "knowledge_update",
-            "ground_target_query",
-            "unsupported",
-            "ambiguous",
-        }:
+        if command.kind in _NEW_INTENT_COMMAND_KINDS:
             station.pending_clarification = None
             station.log("new operator intent cancelled pending clarification")
             return self.execute_command(station, command)

@@ -1802,14 +1802,48 @@ Acceptance criteria (whole spike):
 - The shared-state map (13A.2.4 Deliverable A) is committed as a doc, reusable verbatim as the
   Phase 16 de-bloat gate artifact.
 
+#### 13A.3 - Substrate-handle routing (routable-now) — investigated; folded into Phase 14
+
+Investigated per the "routable-now only" scope. Result: **effectively empty**. The cheap
+handle leftovers were already done (12D, 13A.2.2). The one remaining candidate —
+`mission_cortex`'s `task.go_to_object.door` — is built inside the module-level
+`parse_inline_metric_request` → `_continuation_intent` chain, which receives `registry` but
+not `PlanningSemantics`; that chain is reached from the module-level `classify_utterance`
+fast-path (also registry-only). Routing it would mean threading `PlanningSemantics` through
+the classify/inline-parse path for **grammar-only** value (the `"door"` vocabulary stays an
+explicit arg until Phase 14 derives `object_type` from context). That is the exact
+`classify_utterance`/compiler substrate-boundary Phase 14 owns and AI2-THOR validates. Forcing
+it now is churn Phase 14 would partly redo. **Decision: fold this single literal into the
+Phase 14 pass.** Useful confirmation: the remaining handle/vocabulary coupling genuinely
+clusters in the Phase 14 substrate boundary, not in cleanly-separable spots — the plan's
+sequencing holds.
+
+#### 13A.4 - Operator-station decomposition design (the Phase 16 gate artifact)
+
+Status: **accepted and banked** (Phase 16 gate artifact). The decomposition design lives in
+`PlanOfAction/operator_station_decomposition.md`: target modules, the shared-state map
+(extending 13A.2.4's `TurnState`), the `TurnOrchestrator` reach-in problem, and an ordered
+green-able extraction sequence. The decision is **state-first, not method-first**:
+`StationRuntime` is the seed of the eventual substrate-independent kernel, carrying
+construction-time collaborators plus typed `TurnState` and future `PendingState` boundaries.
+
+Important sequencing decision: **do not start operator-station de-bloat now**, including safe
+leaf extractions (`EnvironmentTracker`, `ConceptService`, `PendingFlowController`, service
+migration, or `TurnOrchestrator` rewiring), unless explicitly instructed later. 13B will
+redefine the partial-observability, evidence, ask-for-help, and claim-freshness structures that
+the later station boundary carving must respect. Claim-type unification also stays **after 13B**
+(13B's per-claim-kind freshness needs the distinctions).
+
+Next implementation focus: **13B**.
+
 ### 13B - Partial observability + ask-for-help + meta primitives
 
-Status: next. Makes steering *necessary* (omniscient answers become impossible, so
+Status: in progress. Makes steering *necessary* (omniscient answers become impossible, so
 JEENOM must search/ask). Gives `scope` steering its teeth (`visible_only` vs
 `search_allowed`). Workstreams:
 
 - MiniGrid FOV: stop parsing the whole grid in `sense.py`; introduce a
-  visible-vs-unseen distinction (the harness currently wraps in `FullyObsWrapper`).
+  visible-vs-unseen distinction.
 - `needs_evidence` readiness status + typed ask-for-help (a `ClarificationRequest`
   schema parallel to `PrimitiveDefinitionRequest`); operator reply recorded in
   `LabelledEpisode.steering`.
@@ -1817,6 +1851,76 @@ JEENOM must search/ask). Gives `scope` steering its teeth (`visible_only` vs
   `searched_region`, `reachability`, `behind` — infer claims from observed claims
   (produces the `inferred` **status**).
 - Claim freshness under partial observability — the reviewed spike below.
+
+#### 13B.1 — claim freshness kernel under partial observability
+
+Status: complete. The synthetic red-bar probe graduated into the main architecture suite.
+Delivered the first 13B freshness kernel without changing MiniGrid FOV or `FullyObsWrapper`:
+
+- `CLAIM_FRESHNESS`: `current | unverifiable | stale | unknown`; `unverifiable` remains
+  freshness-only and is not a claim status.
+- New `jeenom/claim_freshness.py`: `UNVERIFIABLE_DECAY_STEPS`, `ClaimTTL`,
+  `framing_satisfiable`, and `next_freshness`.
+- The state machine now distinguishes look-away (`current -> unverifiable`) from
+  env/world change (`current -> stale`), supports free snap-back while provenance is intact,
+  requires fresh observation to recover from `unknown`, and keeps non-line-of-sight claim kinds
+  from becoming `unverifiable`.
+- `claim_custody_unverifiable_freshness_probe.py` moved from `expected_fail` to the main
+  `architecture` suite.
+
+#### 13B.2 — MiniGrid FOV boundary under partial observability
+
+Status: complete. The red-bar probe graduated into the main architecture suite. MiniGrid now
+supports explicit full-observation vs partial-observation eval lanes. Production runtime and
+13B probes use native egocentric observations; legacy regression probes can still opt into
+full observation without weakening the partial-observability invariants.
+
+- `run_demo.build_env` constructs unwrapped MiniGrid envs.
+- `evals.harness.build_env` is the legacy full-observation helper, while
+  `evals.harness.build_partial_env` is the partial-observation helper.
+- `build_minigrid_runtime_package(..., observability="full" | "partial")` makes the same
+  split available to station/session evals; eval harness sessions default to `full`, and
+  13B probes explicitly request `partial`.
+- `MiniGridAdapter` annotates each observation with substrate-owned pose, grid-size,
+  observation-model, and visible-cell metadata, so Sense does not reverse-engineer the
+  MiniGrid FOV transform.
+- `MiniGridSense` projects visible local-view cells into global coordinates, records
+  `visible_cells`/`unseen_cells`, preserves global agent pose, and builds occupancy from
+  observed cells only.
+- `SceneModel` and `WorldModelSample` now carry the observation model and visibility boundary.
+- `substrate_minigrid_fov_probe.py` asserts runtime and harness are partial-observation based,
+  scene dimensions remain global, scene objects are limited to visible global cells, and unseen
+  cells are explicit.
+
+#### 13B.3 — `needs_evidence` readiness + typed ask-for-help
+
+Status: complete. The red-bar probe graduated into the main architecture suite.
+
+- `ReadinessGraph` now accepts `needs_evidence`; `_next_action` maps it to
+  `ask_clarification`.
+- `ClarificationRequest` is a typed schema parallel to `PrimitiveDefinitionRequest`, with
+  `request_type=needs_evidence`, `evidence_scope`, target, options, and provenance.
+- `RequestPlanStep.constraints` can now declare visible-only evidence requirements for
+  grounding/ranking and selector steps.
+- `CortexSession`/`evaluate_request_plan` accept a compact `evidence_state` so readiness can
+  block supported-but-unanswerable visible-only steps before execution.
+- `OperatorStationSession` records a typed `ClarificationRequest`, preserves it on pending
+  clarification state, and exposes it in `LabelledEpisode.steering.pending_context`.
+- `substrate_partial_observability_needs_evidence_probe.py` verifies the schema, readiness
+  transition, station response, pending state, and ORPI steering context.
+- Follow-up guard: a pending `needs_evidence` clarification no longer traps unrelated new
+  operator intents; explicit new commands cancel the pending clarification and route normally.
+- Post-motion sensing: raw motor commands advance a persistent adapter and immediately refresh
+  the partial `SceneModel`, so visible evidence follows the agent's current POV instead of the
+  stale pre-motion idle scene.
+- LLM-route guard: motor-only sequences are advertised to the live compiler as
+  `motor_sequence`, and the new `llm_path` eval suite verifies route provenance
+  (`LLMCompiler` transport called), prompt contract, post-LLM semantic normalization, and
+  deterministic parity for covered utterances before declaring the behavior green.
+
+Known follow-on: partial-observation task/ranking paths now correctly surface `NEEDS EVIDENCE`
+from empty views. The next 13B slices should decide which partial paths move to
+`search_allowed`/deterministic meta-primitives.
 
 #### 13B spike — claim freshness under partial observability
 
@@ -1906,8 +2010,8 @@ stale on env/seed change, which correctly stays `stale`):
 `claim_custody_env_assumption_probe.py`, `claim_custody_plan_reuse_probe.py`,
 `claim_custody_stale_claim_probe.py`.
 
-**Red-bar:** `claim_custody_unverifiable_freshness_probe.py` (synthetic; expected-fail
-suite, graduates into the main suite when 13B turns it green).
+**Red-bar:** `claim_custody_unverifiable_freshness_probe.py` (synthetic; started in the
+expected-fail suite and graduated into the main `architecture` suite in 13B.1).
 
 ### 13C - Curriculum + KB reuse + MTBCI
 

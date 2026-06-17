@@ -98,7 +98,7 @@ CLAIM_STATUSES = (
     "invalidated",
     "unknown",
 )
-CLAIM_FRESHNESS = ("current", "stale", "unknown")
+CLAIM_FRESHNESS = ("current", "unverifiable", "stale", "unknown")
 CLAIM_AUTHORITIES = ("operator", "runtime", "system", "compiler", "sense", "spine")
 GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
@@ -201,6 +201,7 @@ REQUEST_TIE_POLICIES = ("clarify", "display_ties", "fail")
 READINESS_NODE_STATUSES = (
     "executable",
     "needs_clarification",
+    "needs_evidence",
     "needs_authorization",
     "validation_required",
     "claim_contract_failed",
@@ -222,6 +223,15 @@ READINESS_NEXT_ACTIONS = (
     "refresh_claims",
     "update_memory",
     "refuse",
+)
+CLARIFICATION_REQUEST_TYPES = (
+    "missing_field",
+    "candidate_choice",
+    "needs_evidence",
+)
+CLARIFICATION_EVIDENCE_SCOPES = (
+    "visible_only",
+    "search_allowed",
 )
 ARBITRATION_DECISION_TYPES = (
     "substitute",
@@ -1523,6 +1533,72 @@ class PrimitiveDefinitionRequest:
 
 
 @dataclass
+class ClarificationRequest:
+    """Typed operator request for missing information or missing evidence."""
+
+    request_type: str
+    prompt: str
+    reason: str
+    resume_kind: str
+    evidence_scope: str | None = None
+    target: dict[str, Any] = field(default_factory=dict)
+    options: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ClarificationRequest":
+        mapping = _ensure_mapping(data, "ClarificationRequest")
+        request_type = _ensure_str(
+            mapping.get("request_type"),
+            "ClarificationRequest.request_type",
+        )
+        if request_type not in CLARIFICATION_REQUEST_TYPES:
+            raise SchemaValidationError(
+                "ClarificationRequest.request_type must be one of: "
+                + ", ".join(CLARIFICATION_REQUEST_TYPES)
+            )
+        evidence_scope = _ensure_optional_str_enum(
+            mapping.get("evidence_scope"),
+            CLARIFICATION_EVIDENCE_SCOPES,
+            "ClarificationRequest.evidence_scope",
+        )
+        return cls(
+            request_type=request_type,
+            prompt=_ensure_str(mapping.get("prompt"), "ClarificationRequest.prompt"),
+            reason=_ensure_str(mapping.get("reason"), "ClarificationRequest.reason"),
+            resume_kind=_ensure_str(
+                mapping.get("resume_kind"),
+                "ClarificationRequest.resume_kind",
+            ),
+            evidence_scope=evidence_scope,
+            target=_ensure_dict(
+                mapping.get("target", {}),
+                "ClarificationRequest.target",
+            ),
+            options=_ensure_str_list(
+                mapping.get("options", []),
+                "ClarificationRequest.options",
+            ),
+            provenance=_ensure_dict(
+                mapping.get("provenance", {}),
+                "ClarificationRequest.provenance",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "request_type": self.request_type,
+            "prompt": self.prompt,
+            "reason": self.reason,
+            "resume_kind": self.resume_kind,
+            "evidence_scope": self.evidence_scope,
+            "target": dict(self.target),
+            "options": list(self.options),
+            "provenance": dict(self.provenance),
+        }
+
+
+@dataclass
 class OperatorIntent:
     intent_type: str
     canonical_instruction: str | None = None
@@ -1911,6 +1987,10 @@ class WorldModelSample:
     grid_objects: list[dict[str, Any]] = field(default_factory=list)
     occupancy_grid: list[list[bool]] = field(default_factory=list)
     passable_positions: set[tuple[int, int]] = field(default_factory=set)
+    observation_model: str = "unknown"
+    visible_cells: set[tuple[int, int]] = field(default_factory=set)
+    unseen_cells: set[tuple[int, int]] = field(default_factory=set)
+    view_to_global: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
     agent_pose: dict[str, Any] | None = None
     target_visible: bool = False
     target_location: tuple[int, int] | None = None
@@ -1923,6 +2003,9 @@ class WorldModelSample:
             "direction": self.direction,
             "step_count": self.step_count,
             "grid_size": self.grid_size,
+            "observation_model": self.observation_model,
+            "visible_cells": sorted(self.visible_cells),
+            "unseen_cell_count": len(self.unseen_cells),
             "agent_pose": self.agent_pose,
             "target_visible": self.target_visible,
             "target_location": self.target_location,
@@ -1961,6 +2044,9 @@ class SceneModel:
     seed: int | None = None
     step_count: int = 0
     agent_z: float | None = None  # absent on 2D substrates; set on 3D ones
+    observation_model: str = "unknown"
+    visible_cells: list[tuple[int, int]] = field(default_factory=list)
+    unseen_cells: list[tuple[int, int]] = field(default_factory=list)
 
     @property
     def agent_coord(self) -> tuple[float, ...]:
@@ -2023,6 +2109,9 @@ class SceneModel:
             env_id=env_id,
             seed=seed,
             step_count=sample.step_count,
+            observation_model=sample.observation_model,
+            visible_cells=sorted(sample.visible_cells),
+            unseen_cells=sorted(sample.unseen_cells),
         )
 
 
@@ -2489,6 +2578,12 @@ class ClaimRecord:
             raise SchemaValidationError(
                 f"ClaimRecord.freshness must be one of: {', '.join(CLAIM_FRESHNESS)}"
             )
+        if self.valid_until is not None:
+            if isinstance(self.valid_until, bool) or not isinstance(
+                self.valid_until, (int, float)
+            ):
+                raise SchemaValidationError("ClaimRecord.valid_until must be numeric or null")
+            self.valid_until = float(self.valid_until)
         if not isinstance(self.confidence, (int, float)) or isinstance(self.confidence, bool):
             raise SchemaValidationError("ClaimRecord.confidence must be numeric")
         if not 0.0 <= float(self.confidence) <= 1.0:
@@ -2498,6 +2593,15 @@ class ClaimRecord:
     @classmethod
     def from_dict(cls, data: Any) -> "ClaimRecord":
         mapping = _ensure_mapping(data, "ClaimRecord")
+        valid_until_raw = mapping.get("valid_until")
+        if valid_until_raw is not None:
+            if isinstance(valid_until_raw, bool) or not isinstance(
+                valid_until_raw, (int, float)
+            ):
+                raise SchemaValidationError("ClaimRecord.valid_until must be numeric or null")
+            valid_until = float(valid_until_raw)
+        else:
+            valid_until = None
         return cls(
             claim_id=_ensure_str(mapping.get("claim_id"), "ClaimRecord.claim_id"),
             key=_ensure_str(mapping.get("key"), "ClaimRecord.key"),
@@ -2508,6 +2612,7 @@ class ClaimRecord:
             authority=_ensure_str(mapping.get("authority"), "ClaimRecord.authority"),
             source=_ensure_str(mapping.get("source"), "ClaimRecord.source"),
             confidence=float(mapping.get("confidence", 1.0)),
+            valid_until=valid_until,
             provenance=_ensure_dict(mapping.get("provenance", {}), "ClaimRecord.provenance"),
             freshness=_ensure_str(mapping.get("freshness", "current"), "ClaimRecord.freshness"),
             invalidation=_ensure_dict(mapping.get("invalidation", {}), "ClaimRecord.invalidation"),
@@ -2524,6 +2629,7 @@ class ClaimRecord:
             "authority": self.authority,
             "source": self.source,
             "confidence": self.confidence,
+            "valid_until": self.valid_until,
             "provenance": dict(self.provenance),
             "freshness": self.freshness,
             "invalidation": dict(self.invalidation),

@@ -24,11 +24,15 @@ class MiniGridSubstrateAdapter:
         *,
         env_id: str,
         render_mode: str,
+        observability: str = "partial",
         operational_context: MiniGridOperationalContext | None = None,
     ) -> None:
         ensure_custom_minigrid_envs_registered()
+        if observability not in {"partial", "full"}:
+            raise ValueError("observability must be 'partial' or 'full'")
         self.env_id = env_id
         self.render_mode = render_mode
+        self.observability = observability
         self.operational_context = operational_context or MiniGridOperationalContext.default(
             env_id=env_id
         )
@@ -39,6 +43,12 @@ class MiniGridSubstrateAdapter:
         )
         self.preview_adapter: MiniGridAdapter | None = None
         self.task_adapter: MiniGridAdapter | None = None
+
+    def _build_env(self, render_mode: str | None = None):
+        mode = self.render_mode if render_mode is None else render_mode
+        if self.observability == "partial":
+            return run_demo.build_env(self.env_id, mode)
+        return run_demo.build_full_env(self.env_id, mode)
 
     def capability_registry(self) -> CapabilityRegistry:
         return self._capability_registry
@@ -75,7 +85,7 @@ class MiniGridSubstrateAdapter:
         if self.render_mode != "human":
             return
         self.close_preview()
-        env = run_demo.build_env(self.env_id, self.render_mode)
+        env = self._build_env(self.render_mode)
         self.preview_adapter = MiniGridAdapter(env)
         self.preview_adapter.reset(seed=seed)
         try:
@@ -111,10 +121,10 @@ class MiniGridSubstrateAdapter:
         return self.task_adapter is not None
 
     def sense_idle_scene(self, sense: Any, *, seed: int) -> None:
-        adapter = self.preview_adapter or self.task_adapter
+        adapter = self.task_adapter or self.preview_adapter
         close_after = False
         if adapter is None:
-            env = run_demo.build_env(self.env_id, "none")
+            env = self._build_env("none")
             adapter = MiniGridAdapter(env)
             adapter.reset(seed=seed)
             close_after = True
@@ -145,6 +155,8 @@ class MiniGridSubstrateAdapter:
         if render_adapter is None and self.render_mode == "human":
             render_adapter = self.task_adapter
             skip_reset = render_adapter is not None
+        if render_adapter is None and self.observability == "full":
+            render_adapter = MiniGridAdapter(self._build_env(self.render_mode))
         self.preview_adapter = None
         if render_adapter is None:
             self.close_task_window()
@@ -170,6 +182,7 @@ class MiniGridSubstrateAdapter:
             task_override=task_override,
             procedure_override=procedure_override,
             step_budget=step_budget,
+            observability=self.observability,
         )
         self.task_adapter = result.pop("_render_adapter", None)
         return result
@@ -187,35 +200,41 @@ class MiniGridSubstrateAdapter:
                 "actions_executed": [],
                 "steps_taken": 0,
             }
-        if self.render_mode == "human":
-            adapter = self.task_adapter or self.preview_adapter
-            if adapter is None:
-                env = run_demo.build_env(self.env_id, self.render_mode)
-                adapter = MiniGridAdapter(env)
-                adapter.reset(seed=seed)
-                self.task_adapter = adapter
-            executed: list[str] = []
-            for action_name in actions:
-                spec = ACTION_PRIMITIVES[action_name]
-                adapter.act(int(spec.runtime_value))
-                executed.append(action_name)
-            return {
-                "success": True,
-                "task_complete": True,
-                "actions_executed": executed,
-                "steps_taken": len(executed),
-                "final_state": {"task_complete": True},
-                "task": {
-                    "instruction": " ".join(actions),
-                    "task_type": "motor_command",
-                },
-            }
-        return run_demo.run_motor_sequence(
-            env_id=self.env_id,
-            seed=seed,
-            render_mode=self.render_mode,
-            actions=actions,
-        )
+        adapter = self.task_adapter or self.preview_adapter
+        if adapter is None:
+            env = self._build_env(self.render_mode)
+            adapter = MiniGridAdapter(env)
+            adapter.reset(seed=seed)
+            self.task_adapter = adapter
+
+        executed: list[str] = []
+        terminated = False
+        truncated = False
+        for action_name in actions:
+            spec = ACTION_PRIMITIVES[action_name]
+            _, _, terminated, truncated, _ = adapter.act(int(spec.runtime_value))
+            executed.append(action_name)
+            if self.render_mode == "human":
+                try:
+                    adapter.env.render()
+                except Exception:  # noqa: BLE001
+                    pass
+            if terminated or truncated:
+                break
+
+        return {
+            "success": True,
+            "task_complete": True,
+            "actions_executed": executed,
+            "steps_taken": len(executed),
+            "terminated": terminated,
+            "truncated": truncated,
+            "final_state": {"task_complete": True},
+            "task": {
+                "instruction": " ".join(actions),
+                "task_type": "motor_command",
+            },
+        }
 
     def close(self) -> None:
         self.close_preview()

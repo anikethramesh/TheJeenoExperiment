@@ -33,8 +33,15 @@ def build_env(env_id: str, render_mode: str | None):
     kwargs = {}
     if render_mode != "none":
         kwargs["render_mode"] = render_mode
-    env = gym.make(env_id, **kwargs)
-    return FullyObsWrapper(env)
+    return gym.make(env_id, **kwargs)
+
+
+def build_full_env(env_id: str, render_mode: str | None):
+    ensure_custom_minigrid_envs_registered()
+    kwargs = {}
+    if render_mode != "none":
+        kwargs["render_mode"] = render_mode
+    return FullyObsWrapper(gym.make(env_id, **kwargs))
 
 
 def run_motor_sequence(
@@ -384,7 +391,11 @@ def run_episode(
     task_override: TaskRequest | None = None,
     procedure_override: ProcedureRecipe | None = None,
     step_budget: int | None = None,
+    observability: str = "partial",
 ):
+    if observability not in {"partial", "full"}:
+        raise ValueError("observability must be 'partial' or 'full'")
+    episode_build_env = build_full_env if observability == "full" else build_env
     compiler = compiler or build_compiler(compiler_name)
     memory = memory or OperationalMemory(root=memory_root)
     plan_cache = plan_cache or PlanCache(enabled=use_cache)
@@ -408,7 +419,7 @@ def run_episode(
         observation = None
         if instruction is None:
             if adapter is None:
-                env = build_env(env_id, render_mode)
+                env = episode_build_env(env_id, render_mode)
                 adapter = MiniGridAdapter(env)
             observation = adapter.reset(seed=seed)
             operator_instruction = observation.raw.get("mission") or "Find the goal."
@@ -557,7 +568,7 @@ def run_episode(
                 progress_callback("prewarm_finished", dict(prewarm_summary))
 
         if adapter is None:
-            env = build_env(env_id, render_mode)
+            env = episode_build_env(env_id, render_mode)
             adapter = MiniGridAdapter(env)
         if skip_reset:
             # Continue from current adapter state — window stays open, position preserved.

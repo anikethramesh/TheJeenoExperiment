@@ -14,6 +14,7 @@ from jeenom.capability_registry import CapabilityRegistry
 from jeenom.memory import OperationalMemory
 from jeenom.minigrid_envs import ensure_custom_minigrid_envs_registered
 from jeenom.minigrid_adapter import MiniGridAdapter
+from jeenom.minigrid_runtime_package import build_minigrid_runtime_package
 from jeenom.operator_station import OperatorStationSession, _make_classify_utterance
 from jeenom.plan_cache import PlanCache
 from jeenom.plan_reuse import PlanReuseCache
@@ -500,6 +501,7 @@ class JeenomMiniGridTests(unittest.TestCase):
             max_loops=256,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            observability="full",
         )
         self.assertEqual(result["readiness"]["status"], "executable")
         self.assertTrue(result["final_state"]["task_complete"])
@@ -513,6 +515,7 @@ class JeenomMiniGridTests(unittest.TestCase):
             max_loops=128,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            observability="full",
         )
         self.assertTrue(result["final_state"]["task_complete"])
         self.assertEqual(result["task"]["instruction"], "go to the red door")
@@ -1586,6 +1589,11 @@ class JeenomMiniGridTests(unittest.TestCase):
             seed=8,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            runtime_package=build_minigrid_runtime_package(
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                render_mode="none",
+                observability="full",
+            ),
         )
 
         response = session.handle_utterance("go to the closest door")
@@ -1637,6 +1645,11 @@ class JeenomMiniGridTests(unittest.TestCase):
             seed=8,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            runtime_package=build_minigrid_runtime_package(
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                render_mode="none",
+                observability="full",
+            ),
         )
 
         session.handle_utterance("go to the closest door")
@@ -1653,6 +1666,11 @@ class JeenomMiniGridTests(unittest.TestCase):
             seed=8,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            runtime_package=build_minigrid_runtime_package(
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                render_mode="none",
+                observability="full",
+            ),
         )
 
         session.handle_utterance("go to the closest door")
@@ -1669,6 +1687,11 @@ class JeenomMiniGridTests(unittest.TestCase):
             seed=8,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            runtime_package=build_minigrid_runtime_package(
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                render_mode="none",
+                observability="full",
+            ),
         )
 
         session.handle_utterance("go to the closest door")
@@ -1720,6 +1743,107 @@ class JeenomMiniGridTests(unittest.TestCase):
         self.assertEqual(session.last_result["task"]["instruction"], "go to the red door")
         session.close()
 
+    def test_operator_station_new_motor_command_cancels_pending_clarification_and_runs(self):
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=build_test_llm_transport()),
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+            runtime_package=build_minigrid_runtime_package(
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                render_mode="none",
+                observability="full",
+            ),
+        )
+
+        session.handle_utterance("go to the closest door")
+        self.assertIsNotNone(session.pending_clarification)
+        session.compiler = SmokeTestCompiler()
+        session.compiler_name = "smoke"
+        response = session.handle_utterance("can you go forward two steps")
+
+        self.assertIsNone(session.pending_clarification)
+        self.assertIn("MOTOR COMPLETE", response)
+        self.assertIsNotNone(session.last_raw_motor_ticket)
+        self.assertEqual(session.last_raw_motor_ticket.action_name, "move_forward")
+        self.assertEqual(session.last_raw_motor_ticket.repeat_count, 2)
+
+    def test_operator_station_motor_command_refreshes_partial_scene_model(self):
+        session = OperatorStationSession(
+            compiler=SmokeTestCompiler(),
+            compiler_name="smoke",
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        initial = session.scene_summary()
+        response = session.handle_utterance("turn left twice")
+        refreshed = session.scene_summary()
+
+        self.assertIn("doors=none", initial)
+        self.assertIn("MOTOR COMPLETE", response)
+        self.assertIn("agent=(5,4) dir=3", refreshed)
+        self.assertIn("purple door@(4,0)", refreshed)
+
+    def test_operator_station_llm_motor_steps_sequence_instruction_runs_as_motor_sequence(self):
+        calls = []
+
+        def transport(request):
+            calls.append(request)
+            self.assertEqual(request["method_name"], "compile_operator_intent")
+            return {
+                "intent_type": "sequence_instruction",
+                "canonical_instruction": None,
+                "task_type": None,
+                "target": None,
+                "knowledge_update": None,
+                "reference": None,
+                "status_query": None,
+                "claim_reference": None,
+                "control": None,
+                "target_selector": None,
+                "grounding_query_plan": None,
+                "primitive_definition": None,
+                "capability_status": "executable",
+                "required_capabilities": [],
+                "clear_memory": False,
+                "confidence": 1.0,
+                "reason": "LLM emitted all-motor sequence as sequence_instruction.",
+                "concept_name": None,
+                "concept_utterance": None,
+                "concept_steps": None,
+                "utterance_steps": ["turn left twice", "go forward once"],
+                "action_name": None,
+                "repeat_count": None,
+                "mission_steps": None,
+                "selection_objective": None,
+                "steering_directive": None,
+            }
+
+        session = OperatorStationSession(
+            compiler=LLMCompiler(api_key="test-key", transport=transport),
+            compiler_name="llm",
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+
+        response = session.handle_utterance("can you turn left twice and go forward once")
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn(
+            "motor_sequence",
+            calls[0]["user_payload"]["supported"]["intent_types"],
+        )
+        self.assertIn("MOTOR SEQUENCE", response)
+        self.assertNotIn("SEQUENCE ERROR", response)
+        self.assertEqual(session.last_request_plan.objective_type, "motor_control")
+        self.assertEqual(session.last_readiness_graph.graph_status, "executable")
+
     def test_operator_station_ambiguous_unique_selector_requests_candidate_clarification(self):
         compiler = LLMCompiler(api_key="test-key", transport=build_test_llm_transport())
         session = OperatorStationSession(
@@ -1729,6 +1853,11 @@ class JeenomMiniGridTests(unittest.TestCase):
             seed=8,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            runtime_package=build_minigrid_runtime_package(
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                render_mode="none",
+                observability="full",
+            ),
         )
 
         response = session.handle_utterance("go to the door that is not yellow")
@@ -1784,6 +1913,11 @@ class JeenomMiniGridTests(unittest.TestCase):
             seed=8,
             render_mode="none",
             memory_root=Path(tempfile.mkdtemp()),
+            runtime_package=build_minigrid_runtime_package(
+                env_id="MiniGrid-GoToDoor-16x16-v0",
+                render_mode="none",
+                observability="full",
+            ),
         )
 
         response = session.handle_utterance("can you go to a door that is not yellow")

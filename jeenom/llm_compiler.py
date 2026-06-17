@@ -1651,6 +1651,7 @@ class LLMCompiler(CompilerBackend):
                     "procedure_recall",
                     "sequence_instruction",
                     "motor_command",
+                    "motor_sequence",
                     "mission_contract",
                     "reset",
                     "quit",
@@ -1863,6 +1864,11 @@ class LLMCompiler(CompilerBackend):
                 "repeat_count set to the integer count (default 1). Motor commands are "
                 "low-level control requests that require station authorization with a "
                 "RawMotorTicket before execution. "
+                "When the operator issues a sequence made only of direct motor actions — e.g. "
+                "'turn left twice and go forward once', 'turn right then move forward two "
+                "steps' — emit intent_type='motor_sequence' and encode utterance_steps as "
+                "['action_name:count', ...], for example ['turn_left:2','move_forward:1']. "
+                "Do not emit sequence_instruction for all-motor sequences. "
                 "Set required_capabilities=[]. "
                 "Do NOT classify concept-teach utterances as task_instruction. "
                 "Do NOT try to execute the concept's underlying instruction yourself. "

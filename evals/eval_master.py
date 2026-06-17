@@ -11,7 +11,7 @@ def main():
     parser.add_argument(
         "--suite",
         default="all",
-        help="Eval suite to run: all, architecture, cleanup, smoke.",
+        help="Eval suite to run: all, architecture, cleanup, llm_path, orpi, smoke.",
     )
     parser.add_argument(
         "--list",
@@ -22,7 +22,12 @@ def main():
 
     evals_dir = Path(__file__).parent
     selected_specs = select_eval_specs(args.suite)
+    expected_fail = args.suite == EXPECTED_FAIL_SUITE
     if not selected_specs:
+        if expected_fail:
+            print("Found 0 eval scripts to run for suite=expected_fail.")
+            print("No expected-fail probes are currently registered. ✅")
+            sys.exit(0)
         known = sorted(
             {"all"}
             | {
@@ -53,7 +58,6 @@ def main():
     
     # Expected-fail suite: a probe's FAILURE is the clean state; a PASS means the feature
     # landed and the probe should graduate into EVAL_SPECS.
-    expected_fail = args.suite == EXPECTED_FAIL_SUITE
     print(f"Found {len(eval_files)} eval scripts to run for suite={args.suite}.")
     if expected_fail:
         print("(expected-fail suite: a failing probe is the EXPECTED state; a pass graduates.)")
