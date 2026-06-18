@@ -2292,7 +2292,11 @@ class OperatorStationSession:
                 decision.suggested_handle, utterance, intent, cap_match, decision
             )
 
-        # Default: refuse
+        # Default: refuse. The arbitrator (LLM or smoke) only *decides* to refuse — the
+        # operator-facing statement is owned by the deterministic cap_match formatter, not
+        # the arbitrator's free text. This keeps the refusal wording identical across the
+        # regex/smoke and LLM paths (the LLM is plumbing for decisions, not prose); the
+        # LLM's own reasoning is preserved in last_arbitration_trace and the log.
         if cap_match.verdict == "synthesizable":
             kind = "synthesizable"
         elif cap_match.verdict == "ok":
@@ -2303,7 +2307,7 @@ class OperatorStationSession:
             kind=kind,
             utterance=utterance,
             payload={
-                "message": decision.operator_message or cap_match.operator_message(),
+                "message": cap_match.operator_message(),
                 "match": cap_match.compact(),
             },
             capability_match=cap_match,

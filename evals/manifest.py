@@ -47,6 +47,7 @@ EVAL_SPECS: list[dict[str, object]] = [
     {"file": "intent_fidelity_cache_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "intent_fidelity_concept_probe.py", "suites": ["architecture"]},
     {"file": "intent_fidelity_llm_motor_sequence_probe.py", "suites": ["architecture", "llm_path"]},
+    {"file": "intent_fidelity_llm_operator_matrix_probe.py", "suites": ["architecture", "llm_path"]},
     {"file": "intent_fidelity_llm_path_parity_probe.py", "suites": ["architecture", "llm_path"]},
     {"file": "intent_fidelity_llm_schema_strict_probe.py", "suites": ["architecture", "llm_path"]},
     {"file": "intent_fidelity_motor_command_probe.py", "suites": ["architecture", "cleanup"]},
@@ -113,9 +114,25 @@ EXPECTED_FAIL_SPECS: list[dict[str, object]] = []
 EXPECTED_FAIL_SUITE = "expected_fail"
 
 
+# Genuine live-LLM probes: they make REAL model calls (the only suite eval_master lets reach
+# the network). Kept OUT of EVAL_SPECS so the deterministic "all" gate never makes a network
+# call. Opt-in via `--suite live_llm`; each probe SKIPS (exit 0) when no OPENROUTER_API_KEY is
+# present, so keyless CI stays green. Assertions target the LLM's STRUCTURED decision (the
+# "tool call" — intent_type / command_kind / graph_status), never its free-text prose.
+# Backend-swappable: pointing build_compiler at a local model (e.g. LLAMA) is a compiler-backend
+# change, not a probe change.
+LIVE_LLM_SPECS: list[dict[str, object]] = [
+    {"file": "intent_fidelity_live_llm_probe.py", "suites": ["live_llm"]},
+]
+
+LIVE_LLM_SUITE = "live_llm"
+
+
 def select_eval_specs(suite: str) -> list[dict[str, object]]:
     if suite == EXPECTED_FAIL_SUITE:
         return list(EXPECTED_FAIL_SPECS)
+    if suite == LIVE_LLM_SUITE:
+        return list(LIVE_LLM_SPECS)
     if suite == "all":
         return list(EVAL_SPECS)
     return [

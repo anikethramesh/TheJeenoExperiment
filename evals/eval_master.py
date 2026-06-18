@@ -1,9 +1,14 @@
 import argparse
+import os
 import sys
 import subprocess
 from pathlib import Path
 
-from manifest import EVAL_SPECS, EXPECTED_FAIL_SUITE, select_eval_specs
+from manifest import EVAL_SPECS, EXPECTED_FAIL_SUITE, LIVE_LLM_SUITE, select_eval_specs
+
+# LIVE_LLM_SUITE (from manifest) is the ONLY suite permitted to make real LLM calls. Every
+# other suite is the deterministic gate and runs with the live-LLM key stripped (below), so
+# no probe can flake on a network call regardless of whether its author neutralized it.
 
 
 def main():
@@ -66,6 +71,13 @@ def main():
     graduates = []
     fallback_enabled = []
 
+    # Deterministic-gate guarantee: strip the live-LLM key for every suite except live_llm,
+    # so gate probes cannot make a real OpenRouter call (flaky / networked / costly). The
+    # live_llm suite passes the environment through; its probes skip when no key is present.
+    run_env = os.environ.copy()
+    if args.suite != LIVE_LLM_SUITE:
+        run_env.pop("OPENROUTER_API_KEY", None)
+
     for eval_file in eval_files:
         print(f"\n{'='*60}")
         cmd = [sys.executable, str(eval_file)]
@@ -80,7 +92,7 @@ def main():
         print(f"Running {eval_file.name} ({mode})...")
         print(f"{'='*60}")
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
         passed = result.returncode == 0
 
         if expected_fail:

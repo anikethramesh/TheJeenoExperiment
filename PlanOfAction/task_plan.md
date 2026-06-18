@@ -1917,6 +1917,15 @@ Status: complete. The red-bar probe graduated into the main architecture suite.
   `motor_sequence`, and the new `llm_path` eval suite verifies route provenance
   (`LLMCompiler` transport called), prompt contract, post-LLM semantic normalization, and
   deterministic parity for covered utterances before declaring the behavior green.
+- LLM operator-matrix spike: `intent_fidelity_llm_operator_matrix_probe.py` now forces
+  representative operator-intent families through `LLMCompiler` with fake transport and
+  compares the normalized station outcome against the smoke path. Covered families include
+  motor commands, motor sequences, LLM-misclassified all-motor `sequence_instruction`,
+  task navigation, partial-observability `needs_evidence`, ambiguous navigation,
+  unsupported pickup, conditional sense-before-motor, and concept teaching. The probe also
+  asserts that the LLM prompt's advertised `supported.intent_types` matches the
+  `OperatorIntent` schema enum, so future runtime intent types cannot quietly become
+  regex-only.
 
 Known follow-on: partial-observation task/ranking paths now correctly surface `NEEDS EVIDENCE`
 from empty views. The next 13B slices should decide which partial paths move to
@@ -2166,3 +2175,4 @@ Use harder MiniGrid, real robotics, or ARC-like tasks only as architecture
 pressure tests. The goal is not benchmark chasing; the goal is to expose missing
 primitive contracts, missing claims, missing evidence, bad decomposition, and
 bad steering.
+

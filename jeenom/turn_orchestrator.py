@@ -716,18 +716,23 @@ class TurnOrchestrator:
             # the registry says it is missing or synthesizable.
             if not intent.required_capabilities and not cap_match.missing:
                 reason = intent.reason or "I could not understand that request."
-                if intent.intent_type == "unsupported" and "unsupported" in reason.lower():
+                # Decide on STRUCTURED intent fields (the LLM's tool-call), not a substring
+                # search of its prose. A genuine capability gap carries
+                # capability_status="unsupported" → kind="unsupported"; a parse failure
+                # (compiler couldn't resolve the utterance) leaves the default status → it is
+                # an "I didn't understand" clarification, as is an `ambiguous` intent. The
+                # reason text may be the LLM's (helper text), but it never steers the routing.
+                if (
+                    intent.intent_type == "unsupported"
+                    and intent.capability_status == "unsupported"
+                ):
                     return ApprovedCommand(
                         kind="unsupported",
                         utterance=utterance,
                         payload={
-                            "message": (
-                                "I cannot safely execute that capability yet. "
-                                f"{reason}"
-                            )
+                            "message": f"I cannot safely execute that capability yet. {reason}"
                         },
                     )
-                reason = intent.reason or "I could not understand that request."
                 return _approved("clarification", utterance, f"I didn't understand that: {reason}")
             return station._arbitrate_gap(utterance, intent, cap_match)
 

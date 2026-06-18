@@ -16,6 +16,11 @@ from .schemas import (
     ExecutionContract,
     ExecutionContext,
     MemoryUpdate,
+    OPERATOR_COLORS,
+    OPERATOR_INTENT_TYPES,
+    OPERATOR_REFERENCES,
+    OPERATOR_STATUS_QUERIES,
+    OPERATOR_TASK_TYPES,
     OperatorIntent,
     ProcedureRecipe,
     SchemaValidationError,
@@ -24,6 +29,7 @@ from .schemas import (
     SkillPlanTemplate,
     TaskRequest,
     memory_updates_json_schema,
+    get_registered_object_types,
     operator_intent_json_schema,
     procedure_recipe_json_schema,
     sense_plan_json_schema,
@@ -1545,7 +1551,11 @@ class SmokeTestCompiler(CompilerBackend):
 class LLMCompiler(CompilerBackend):
     name = "llm_compiler"
     DEFAULT_METHOD_MAX_TOKENS = {
-        "compile_operator_intent": 256,
+        # The OperatorIntent strict json_schema emits all ~26 fields, so 256 truncated the
+        # response mid-JSON → parse error → silent smoke/regex fallback on every task compile.
+        # Raised to fit the full object (max_tokens is an upper bound; well-formed output is
+        # bounded by the schema, so this does not increase cost — it stops the truncation).
+        "compile_operator_intent": 1024,
         "compile_task": 256,
         "compile_procedure": 512,
         "compile_sense_plan": 384,
@@ -1631,6 +1641,7 @@ class LLMCompiler(CompilerBackend):
         active_claims_summary: dict[str, Any] | None = None,
         pending_proposal: dict[str, Any] | None = None,
     ) -> OperatorIntent:
+        object_types = list(get_registered_object_types() or ("door",))
         payload = {
             "utterance": utterance,
             "knowledge": memory.knowledge,
@@ -1640,41 +1651,12 @@ class LLMCompiler(CompilerBackend):
             "active_claims_summary": active_claims_summary,
             "pending_synthesis_proposal": pending_proposal,
             "supported": {
-                "intent_types": [
-                    "task_instruction",
-                    "knowledge_update",
-                    "status_query",
-                    "cache_query",
-                    "claim_reference",
-                    "concept_teach",
-                    "concept_recall",
-                    "procedure_recall",
-                    "sequence_instruction",
-                    "motor_command",
-                    "motor_sequence",
-                    "mission_contract",
-                    "reset",
-                    "quit",
-                    "accept_proposal",
-                    "reject_proposal",
-                    "unsupported",
-                    "ambiguous",
-                ],
-                "task_types": ["go_to_object"],
-                "object_types": ["door"],
-                "colors": ["red", "green", "blue", "yellow", "purple", "grey"],
-                "references": ["delivery_target", "last_target", "last_task"],
-                "status_queries": [
-                    "status",
-                    "scene",
-                    "help",
-                    "last_run",
-                    "last_target",
-                    "delivery_target",
-                    "ground_target",
-                    "cache",
-                    "concepts",
-                ],
+                "intent_types": list(OPERATOR_INTENT_TYPES),
+                "task_types": list(OPERATOR_TASK_TYPES),
+                "object_types": object_types,
+                "colors": list(OPERATOR_COLORS),
+                "references": list(OPERATOR_REFERENCES),
+                "status_queries": list(OPERATOR_STATUS_QUERIES),
             },
         }
         semantic_bounds = get_semantic_constraints()

@@ -280,7 +280,10 @@ def build_test_llm_transport():
                     "task_type": None,
                     "target": None,
                     "target_selector": None,
-                    "capability_status": "executable",
+                    # Consistent structured decision: an unsupported intent carries
+                    # capability_status="unsupported" (the routing keys off this typed field,
+                    # not the reason prose).
+                    "capability_status": "unsupported",
                     "knowledge_update": None,
                     "reference": None,
                     "status_query": None,
