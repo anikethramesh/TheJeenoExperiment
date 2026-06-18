@@ -1949,6 +1949,13 @@ Known follow-on: partial-observation task/ranking paths now correctly surface `N
 from empty views. The next 13B slices should decide which partial paths move to
 `search_allowed`/deterministic meta-primitives.
 
+Interactive episode continuity follow-up: render preview, raw motor control, idle sensing, and
+task execution now reuse the same live substrate adapter in every render mode. Starting a task
+does not reset the environment; only the typed `reset` command closes the current adapter,
+recreates the seeded episode, and refreshes the scene. `Ctrl+C` cleanly interrupts the
+synchronous REPL/task run and closes the session. This fixes lifecycle ownership only;
+bounded search and spin prevention remain separate 13B work.
+
 #### 13B.4 — Eval pipeline + tool-call discipline (deterministic gate + live-LLM suite)
 
 Status: complete. A spike to make the test pipeline exercise BOTH the deterministic/regex path
@@ -2292,5 +2299,4 @@ Scope when it lands:
 - **Untrusted-input channels.** If/when JEENOM ingests text it did not originate (documents, tool
   outputs, other agents), that becomes a distinct injection surface needing its own trust-boundary
   handling — out of scope until such a channel exists.
-
 

@@ -1791,6 +1791,58 @@ class JeenomMiniGridTests(unittest.TestCase):
         self.assertIn("agent=(5,4) dir=3", refreshed)
         self.assertIn("purple door@(4,0)", refreshed)
 
+    def test_task_after_motor_commands_continues_from_current_partial_episode(self):
+        session = OperatorStationSession(
+            compiler=SmokeTestCompiler(),
+            compiler_name="smoke",
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            max_loops=1,
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        try:
+            session._run_motor_command("turn_right", 3, "turn right three times")
+            session._run_motor_command("move_forward", 1, "go forward once")
+            self.assertIn("agent=(6,4) dir=0", session.scene_summary())
+            self.assertIn("blue door@(12,3)", session.scene_summary())
+
+            active_adapter = session.task_adapter
+            self.assertIsNotNone(active_adapter)
+            with patch.object(active_adapter, "reset", wraps=active_adapter.reset) as reset_spy:
+                session.handle_utterance("go to the blue door")
+
+            self.assertEqual(reset_spy.call_count, 0)
+            self.assertIs(session.task_adapter, active_adapter)
+            first_sample = session.last_result["loop_records"][0]["world_sample"]
+            self.assertEqual(first_sample["agent_pose"], {"x": 6, "y": 4, "dir": 0})
+            self.assertTrue(first_sample["target_visible"])
+            self.assertEqual(tuple(first_sample["target_location"]), (12, 3))
+        finally:
+            session.close()
+
+    def test_explicit_reset_recreates_seeded_partial_episode(self):
+        session = OperatorStationSession(
+            compiler=SmokeTestCompiler(),
+            compiler_name="smoke",
+            env_id="MiniGrid-GoToDoor-16x16-v0",
+            seed=8,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        try:
+            session.handle_utterance("turn left twice")
+            self.assertIn("agent=(5,4) dir=3", session.scene_summary())
+            self.assertIsNotNone(session.task_adapter)
+
+            response = session.handle_utterance("reset")
+
+            self.assertIn("RESET:", response)
+            self.assertIsNone(session.task_adapter)
+            self.assertIn("agent=(5,4) dir=1", session.scene_summary())
+        finally:
+            session.close()
+
     def test_operator_station_llm_motor_steps_sequence_instruction_runs_as_motor_sequence(self):
         calls = []
 
@@ -2578,13 +2630,18 @@ class TestSceneModel(unittest.TestCase):
         self.assertIsNotNone(grounded.get("distance"))
         self.assertIsInstance(grounded["distance"], int)
 
-    def test_scene_model_cleared_on_reset(self):
-        """reset() must clear scene_model so the next query builds a fresh one."""
+    def test_scene_model_refreshed_from_seeded_episode_on_reset(self):
+        """reset() must replace the old scene with a fresh seeded idle scene."""
         session = self._make_session()
         self._run_with_env(lambda: session.handle_utterance("go to the red door"))
-        self.assertIsNotNone(session.memory.scene_model)
+        previous_scene = session.memory.scene_model
+        self.assertIsNotNone(previous_scene)
         session.reset()
-        self.assertIsNone(session.memory.scene_model)
+        reset_scene = session.memory.scene_model
+        self.assertIsNotNone(reset_scene)
+        self.assertEqual(reset_scene.source, "idle_sense")
+        self.assertEqual(reset_scene.step_count, 0)
+        self.assertIsNot(reset_scene, previous_scene)
 
     def test_scene_model_source_is_task_sense_after_task(self):
         """After a completed task, scene_model.source must be 'task_sense'."""

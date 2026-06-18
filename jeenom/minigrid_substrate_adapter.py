@@ -150,17 +150,16 @@ class MiniGridSubstrateAdapter:
         procedure_override: Any = None,
         step_budget: int | None = None,
     ) -> dict[str, Any]:
-        render_adapter = self.preview_adapter
-        skip_reset = False
-        if render_adapter is None and self.render_mode == "human":
-            render_adapter = self.task_adapter
-            skip_reset = render_adapter is not None
+        render_adapter = self.task_adapter or self.preview_adapter
+        skip_reset = render_adapter is not None
         if render_adapter is None and self.observability == "full":
             render_adapter = MiniGridAdapter(self._build_env(self.render_mode))
-        self.preview_adapter = None
-        if render_adapter is None:
-            self.close_task_window()
-        elif self.task_adapter is not None and self.task_adapter is not render_adapter:
+
+        if self.preview_adapter is render_adapter:
+            self.preview_adapter = None
+        elif self.preview_adapter is not None:
+            self.close_preview()
+        if self.task_adapter is not None and self.task_adapter is not render_adapter:
             self.close_task_window()
 
         result = run_demo.run_episode(
@@ -175,7 +174,7 @@ class MiniGridSubstrateAdapter:
             plan_cache=plan_cache,
             use_cache=plan_cache.enabled,
             prewarm=True,
-            keep_render_open=self.render_mode == "human",
+            keep_render_open=True,
             render_adapter=render_adapter,
             skip_reset=skip_reset,
             progress_callback=progress_callback,
@@ -205,7 +204,9 @@ class MiniGridSubstrateAdapter:
             env = self._build_env(self.render_mode)
             adapter = MiniGridAdapter(env)
             adapter.reset(seed=seed)
-            self.task_adapter = adapter
+        if adapter is self.preview_adapter:
+            self.preview_adapter = None
+        self.task_adapter = adapter
 
         executed: list[str] = []
         terminated = False

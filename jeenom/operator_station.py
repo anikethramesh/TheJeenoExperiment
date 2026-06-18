@@ -5653,6 +5653,8 @@ class OperatorStationSession:
 
     def reset(self, *, clear_memory: bool = False) -> str:
         self.log("resetting station state")
+        self.close_preview()
+        self.close_task_window()
         self.pending_clarification = None
         self.pending_synthesis_proposal = None
         self.active_claims = None
@@ -5669,6 +5671,8 @@ class OperatorStationSession:
         self.last_command_result = None
         self.memory.reset_episode()
         self.last_result = None
+        self.open_preview()
+        self._refresh_scene_model_after_motion()
         if clear_memory:
             self.representation.clear_operator_knowledge()
             return "RESET: episodic state and durable knowledge cleared"
@@ -5820,17 +5824,20 @@ def _format_targets(targets: list[dict[str, Any]]) -> str:
 def run_repl(session: OperatorStationSession) -> int:
     print(session.startup())
     try:
-        while True:
-            try:
+        try:
+            while True:
                 utterance = input("READY> ")
-            except EOFError:
-                print()
-                return 0
-            response = session.handle_utterance(utterance)
-            if response == "QUIT":
-                print("BYE")
-                return 0
-            print(response)
+                response = session.handle_utterance(utterance)
+                if response == "QUIT":
+                    print("BYE")
+                    return 0
+                print(response)
+        except EOFError:
+            print()
+            return 0
+        except KeyboardInterrupt:
+            print("\nINTERRUPTED")
+            return 130
     finally:
         session.close()
 

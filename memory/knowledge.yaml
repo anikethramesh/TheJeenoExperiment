@@ -1,6 +1,6 @@
-target_color: null
-target_type: null
-delivery_target: null
+target_color: "red"
+target_type: "door"
+delivery_target: {"color": "red", "object_type": "door"}
 last_task_type: null
 last_instruction: null
 primitive_definitions: {}

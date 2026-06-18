@@ -413,7 +413,8 @@ def run_episode(
     aligned_target = None
     env = render_adapter.env if render_adapter is not None else None
     adapter = render_adapter
-    adapter_closed = False
+    retain_adapter = keep_render_open or render_adapter is not None
+    adapter_handed_off = False
 
     try:
         observation = None
@@ -519,7 +520,7 @@ def run_episode(
                         step_name=cortex._current_step_name(),
                     )
                     memory_updates = cortex.finalize()
-                    return _assemble_result(
+                    result = _assemble_result(
                         compiler=compiler,
                         task=task,
                         procedure=procedure,
@@ -536,7 +537,10 @@ def run_episode(
                         prewarm_summary=prewarm_summary,
                         runtime_llm_calls_during_render=runtime_llm_calls_during_render,
                         cache_miss_during_render=cache_miss_during_render,
+                        render_adapter=adapter if retain_adapter else None,
                     )
+                    adapter_handed_off = retain_adapter and adapter is not None
+                    return result
 
         should_prewarm = (
             prewarm
@@ -661,15 +665,8 @@ def run_episode(
             if cortex.execution_state["task_complete"] or report.status == "failed":
                 break
 
-        if adapter is not None and render_mode == "human":
-            if keep_render_open:
-                adapter_closed = True
-            else:
-                adapter.close()
-                adapter_closed = True
-
         memory_updates = cortex.finalize()
-        return _assemble_result(
+        result = _assemble_result(
             compiler=compiler,
             task=task,
             procedure=procedure,
@@ -686,10 +683,12 @@ def run_episode(
             prewarm_summary=prewarm_summary,
             runtime_llm_calls_during_render=runtime_llm_calls_during_render,
             cache_miss_during_render=cache_miss_during_render,
-            render_adapter=adapter if keep_render_open and render_mode == "human" else None,
+            render_adapter=adapter if retain_adapter else None,
         )
+        adapter_handed_off = retain_adapter and adapter is not None
+        return result
     finally:
-        if adapter is not None and not adapter_closed:
+        if adapter is not None and (not retain_adapter or not adapter_handed_off):
             adapter.close()
 
 
