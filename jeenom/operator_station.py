@@ -2150,6 +2150,28 @@ class OperatorStationSession:
                 capability_match=cap_match,
             )
 
+        if answer_fields.intersection({"distance", "ranked_doors"}):
+            # "answer the distance(s) to all <candidates>" — a ranked-distance list. Placed after
+            # the ordinal/extreme/color branches so it only catches the plain all-candidates case
+            # (e.g. "what is the distance to the doors"), not "third closest distance".
+            return ApprovedCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={
+                    "message": self.domain_helper.format_ranked_doors_from_entries(
+                        claims.ranked_scene_doors,
+                        metric=str(
+                            claims.last_grounding_query.get("distance_metric")
+                            or self.domain_helper.metric_from_grounding_handle(
+                                str(claims.last_grounding_query.get("primitive", ""))
+                            )
+                        ),
+                        include_navigation_hint=not wants_task,
+                    )
+                },
+                capability_match=cap_match,
+            )
+
         return _approved("ambiguous", utterance, "I could not compose a result from the semantic query plan.")
 
 

@@ -563,7 +563,10 @@ class TurnOrchestrator:
                 except ValueError:
                     continue
                 sequence.append({"action": action_name, "count": action_count})
-            if len(sequence) < 2:
+            # Execute any sequence with at least one parseable step — a single repeated action
+            # ("go forward twice" -> ["move_forward:2"]) is valid. Only zero parseable steps is
+            # genuinely unparseable. (The sequence_instruction path applies the same rule.)
+            if not sequence:
                 return _approved("clarification", utterance, "Could not parse motor sequence steps.")
             station.log(f"motor_sequence: {len(sequence)} actions")
             return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})

@@ -1551,16 +1551,17 @@ class SmokeTestCompiler(CompilerBackend):
 class LLMCompiler(CompilerBackend):
     name = "llm_compiler"
     DEFAULT_METHOD_MAX_TOKENS = {
-        # The OperatorIntent strict json_schema emits all ~26 fields, so 256 truncated the
-        # response mid-JSON → parse error → silent smoke/regex fallback on every task compile.
-        # Raised to fit the full object (max_tokens is an upper bound; well-formed output is
-        # bounded by the schema, so this does not increase cost — it stops the truncation).
+        # Each method's strict json_schema emits its full object, so caps that were too small
+        # truncated the response mid-JSON → parse error → silent smoke/regex fallback (observed
+        # on compile_operator_intent at 256; the others shared the same risk). Sized to fit the
+        # full schema. max_tokens is an upper bound — well-formed output is bounded by the
+        # schema, so headroom does not increase cost; it only stops the truncation.
         "compile_operator_intent": 1024,
-        "compile_task": 256,
-        "compile_procedure": 512,
-        "compile_sense_plan": 384,
-        "compile_skill_plan": 384,
-        "compile_memory_updates": 512,
+        "compile_task": 768,
+        "compile_procedure": 1024,
+        "compile_sense_plan": 768,
+        "compile_skill_plan": 768,
+        "compile_memory_updates": 768,
     }
 
     def __init__(

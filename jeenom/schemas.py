@@ -137,6 +137,19 @@ OPERATOR_DISTANCE_REFERENCES = ("agent",)
 GROUNDING_QUERY_OPERATIONS = ("list", "filter", "rank", "select", "answer")
 GROUNDING_QUERY_ORDERS = ("ascending", "descending")
 GROUNDING_QUERY_TIE_POLICIES = ("clarify", "display")
+# Canonical answer-field vocabulary the deterministic executor recognizes. The LLM's output is
+# canonicalized to this set BEFORE dispatch (see _ensure_canonical_answer_fields): conservative
+# aliases repair near-misses (plural/synonym); ordinal forms `<first..fifth>_<closest|farthest>`
+# are matched by pattern; anything else fails closed. Substrate-independent (shared vocabulary).
+GROUNDING_QUERY_ANSWER_FIELDS = ("distance", "ranked_doors", "closest", "farthest", "exists", "target")
+_ANSWER_FIELD_ALIASES = {
+    "distances": "distance",
+    "nearest": "closest",
+    "furthest": "farthest",
+    "ranking": "ranked_doors",
+    "ranked_list": "ranked_doors",
+}
+_ORDINAL_ANSWER_FIELD_RE = re.compile(r"^(first|second|third|fourth|fifth)_(closest|farthest)$")
 OPERATOR_STATUS_QUERIES = (
     "status",
     "scene",
@@ -358,6 +371,29 @@ def _ensure_str_list(value: Any, label: str) -> list[str]:
     result: list[str] = []
     for idx, item in enumerate(values):
         result.append(_ensure_str(item, f"{label}[{idx}]"))
+    return result
+
+
+def _ensure_canonical_answer_fields(value: Any, label: str) -> list[str]:
+    """Normalize-then-validate the LLM's answer_fields to the canonical vocabulary.
+
+    Conservative aliases repair near-misses (e.g. "distances" -> "distance"); ordinal forms
+    (`<first..fifth>_<closest|farthest>`) pass through; an unrecognized value fails CLOSED with
+    SchemaValidationError (which the LLM compiler turns into a regex fallback, else an honest
+    "I didn't understand"). This is the single chokepoint, so both the LLM and regex paths emit
+    canonical answer_fields and the deterministic executor sees one vocabulary.
+    """
+    result: list[str] = []
+    for idx, item in enumerate(_ensure_str_list(value, label)):
+        key = item.strip().lower()
+        canonical = _ANSWER_FIELD_ALIASES.get(key, key)
+        if canonical in GROUNDING_QUERY_ANSWER_FIELDS or _ORDINAL_ANSWER_FIELD_RE.match(canonical):
+            result.append(canonical)
+        else:
+            raise SchemaValidationError(
+                f"{label}[{idx}]: unknown answer field {item!r}; canonical values are "
+                f"{GROUNDING_QUERY_ANSWER_FIELDS} or <first..fifth>_<closest|farthest>"
+            )
     return result
 
 
@@ -786,7 +822,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
             GROUNDING_QUERY_TIE_POLICIES,
             f"{label}.tie_policy",
         ),
-        "answer_fields": _ensure_str_list(
+        "answer_fields": _ensure_canonical_answer_fields(
             plan.get("answer_fields"),
             f"{label}.answer_fields",
         ),

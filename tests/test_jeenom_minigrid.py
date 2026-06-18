@@ -737,9 +737,9 @@ class JeenomMiniGridTests(unittest.TestCase):
         self.assertEqual(task.source, "llm_compiler")
         usage = compiler.usage_summary()
         self.assertTrue(usage["llm_used"])
-        self.assertEqual(usage["total_requested_max_tokens"], 256)
-        self.assertEqual(usage["call_history"][0]["requested_max_tokens"], 256)
-        self.assertTrue(any("compile_task requested max_tokens=256" in log for log in compiler.logs))
+        self.assertEqual(usage["total_requested_max_tokens"], 768)
+        self.assertEqual(usage["call_history"][0]["requested_max_tokens"], 768)
+        self.assertTrue(any("compile_task requested max_tokens=768" in log for log in compiler.logs))
 
     def test_llm_compiler_falls_back_on_invalid_output(self):
         compiler = LLMCompiler(

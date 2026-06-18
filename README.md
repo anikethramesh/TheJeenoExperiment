@@ -149,6 +149,23 @@ the hostile primitive ladder and a robotics-like substrate both pass.
   safety class, authority, failure modes, validation hooks, and substrate
   fingerprint assumptions.
 
+## Known Limitations
+
+- **Threat model: good-faith operator assumed.** JEENOM currently assumes a non-adversarial
+  operator and a non-adversarial LLM backend. The architecture is *designed* to contain a
+  misbehaving model for the dangerous cases — the LLM only emits typed tool-call decisions
+  (its decision fields are enum-validated), unknown primitives are rejected, every side effect
+  is gated by station-minted tickets plus the `IntentVerifier` and `ReadinessGraph`, and no LLM
+  runs in the rendered control loop. **However, this containment is not yet hardened or proven
+  against hostile prompts, prompt injection, or jailbreaks.** One dispatch field
+  (`grounding_query_plan.answer_fields`) is also still an open string list rather than an enum
+  (it currently fails *safe* — a silent dead-end, never an unintended action). Adversarial
+  robustness — closing every decision vocabulary fail-closed, a side-effect-authority proof, and
+  a hostile tool-call / prompt-injection eval suite — is deferred to **Phase 17** of the plan.
+  Do not run JEENOM for untrusted operators, or feed it untrusted text, until that work lands.
+- **Single substrate.** Only MiniGrid is ORPI-conformant today; substrate-independence is
+  validated later (AI2-THOR spike, Phases 14–15).
+
 ## Environment
 
 JEENOM currently runs on MiniGrid through Gymnasium. A future robot or simulator

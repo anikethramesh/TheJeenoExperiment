@@ -27,8 +27,12 @@ Elon-algorithm rule for this repo:
 
 - Current phase: **Phase 13 - Steerable Cognition Layer** (**13A complete**, incl. **13A.1**
   coordinate-system abstraction and the **13A.2** cleanup spike — all 4 slices landed
-  (fingerprint, capability-handle grammar, metric-name detection, typed TurnState); **13B**
-  next). 13A delivered the typed, constraint-first steering layer
+  (fingerprint, capability-handle grammar, metric-name detection, typed TurnState).
+  **13B in progress**: 13B.1 claim freshness, 13B.2 MiniGrid FOV, 13B.3 `needs_evidence`,
+  and 13B.4 eval-pipeline + tool-call discipline (deterministic gate + opt-in `live_llm`
+  suite; root-caused and fixed a silent LLM→regex fallback from a `max_tokens` truncation)
+  are complete; the remaining 13B work is the meta-primitive / `search_allowed` decision).
+  13A delivered the typed, constraint-first steering layer
   (`SteeringDirective`: budget/scope/risk/stopping-rule) that demonstrably reshapes plan
   assembly — risk withdraws actuation authority via `needs_authorization`, budget caps
   the Spine stepping loop as `FailureOutcome(category="budget_exhausted")`, and the active
@@ -86,14 +90,28 @@ Elon-algorithm rule for this repo:
   validation, MiniGrid manifest metadata, knowledge scoping, JSON-serializable
   labelled episodes, and the `orpi` eval suite are green.
 - Current verification signal:
-  - `python evals/eval_master.py --suite orpi`: 9/9 passing
-  - `python evals/eval_master.py`: 70/70 passing
+  - `python evals/eval_master.py`: 78/78 passing (deterministic gate; runs with the
+    live-LLM key stripped, so it is reproducible and offline)
+  - `python evals/eval_master.py --suite orpi`: 10/10 passing
   - `python evals/eval_master.py --suite cleanup`: 30/30 passing
-  - `python -m pytest -q tests`: 267 passed, 1 warning, 9 subtests passed
+  - `python evals/eval_master.py --suite llm_path`: 5/5 passing
+  - `python evals/eval_master.py --suite live_llm`: 1/1 passing (opt-in; REAL model calls,
+    skips when `OPENROUTER_API_KEY` is unset — NOT part of the gate)
+  - `python -m pytest -q tests`: 298 passed, 1 warning, 9 subtests passed
 - Eval naming contract is now enforced: all registered eval files use
   capability-based prefixes. The naming contract probe fails on violation.
 - Whole-repo `pytest` is not the main project signal right now because the local
   `Minigrid/` tree can introduce unrelated dependency noise.
+- **Threat model — KNOWN LIMITATION (good-faith operator assumed).** JEENOM currently
+  assumes a non-adversarial operator and a non-adversarial LLM backend. The architecture
+  *contains* a misbehaving LLM for the dangerous cases (typed tool-call outputs only,
+  enum-validated decision fields, unknown primitives rejected, side effects gated by
+  station-minted tickets + `IntentVerifier` + `ReadinessGraph`, no LLM in the render loop),
+  but this is **not yet hardened or proven against hostile prompts / prompt injection /
+  jailbreaks**, and one dispatch field (`grounding_query_plan.answer_fields`) is still an
+  open string list (it fails *safe* today — silent dead-end, no side effect). Adversarial
+  hardening is deferred to **Phase 17** ("Adversarial robustness & hostile-input hardening").
+  Do not deploy to untrusted operators or feed it untrusted text until that lands.
 
 ## Core Invariants
 
@@ -1931,6 +1949,75 @@ Known follow-on: partial-observation task/ranking paths now correctly surface `N
 from empty views. The next 13B slices should decide which partial paths move to
 `search_allowed`/deterministic meta-primitives.
 
+#### 13B.4 — Eval pipeline + tool-call discipline (deterministic gate + live-LLM suite)
+
+Status: complete. A spike to make the test pipeline exercise BOTH the deterministic/regex path
+and the genuine LLM path, on the principle that **the LLM emits typed tool-call decisions and
+deterministic code owns execution + operator-facing statements** (the LLM is plumbing for
+decisions, not a prose generator).
+
+Headline root cause found + fixed: the LLM path was **silently falling back to regex on every
+task compile**. `compile_operator_intent` was capped at `max_tokens=256`; the strict
+`json_schema` `OperatorIntent` (26 fields) overflowed it → JSON truncated mid-response → parse
+error → smoke/regex fallback. `DEFAULT_METHOD_MAX_TOKENS` is now sized to fit each schema
+(`compile_operator_intent`/`compile_procedure` 1024; `compile_task`/`compile_sense_plan`/
+`compile_skill_plan`/`compile_memory_updates` 768). `max_tokens` is an upper bound, so this is
+cost-neutral for well-formed output — it only stops the truncation. The pinned `compile_task`
+budget test was updated (256 → 768).
+
+Tool-call discipline:
+- **Refusal text is deterministic.** `_arbitrate_gap`'s refuse branch emits
+  `cap_match.operator_message()` — the canonical `MISSING SKILLS: <handles>` — not the
+  arbitrator's free text. The LLM/smoke arbitrator only *decides* to refuse; its reasoning
+  stays in `last_arbitration_trace`. `cap_match.operator_message()` was consolidated to that one
+  wording (matches the `missing_skills` verdict).
+- **Unsupported routing keys off structured fields, not prose.** A bare unsupported/ambiguous
+  intent used to route to `kind="unsupported"` vs `clarification` based on whether the LLM's
+  *reason text contained the substring "unsupported"*. It now routes on the typed
+  `capability_status` (`unsupported` → `kind=unsupported`; otherwise → "I didn't understand"
+  clarification, the parse-failure case). Decision deterministic; reason text may stay as helper
+  text. (A test fixture that set `intent_type=unsupported` with `capability_status="executable"`
+  was made consistent.)
+
+Eval pipeline (two layers):
+- **Deterministic gate** — `eval_master` strips `OPENROUTER_API_KEY` for every suite except
+  `live_llm`, so no gate probe can flake on (or pay for) a network call. Verified: all 78 gate
+  probes pass with the key unset; one enforcement point replaces fragile per-probe key-pops.
+- **`live_llm` opt-in suite** (`intent_fidelity_live_llm_probe.py`, in a separate
+  `LIVE_LLM_SPECS` so it never runs under `all`): genuine model calls, **skip-if-no-key**
+  (keyless CI stays green), asserts only STABLE tool-call facts — the LLM was actually used (no
+  fallback) and produced the right `intent_type` decision — never free-text or scene-dependent
+  `command_kind`. Backend-swappable: pointing `build_compiler` at a local model (e.g. LLAMA) is a
+  backend change, not a probe change (the LLAMA swap itself is out of scope for now).
+- The deterministic `intent_fidelity_llm_operator_matrix_probe.py` (fake transport) is the parity
+  counterpart inside the gate; it forces the arbitrator offline so the gate stays reproducible.
+
+Follow-on fix (granular semantic normalization of the decision vocabulary): the live LLM emitted
+`grounding_query_plan.answer_fields=["distances"]` — the one dispatch field that was a free string
+list, not an enum — so a "distance to the doors" query parsed clean but dead-ended in compose
+("could not compose"). Fixed two ways: (1) `schemas._ensure_canonical_answer_fields` normalizes at
+the single grounding-plan parse chokepoint — conservative aliases repair near-misses
+(`"distances"→"distance"`, `"nearest"→"closest"`), ordinal forms pass through, unknown values fail
+**closed** (→ regex fallback, else honest clarify); `GROUNDING_QUERY_ANSWER_FIELDS` is the
+canonical set; (2) `_compose_grounding_query_plan` gained a branch for the `answer`+`distance`/
+`ranked` shape so it produces a ranked-distance answer instead of dead-ending. This is
+substrate-independent (shared vocabulary), the counterpart to the per-substrate domain helper.
+`tests/test_answer_field_normalization.py` covers the canonicalizer (repair, casing, ordinal
+pass-through, fail-closed) and the compose integration. The narrow "easy win"; the *full*
+audit/enum-closure of every dispatch field + the hostile-input suite remain Phase 17.
+
+Second follow-on (single-step motor sequence): live testing of a compound partial-observability
+flow ("turn right; go forward twice; closest door; go to it") surfaced that
+`go forward twice` → motor_sequence with one canonical step `["move_forward:2"]` dead-ended on a
+`len(sequence) < 2` guard in `turn_orchestrator` ("Could not parse motor sequence steps."). A
+single repeated action is valid; the guard is now `if not sequence` (execute any non-empty
+sequence; only zero parseable steps is unparseable — matching the `sequence_instruction` path).
+`tests/test_motor_sequence_single_step.py` covers single-step, multi-step, and empty. The full
+compound flow now works end-to-end under partial observability.
+
+Verification: `pytest -q tests` 308 passed; `eval_master` 78/78; `--suite live_llm` 1/1 (real
+calls, stable across runs).
+
 #### 13B spike — claim freshness under partial observability
 
 Spike-first: design reviewed and red-barred before any code. **No `FullyObsWrapper`
@@ -2175,4 +2262,35 @@ Use harder MiniGrid, real robotics, or ARC-like tasks only as architecture
 pressure tests. The goal is not benchmark chasing; the goal is to expose missing
 primitive contracts, missing claims, missing evidence, bad decomposition, and
 bad steering.
+
+### Phase 17 - Adversarial robustness & hostile-input hardening
+
+Status: later (deferred by explicit decision). **Until this phase lands, JEENOM assumes a
+good-faith operator** (see the "Threat model" note in Current Known State and the README). The
+current architecture *contains* a misbehaving/jailbroken LLM for the dangerous cases — typed
+tool-call outputs only, enum-validated decision fields, unknown primitives rejected, side effects
+gated by station-minted tickets + `IntentVerifier` semantic preservation + `ReadinessGraph`, no
+LLM in the render loop — but this containment is **not yet proven** against adversarial inputs,
+and one dispatch field (`grounding_query_plan.answer_fields`) is still an open string list.
+
+Scope when it lands:
+
+- **Close the decision vocabulary fully + fail-closed.** Audit every LLM-controlled field that
+  influences dispatch; enum-constrain or normalize it; an unknown value must produce an explicit
+  reject/clarify, never a silent dead-end or a silent reroute. (`answer_fields` is the known open
+  field — its narrow correctness/robustness fix is an *easy win* that can land before Phase 17;
+  the full audit is Phase-17 scope.)
+- **Side-effect authority proof.** Demonstrate that no LLM-controlled field *value* alone can mint
+  an `ExecutionTicket`/`RawMotorTicket`/`MemoryWriteTicket` without the utterance's semantics and
+  `ReadinessGraph` concurring — i.e. a crafted-but-schema-valid tool-call cannot route to an
+  unintended side-effectful path.
+- **Hostile tool-call / prompt-injection eval suite.** Adversarial probes (deterministic
+  fake-transport with crafted payloads + a live lane): out-of-vocabulary field values, an
+  actuation handle smuggled into a query intent, `operation`/`primitive_handle` mismatches, and
+  injection text in the operator utterance. Assert the system fails **closed** (reject/clarify,
+  zero unintended side effect) — turning "no leakage" into a continuously-verified invariant.
+- **Untrusted-input channels.** If/when JEENOM ingests text it did not originate (documents, tool
+  outputs, other agents), that becomes a distinct injection surface needing its own trust-boundary
+  handling — out of scope until such a channel exists.
+
 

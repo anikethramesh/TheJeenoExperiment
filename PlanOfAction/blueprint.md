@@ -27,6 +27,25 @@
    The runtime validates and executes.
    Unknown primitives must be rejected or corrected by fallback.
 
+   Corollary (tool-call discipline, Phase 13B.4): the LLM emits a typed *decision* (the
+   "tool call" — `OperatorIntent`/plan fields); deterministic code owns execution AND the
+   operator-facing statements. Control flow must branch on structured fields (e.g.
+   `intent_type`, `capability_status`), never on a substring search of the LLM's free text.
+   Refusals and error statements come from deterministic functions; the LLM's reason may be
+   appended as helper text but must never steer routing. Evals enforce this in two lanes: a
+   deterministic gate (`eval_master`, run with the live-LLM key stripped — always green and
+   reproducible) and an opt-in `live_llm` suite (real model calls, skip-if-no-key) that
+   asserts only the structured tool-call decision, never prose.
+
+   Threat-model scope (KNOWN LIMITATION): this discipline is *designed* to contain a
+   misbehaving/jailbroken model — typed decisions only, enum-validated decision fields, unknown
+   primitives rejected, side effects ticket-gated — but it is **not yet hardened or proven
+   against hostile prompts / prompt injection**, and one dispatch field
+   (`grounding_query_plan.answer_fields`) is still an open string list (it fails *safe* today).
+   The current assumption is a **good-faith operator**; adversarial robustness is deferred to
+   **Phase 17** (see task_plan.md). Do not run for untrusted operators or feed untrusted text
+   until that lands.
+
 6. Do not put LLM calls in the rendered control loop.
    Compile/prewarm before render.
    Runtime loop must use cached templates.
@@ -368,8 +387,10 @@ compound mission flow, the full Phase 11C architecture surgery outcomes, and
 the MiniGrid ORPI-v0.1 contract/manifest/procedure/trace/knowledge-scope
 boundary.
 
-**Verification:** 70/70 evals passing, including 9/9 ORPI probes;
-`python -m pytest -q tests` is 267 passing.
+**Verification:** deterministic gate `python evals/eval_master.py` is 78/78 passing
+(incl. 10/10 ORPI, 30/30 cleanup, 5/5 llm_path), run with the live-LLM key stripped so it
+stays reproducible; `python -m pytest -q tests` is 298 passing. The opt-in `--suite live_llm`
+(real model calls, skip-if-no-key) is 1/1 and is NOT part of the gate.
 
 Current enforced gateways:
 
