@@ -11,7 +11,7 @@ flowchart TD
   Fingerprint["Context fingerprint<br>cache/reuse boundary"]
   Cache["Plan/template cache<br>keyed by context fingerprint"]
   Slice["Compact context slice<br>only when LLM needs it"]
-  EvalLadder["Phase 11B hostile eval ladder<br>sense / spine / procedure / conditional / mission"]
+  EvalLadder["Architecture + LLM-path eval ladder<br>sense / cortex / spine / conditional / mission"]
   OrpiManifest["ORPI manifest (Phase 12)<br>SubstrateAdapter publishes OrpiContracts<br>(+ symbol_mappings / frames / units / risk_policy)"]
   Episode["LabelledEpisode (Phase 12)<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
   OrpiConf["ORPI conformance probes (Phase 12)<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
@@ -20,8 +20,10 @@ flowchart TD
   Station["OperatorStation<br>wrap as CorticalEnvelope"]
   SchemaIn["Schema gate<br>validate typed input"]
   Orch["TurnOrchestrator<br>pending-state check → route intent"]
-  IntentCache["IntentCache<br>precompiled fast-path NLU<br>(prim_def / concept_teach / concept_forget)"]
-  LLM["LLM compiler + IntentVerifier<br>slow path for unresolved utterances"]
+  IntentCache["Bounded deterministic routes<br>controls / continuations / exact compatibility patterns"]
+  LLM["Default semantic router<br>LLM strict JSON-schema OperatorIntent"]
+  Fallback["Deterministic compiler fallback<br>visible degraded-availability path"]
+  Normalize["Deterministic normalization + IntentVerifier<br>canonical vocabulary / semantic preservation"]
   Intent["OperatorIntent<br>fast or slow path merge here"]
   Dispatch["TurnOrchestrator.dispatch<br>5 knowledge_type paths<br>claim / procedure / provenance / action / control"]
   Mission["MissionCortex<br>MissionContract / MissionExecutionPlan if compound"]
@@ -40,8 +42,9 @@ flowchart TD
   Context --> Slice
 
   Start --> Station --> SchemaIn --> Orch
-  Orch -->|fast path| IntentCache --> Intent
-  Orch -->|slow path| LLM --> Intent
+  Orch -->|bounded exact route| IntentCache --> Intent
+  Orch -->|otherwise unresolved semantic input| LLM --> Normalize --> Intent
+  LLM -. "key / transport / schema failure" .-> Fallback --> Normalize
   Slice -. "compact LLM context if needed" .-> LLM
   Intent --> Dispatch
   Dispatch -->|knowledge_type=procedure/provenance| Plan
@@ -70,11 +73,16 @@ flowchart TD
   MemoryTicket --> OperatorClaim["KnowledgeBase<br>record operator claim/procedure"]
   OperatorClaim --> Snapshot
 
-  Gate -->|task executable| ExecTicket["ExecutionTicket<br>mission_id + parent_request_id when compound"]
-  ExecTicket --> Spine["Spine<br>ExecutionContract"]
+  Gate -->|task executable| ExecTicket["ExecutionTicket<br>authorizes mission/runtime entry"]
+  ExecTicket --> RuntimeLoop["Cortex runtime loop<br>sense → evaluate stop rule → choose one skill"]
+  RuntimeLoop -->|EvidenceFrame| Sense
+  Observation --> RuntimeLoop
+  RuntimeLoop --> Contract["ExecutionContract<br>one approved skill"]
+  Contract --> Spine["Spine<br>execute contract only"]
   Spine --> ActionHow["SubstrateAdapter<br>action/planner/controller HOW"]
   Substrate --> ActionHow
-  ActionHow --> ExecClaim["ExecutionClaim<br>result + provenance"]
+  ActionHow --> ExecClaim["ExecutionReport / ExecutionClaim<br>result + provenance"]
+  ExecClaim --> RuntimeLoop
   ExecClaim --> KnowledgeWrite
 
   Gate -->|explicit motor| MotorTicket["RawMotorTicket"]

@@ -9,7 +9,7 @@ Sequencing decision: do **not** begin operator-station de-bloat now, including t
 extractions. Phase 13B comes first because its partial-observability, evidence, ask-for-help,
 and claim-freshness structures should inform the eventual station boundary carving.
 
-Current state: `operator_station.py` is **5,713 lines, 165 methods, ~62 instance attributes**
+Current state: `operator_station.py` is **5,870 lines, 168 methods, ~62 instance attributes**
 on one `OperatorStationSession`. `TurnState` (13A.2.4) already extracted the 19 per-turn
 fields; `CommandAuthority`, `SideEffectAuthority`, `MissionCortex`, `TurnOrchestrator`,
 `PlanReuseCache`, `PlanCache` already exist as separate collaborators.
@@ -50,7 +50,7 @@ facade that owns the `StationRuntime` and delegates.
 
 ## Target modules
 
-Grouped from the actual 165 methods. Counts approximate; each module is a plain class taking
+Grouped from the current 168 methods. Counts approximate; each module is a plain class taking
 `StationRuntime`.
 
 | Module | ~Methods | Owns | Representative methods |
@@ -100,13 +100,15 @@ directly, run full suite, commit. A step that can't stay green is reverted and r
 - **Stop rule**: this is orthogonal to steering (13) and substrate-independence (14–15). If a
   step stalls, park it — the facade being large is acceptable while the boundaries hold.
 
-## Open questions for review
+## Accepted decisions
 
-1. `StationRuntime` as a frozen dataclass of collaborators vs. a thin object that *is* the
-   kernel — does the kernel eventually become the substrate-independent orchestration core
-   (Phase 16 goal)? Recommend: yes, `StationRuntime` is the seed of that kernel.
-2. Do we extract all 6 services, or stop after the high-value 3 (executor, factory, pending)
-   once steering/substrate proofs are done? Recommend: sequence above, but re-evaluate after
-   step 5 — value may be banked before the hardest step.
-3. Is this pulled fully into Phase 16, or do steps 0–2 (the safe leaves) land opportunistically
-   now since 13A.2.4 already started the state work? Owner's call.
+1. `StationRuntime` is the seed of the eventual substrate-independent orchestration kernel,
+   not merely a collaborator bag.
+2. The ordered extraction sequence remains the working design, with a value/risk review after
+   step 5 before taking on the highest-coupling pending-flow and orchestrator rewiring.
+3. All station de-bloat, including the safe leaves, remains parked until Phase 16 unless a
+   concrete regression forces an earlier boundary fix.
+4. Phase 13B conditional evidence execution must use the current typed control plane:
+   `ExecutionTicket` admits the mission; Cortex owns the sense/evaluate/act loop and issues
+   per-step `ExecutionContract`s; Spine executes those contracts. This work must not be used as
+   a pretext to begin the service extraction.

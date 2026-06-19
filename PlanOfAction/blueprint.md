@@ -27,21 +27,51 @@
    The runtime validates and executes.
    Unknown primitives must be rejected or corrected by fallback.
 
-   Corollary (tool-call discipline, Phase 13B.4): the LLM emits a typed *decision* (the
-   "tool call" — `OperatorIntent`/plan fields); deterministic code owns execution AND the
-   operator-facing statements. Control flow must branch on structured fields (e.g.
-   `intent_type`, `capability_status`), never on a substring search of the LLM's free text.
-   Refusals and error statements come from deterministic functions; the LLM's reason may be
-   appended as helper text but must never steer routing. Evals enforce this in two lanes: a
-   deterministic gate (`eval_master`, run with the live-LLM key stripped — always green and
-   reproducible) and an opt-in `live_llm` suite (real model calls, skip-if-no-key) that
-   asserts only the structured tool-call decision, never prose.
+   **Default router contract (Phase 13B.4):** the Operator Station defaults to
+   `compiler=llm`. Bounded deterministic paths may resolve exact control commands,
+   session continuations, precompiled `IntentCache` patterns, and the existing
+   legacy exact-command/status compatibility surface. Every unresolved semantic
+   utterance routes through `LLMCompiler.compile_operator_intent`; it is not supposed
+   to be implemented by adding another broad regex branch. "Default router" therefore
+   means the default open-ended semantic route, not necessarily the first parser to
+   inspect every byte of every control utterance.
+
+   The LLM call uses strict `response_format=json_schema` and emits a typed *decision*
+   (the architecture's "tool call": `OperatorIntent` and plan fields), never executable
+   prose. The current OpenRouter transport uses structured JSON-schema output rather than
+   provider-side function invocation; the architectural requirement is the same: the model
+   may select only a validated typed decision, never execute the selected capability.
+   Deterministic code then canonicalizes schema vocabulary, runs `IntentVerifier`,
+   capability matching, `RequestPlan`/`ReadinessGraph`, dispatch, and ticket issuance.
+   The same normalized tool-call vocabulary and deterministic execution path apply to
+   both LLM output and deterministic fallback output.
+
+   Deterministic code owns execution and operator-facing statements. Control flow must
+   branch on structured fields such as `intent_type` and `capability_status`, never on
+   a substring search of the LLM's `reason`. Refusals and errors come from deterministic
+   formatters; model reasoning may be retained for trace/debugging but cannot grant
+   authority or choose operator-facing behavior.
+
+   Fallback is a degraded availability path, not the default semantic router. Missing
+   credentials, transport errors, truncation, schema rejection, or unknown vocabulary
+   may invoke the deterministic compiler, but the station must expose that fallback in
+   the startup banner, per-turn logs, compiler call history, and route-provenance evals.
+   A silent LLM-to-regex fallback is an architectural regression.
+
+   Evals enforce this in three lanes:
+   - the offline deterministic gate, with the live key stripped
+   - the `llm_path` suite, which forces fake transport through `LLMCompiler` and checks
+     post-LLM semantic normalization plus deterministic parity
+   - the opt-in `live_llm` suite, which proves a real model produced the structured
+     decision without fallback
 
    Threat-model scope (KNOWN LIMITATION): this discipline is *designed* to contain a
    misbehaving/jailbroken model — typed decisions only, enum-validated decision fields, unknown
-   primitives rejected, side effects ticket-gated — but it is **not yet hardened or proven
-   against hostile prompts / prompt injection**, and one dispatch field
-   (`grounding_query_plan.answer_fields`) is still an open string list (it fails *safe* today).
+   primitives rejected, semantic verification, readiness, and side effects ticket-gated — but
+   it is **not yet hardened or proven against hostile prompts / prompt injection**.
+   `grounding_query_plan.answer_fields`, the previously known open decision vocabulary,
+   is now canonicalized and fails closed; that narrow fix is not a substitute for a full
+   audit of every LLM-controlled dispatch field or for adversarial side-effect proofs.
    The current assumption is a **good-faith operator**; adversarial robustness is deferred to
    **Phase 17** (see task_plan.md). Do not run for untrusted operators or feed untrusted text
    until that lands.
@@ -99,8 +129,9 @@
     invalidation policy:
 
     - Grounding claims (StationActiveClaims) — derived from scene observation.
-      Session-scoped. Tied to a scene fingerprint (agent pose + step count).
-      Invalidated when the scene changes.
+      Session-scoped. Their freshness distinguishes current, unverifiable,
+      stale, and unknown evidence. Looking away is not the same as a world or
+      environment change.
     - Operator claims (KnowledgeBase, OperationalMemory.knowledge) — asserted directly
       by the operator. Durable across session restarts. Invalidated only by explicit
       operator retraction (forget, clear memory). Named concepts and delivery-target
@@ -195,9 +226,9 @@
     deterministic fast paths, LLM intent compilation, request-plan recording,
     readiness dispatch, clarification/synthesis resume, memory writes, MiniGrid
     adapter ownership, and runtime task execution. Phase 9D made those paths
-    ticket-gated. Phase 9E must enforce block, schema, and knowledge boundaries
-    before Phase 10 extracts the station into a substrate-independent
-    orchestration kernel plus substrate/domain adapters.
+    ticket-gated; Phase 9E enforced block, schema, and knowledge boundaries;
+    Phase 10 extracted the first runtime/context/domain/orchestration collaborators.
+    The remaining state-first decomposition is designed and banked for Phase 16.
 
 14. Separate WHY, WHAT, and HOW.
     The operator, mission, and safety policy steer WHY. JEENOM owns WHAT.
@@ -309,7 +340,7 @@ track. Claims are the universal I/O at every level boundary.
 needs from `SENSORY_COMMANDS` registry to build `EvidenceFrame` requests to Sense.
 
 **Claims**: Every level produces and consumes typed Claim objects (`ObservationClaim` for sensory
-outputs, `ExecutionClaim` for motor outputs). Phase 9E must make these available through one
+outputs, `ExecutionClaim` for motor outputs). Phase 9E made these available through one
 representation surface. The current repo still has historical pockets: Cortex-local claims,
 station active claims, durable operator memory, named concepts/procedures, and scene snapshots.
 Those may remain internally, but architecture blocks should use the representation API rather
@@ -379,22 +410,34 @@ ARC-AGI3:
 - HOW: ARC game-state API, legal action API, state parser, replay/simulation
   tools, scoring/end-state feedback.
 
-## Current Repo Shape After Phase 12 ORPI v0.1 Completion
+## Current Repo Shape During Phase 13B
 
 The implementation now enforces the cortical control-plane objects, the
 block/schema/knowledge boundary gates, the substrate HOW boundary, Cortex-owned
-compound mission flow, the full Phase 11C architecture surgery outcomes, and
-the MiniGrid ORPI-v0.1 contract/manifest/procedure/trace/knowledge-scope
-boundary.
+compound mission flow, the full Phase 11C architecture surgery outcomes, the
+MiniGrid ORPI-v0.1 contract/manifest/procedure/trace/knowledge-scope boundary,
+and the first four Phase 13B slices: claim freshness, MiniGrid FOV, typed
+`needs_evidence`, and deterministic/LLM-path eval discipline.
 
 **Verification:** deterministic gate `python evals/eval_master.py` is 78/78 passing
 (incl. 10/10 ORPI, 30/30 cleanup, 5/5 llm_path), run with the live-LLM key stripped so it
-stays reproducible; `python -m pytest -q tests` is 298 passing. The opt-in `--suite live_llm`
+stays reproducible; `python -m pytest -q tests` is 312 passing. The opt-in `--suite live_llm`
 (real model calls, skip-if-no-key) is 1/1 and is NOT part of the gate.
 
 Current enforced gateways:
 
 - Operator turns return `CommandResult`.
+- The Operator Station defaults to the LLM compiler; unresolved semantic turns
+  pass through strict JSON-schema `OperatorIntent` compilation. Deterministic
+  paths remain bounded to controls, continuations, exact/cached compatibility
+  patterns, and explicit fallback; that surface must not expand to implement new
+  semantic capabilities.
+- LLM and deterministic outputs converge before authority: canonical schema
+  normalization, `IntentVerifier`, capability/readiness checks, deterministic
+  dispatch, and typed tickets own the result.
+- Compiler fallback is observable through startup/per-turn logging and
+  `call_history`; the `llm_path` and `live_llm` suites guard against silent
+  fallback and regex-only feature coverage.
 - Each recorded command result carries a `CorticalEnvelope`.
 - Task execution requires `ExecutionTicket`.
 - Raw motor execution requires `RawMotorTicket`.
@@ -428,6 +471,10 @@ Current enforced gateways:
   continuation intent/plan/graph, provenance, and child execution tickets.
 - `ExecutionTicket` carries optional `mission_id`, `parent_request_id`, and
   provenance so final actuation can explain the full mission lineage.
+- Interactive preview, explicit motor commands, idle sensing, and task execution
+  reuse one live substrate adapter. Task admission does not reset the world;
+  typed `reset` is the explicit episode boundary, and `Ctrl+C` closes the
+  synchronous session cleanly.
 - **[11C]** `TurnOrchestrator.dispatch` routes via 5 `knowledge_type` paths
   (`claim` / `procedure` / `provenance` / `action` / `control`); no
   `intent_type` if/elif chain.
@@ -446,7 +493,7 @@ Current enforced gateways:
 - **[11C]** `PrimitiveSpec.postcondition_primitive`, `ClaimRecord.valid_until`,
   `MissionContract.risk_tier` / `cadence`, `CommandResult.failure_outcome`, and
   `FailureOutcome` dataclass are in `schemas.py`.
-- **[11C/12]** Eval naming contract enforced: all 70 probes use capability-based
+- **[11C/12/13B]** Eval naming contract enforced: all registered probes use capability-based
   prefixes (`authority_`, `claim_custody_`, `intent_fidelity_`, `pipeline_`,
   `regression_`, `repair_`, `substrate_`, `synthesis_`).
 - **[12]** ORPI v0.1 (`PlanOfAction/orpi_spec.md`) has a compat bridge:
@@ -477,7 +524,7 @@ Current enforced gateways:
 Current architectural debt:
 
 - Structural bloat (parked, orthogonal to both proofs):
-  - `OperatorStationSession` is still a large facade (~5,613 lines) over
+  - `OperatorStationSession` is still a large facade (~5,870 lines / 168 methods) over
     orchestration, conversation, MiniGrid substrate bindings, query formatting,
     repair/synthesis, memory writes, and task runtime. Only ~67 lines are
     substrate-coupled; the rest is large-but-generic. The de-bloat is deferred to
@@ -502,19 +549,23 @@ Current architectural debt:
   - Contract preflight is represented and gated, but not yet a general executable
     proof system for arbitrary robot stacks.
 
-Phase 12, 12B, and 12C are complete for MiniGrid ORPI v0.1. The current phase is
-**Phase 12D - Consolidation + Leak Audit**: close v0.1 cleanly (doc-label
-unification to v0.1, `LabelledEpisode` attribution-taxonomy + postcondition
-verification, the diagram emission-node fix) and produce the leak audit that
-orders everything after it.
+Phase 12 and 12D are complete for MiniGrid ORPI v0.1. The current phase is
+**Phase 13B - Partial observability, evidence gathering, and ask-for-help**.
+Claim freshness, MiniGrid FOV, `needs_evidence`, LLM-path parity, and interactive
+episode continuity are implemented. The next slice is a typed conditional
+evidence mission: Sense produces fresh target evidence, Cortex evaluates the
+stop rule and issues one `ExecutionContract` at a time, and Spine executes only
+that contract. Today `conditional_sense_motor` is only a conservative
+non-actuation/clarification gate; it is not yet an executing procedure. Broader
+autonomous `search_allowed` behavior follows separately.
 
 Phase order from here, and the reasoning behind it:
 
-- **12D Consolidation + Leak Audit.** The audit separates two orthogonal problems
+- **12D Consolidation + Leak Audit (complete).** The audit separates two orthogonal problems
   and tags every substrate-coupling site
   `{cheap | structural} x {curriculum-touching | not}`. That table - not an
   assumption - decides whether the curriculum can precede leak removal.
-- **13 Steered Curriculum (MiniGrid).** Proves *steering* under partial
+- **13 Steered Curriculum (MiniGrid, current).** Proves *steering* under partial
   observability. Any leak the curriculum would build on top of is removed first
   (curriculum-touching, per the 12D audit), so the curriculum never entrenches a
   leak.
@@ -533,10 +584,10 @@ Phase order from here, and the reasoning behind it:
 Two standing rules from this reorientation:
 
 - **Bloat is orthogonal to both proofs and is parked.** The `operator_station.py`
-  size (~5,613 lines, of which only ~67 are substrate-coupled) blocks neither
+  size (~5,870 lines, with only a small substrate-coupled portion) blocks neither
   steering nor substrate-independence, so it does not compete for phase position.
   No early de-bloat - wanting the file smaller is not a reason to take on a
-  5,600-line refactor ahead of either proof.
+  repo-scale station refactor ahead of either proof.
 - **Decomposition-design gate.** Any `operator_station.py` extraction - whenever
   it lands - is gated by a decomposition design (target modules, shared-state map,
   ordered green-able extraction sequence) written and reviewed first. No station

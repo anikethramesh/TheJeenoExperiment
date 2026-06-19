@@ -31,13 +31,16 @@ Elon-algorithm rule for this repo:
   **13B in progress**: 13B.1 claim freshness, 13B.2 MiniGrid FOV, 13B.3 `needs_evidence`,
   and 13B.4 eval-pipeline + tool-call discipline (deterministic gate + opt-in `live_llm`
   suite; root-caused and fixed a silent LLM→regex fallback from a `max_tokens` truncation)
-  are complete; the remaining 13B work is the meta-primitive / `search_allowed` decision).
+  are complete. Interactive episode continuity is also fixed. The next implementation slice is
+  **13B.5: a typed conditional evidence mission** for requests such as "go straight until you
+  see a blue door." It must compose sensing, Cortex stop-condition evaluation, and one-step Spine
+  contracts; bounded general search/meta-primitives remain the following 13B decision).
   13A delivered the typed, constraint-first steering layer
   (`SteeringDirective`: budget/scope/risk/stopping-rule) that demonstrably reshapes plan
   assembly — risk withdraws actuation authority via `needs_authorization`, budget caps
   the Spine stepping loop as `FailureOutcome(category="budget_exhausted")`, and the active
   directive is recorded in `LabelledEpisode.steering`. Proven by the hostile
-  `pipeline_steering_directive_probe.py`; 71/71 evals green.
+  `pipeline_steering_directive_probe.py`.
   Phase 12D is complete (12D.1–12D.4): ORPI v0.1 label unified, `LabelledEpisode`
   attribution + verification wired (ORPI taxonomy, named checker path), coupling
   audit produced, curriculum-touching leaks removed, two cheap non-curriculum-touching
@@ -78,8 +81,10 @@ Elon-algorithm rule for this repo:
   `MissionCortex`, typed `MissionExecutionPlan`, mission-linked
   `ExecutionTicket` provenance, and hostile mission-flow eval coverage.
 - Phase 11B is complete. Hostile primitive/mission evals now prove paraphrase
-  stability, typed procedure teaching, conditional Sense-before-Spine gating,
-  multi-action lineage, and compound mission provenance.
+  stability, typed procedure teaching, conditional Sense-before-Spine
+  **non-actuation gating**, multi-action lineage, and compound mission provenance.
+  That conditional guard does not yet implement an executing sense/act/stop loop;
+  13B.5 owns that capability.
 - Phase 11C is complete. Seven compounding architectural violations resolved
   (import partition, domain purge, TurnOrchestrator dispatch extraction,
   knowledge-type rerouting, IntentCache, Readiness deletion, eval naming
@@ -97,7 +102,19 @@ Elon-algorithm rule for this repo:
   - `python evals/eval_master.py --suite llm_path`: 5/5 passing
   - `python evals/eval_master.py --suite live_llm`: 1/1 passing (opt-in; REAL model calls,
     skips when `OPENROUTER_API_KEY` is unset — NOT part of the gate)
-  - `python -m pytest -q tests`: 298 passed, 1 warning, 9 subtests passed
+  - `python -m pytest -q tests`: 312 passed, 1 warning, 12 subtests passed
+- Operator routing contract:
+  - `run_operator_station.py` and `OperatorStationSession` default to `compiler=llm`
+  - bounded deterministic controls, pending-flow continuations, and exact
+    `IntentCache`/legacy compatibility patterns may resolve before model compilation
+  - every otherwise unresolved semantic utterance routes through strict
+    JSON-schema `LLMCompiler.compile_operator_intent`
+  - LLM and deterministic fallback outputs converge through canonicalization,
+    `IntentVerifier`, capability/readiness evaluation, deterministic dispatch,
+    and typed ticket authority
+  - fallback is permitted for availability, but it must be visible in the
+    startup banner, per-turn warning, compiler history, and eval route provenance;
+    silent fallback or regex-only semantic coverage is a regression
 - Eval naming contract is now enforced: all registered eval files use
   capability-based prefixes. The naming contract probe fails on violation.
 - Whole-repo `pytest` is not the main project signal right now because the local
@@ -108,9 +125,12 @@ Elon-algorithm rule for this repo:
   enum-validated decision fields, unknown primitives rejected, side effects gated by
   station-minted tickets + `IntentVerifier` + `ReadinessGraph`, no LLM in the render loop),
   but this is **not yet hardened or proven against hostile prompts / prompt injection /
-  jailbreaks**, and one dispatch field (`grounding_query_plan.answer_fields`) is still an
-  open string list (it fails *safe* today — silent dead-end, no side effect). Adversarial
-  hardening is deferred to **Phase 17** ("Adversarial robustness & hostile-input hardening").
+  jailbreaks**. The previously known `grounding_query_plan.answer_fields` gap is fixed:
+  values are canonicalized at schema ingress and unknown values fail closed. The remaining
+  limitation is broader: not every LLM-controlled dispatch field has undergone a complete
+  hostile-input audit, and side-effect containment has not been proven against crafted,
+  schema-valid tool calls. Adversarial hardening is deferred to **Phase 17**
+  ("Adversarial robustness & hostile-input hardening").
   Do not deploy to untrusted operators or feed it untrusted text until that lands.
 
 ## Core Invariants
@@ -203,9 +223,11 @@ Added durable delivery-target knowledge and episodic references such as
 
 Current semantic decision:
 
-- each task starts from fresh task-episode semantics for now
-- continuous-world task chaining is future work
+- interactive motor commands, idle sensing, and task execution share one live environment episode
+- starting a task must not reset or recreate the substrate adapter
+- the typed `reset` command is the only REPL command that recreates the seeded environment
 - reset clears episodic context but keeps durable operator claims by default
+- `Ctrl+C` interrupts the synchronous REPL/task run and session shutdown closes render resources
 
 ### Phase 7 - Understanding, Readiness, And Synthesis
 
@@ -924,6 +946,8 @@ Acceptance criteria:
 
 Measured outcome:
 
+Historical Phase-10I baseline at the time this slice landed:
+
 - `python evals/phase10i_user_defined_metric_probe.py`: passing.
 - `python -m pytest -q tests/test_phase10i_user_defined_metrics.py`: 9 passed.
 - `python evals/eval_master.py --suite cleanup`: 25/25 passing.
@@ -1543,12 +1567,12 @@ set in a generic file), `sense.py`/`spine.py` (`MiniGridSense`/`MiniGridSpine`
 role bindings), `request_planner.py` (`rank_scene_doors`).
 
 **Structural bloat (orthogonal - parked).** The `operator_station.py` size
-(~5,613 lines / 178 methods, of which only ~67 are substrate-coupled) is a
+(~5,870 lines / 168 methods, with only a small substrate-coupled portion) is a
 *different* problem. It blocks neither proof - steering or substrate-independence
 - so it does **not** compete for position in the phase order. The audit still
 catalogs it as the worklist for the eventual cut, but **de-bloating is deferred to
 Operational Hardening (Phase 16) in full**. Wanting the file smaller is not a
-reason to take on a 5,600-line refactor ahead of either proof.
+reason to take on a repo-scale station refactor ahead of either proof.
 
 **Hard prerequisite:** any `operator_station.py` extraction - whenever it happens,
 in Phase 16 or pulled forward by a `structural` + `curriculum-touching` audit
@@ -1606,8 +1630,8 @@ Minimum loop (carried across the sub-phases):
 
 Status: **complete**. Same WHAT + different typed steering => different typed
 `RequestPlan`/`ReadinessGraph`; a conflicting directive clarifies/refuses instead of
-executing. Proven by the hostile `pipeline_steering_directive_probe.py` (eval-first;
-71/71 green).
+executing. Proven by the eval-first hostile `pipeline_steering_directive_probe.py`,
+which remains in the deterministic gate.
 
 Delivered:
 
@@ -1857,7 +1881,7 @@ Next implementation focus: **13B**.
 ### 13B - Partial observability + ask-for-help + meta primitives
 
 Status: in progress. Makes steering *necessary* (omniscient answers become impossible, so
-JEENOM must search/ask). Gives `scope` steering its teeth (`visible_only` vs
+JEENOM must gather evidence or ask). Gives `scope` steering its teeth (`visible_only` vs
 `search_allowed`). Workstreams:
 
 - MiniGrid FOV: stop parsing the whole grid in `sense.py`; introduce a
@@ -1869,6 +1893,8 @@ JEENOM must search/ask). Gives `scope` steering its teeth (`visible_only` vs
   `searched_region`, `reachability`, `behind` — infer claims from observed claims
   (produces the `inferred` **status**).
 - Claim freshness under partial observability — the reviewed spike below.
+- Conditional evidence missions — compile an operator stop condition plus an allowed actuation
+  into a typed mission/task contract and a Cortex-owned sense/evaluate/act procedure.
 
 #### 13B.1 — claim freshness kernel under partial observability
 
@@ -1963,6 +1989,23 @@ and the genuine LLM path, on the principle that **the LLM emits typed tool-call 
 deterministic code owns execution + operator-facing statements** (the LLM is plumbing for
 decisions, not a prose generator).
 
+Routing rule established by this slice:
+
+- The interactive Operator Station defaults to `compiler=llm`.
+- Deterministic routing is intentionally bounded to exact controls, pending continuations,
+  precompiled `IntentCache` patterns, and a small legacy exact-command/status surface.
+  This surface is compatibility code, not the place to add new semantic features.
+- Otherwise-unresolved semantic input must call `LLMCompiler.compile_operator_intent` using
+  strict JSON-schema structured output.
+- The LLM does not select Python functions or execute a tool directly. Its typed decision enters
+  the same deterministic normalization, verification, readiness, dispatch, and ticket pipeline
+  as the smoke compiler.
+- Adding broad regex behavior that bypasses the LLM route or its parity eval is architectural
+  drift. Adding a new intent requires both deterministic and LLM-path coverage.
+- Compiler fallback remains available for missing credentials, transport/schema failure, or
+  rejected vocabulary, but fallback must be observable and must never be mistaken for a live
+  LLM success.
+
 Headline root cause found + fixed: the LLM path was **silently falling back to regex on every
 task compile**. `compile_operator_intent` was capped at `max_tokens=256`; the strict
 `json_schema` `OperatorIntent` (26 fields) overflowed it → JSON truncated mid-response → parse
@@ -2022,8 +2065,57 @@ sequence; only zero parseable steps is unparseable — matching the `sequence_in
 `tests/test_motor_sequence_single_step.py` covers single-step, multi-step, and empty. The full
 compound flow now works end-to-end under partial observability.
 
-Verification: `pytest -q tests` 308 passed; `eval_master` 78/78; `--suite live_llm` 1/1 (real
-calls, stable across runs).
+Verification after the continuity follow-up: `pytest -q tests` 312 passed;
+`eval_master` 78/78. The opt-in `--suite live_llm` remains 1/1 when run with a configured
+backend.
+
+#### 13B.5 — conditional evidence mission contract
+
+Status: **next; not implemented yet.**
+
+Current repo gap: `conditional_sense_motor` can be classified, but
+`TurnOrchestrator` currently resolves it to clarification/non-actuation rather than a runnable
+procedure. The LLM operator matrix verifies this conservative gate only. Any observed movement
+from a phrase such as "turn right and go straight until..." came from the ordinary motor-sequence
+parser discarding the stop clause, not from a genuine conditional mission.
+
+Target operator request: "go straight until you see a blue door." This is not a raw repeated
+motor command and it is not permission for unconstrained global search. It is a typed,
+bounded conditional mission:
+
+1. The compiler emits the target evidence predicate, allowed actuation, stopping rule, and budget.
+2. The station/readiness path validates the mission and issues an `ExecutionTicket` authorizing
+   runtime entry.
+3. The procedure requests fresh target-visibility evidence from Sense.
+4. Cortex evaluates the stop condition before every actuation.
+5. If satisfied, Cortex completes the procedure without issuing another motor contract.
+6. If unsatisfied and still within budget, Cortex issues exactly one `ExecutionContract` for the
+   allowed action; Spine executes it and returns an `ExecutionReport`.
+7. The procedure repeats from sensing. Budget exhaustion or no progress produces a typed failure,
+   never an unbounded spin.
+
+Architecture boundary:
+
+- Sense owns observation-to-claim grounding for the requested target.
+- Cortex owns the loop, stop decision, and per-step `ExecutionContract`.
+- Spine owns only execution of the single contract it receives.
+- The station/side-effect authority owns mission admission and the `ExecutionTicket`; it does not
+  implement the loop.
+- The LLM may compile the typed mission fields, but it never runs inside the loop.
+
+Required red bars:
+
+- the initial observation already satisfies the condition -> zero actuation
+- false condition -> one Sense pass before one Spine action
+- newly visible target -> stop before the next action
+- deterministic and LLM routes normalize to the same mission contract
+- task starts from the current live pose and does not reset the adapter
+- budget/no-progress termination is typed and finite
+- no phrase-specific MiniGrid branch in station orchestration
+
+After this slice, decide the broader `search_allowed` procedure and deterministic meta-primitives.
+General search may choose actions; this conditional mission may execute only the operator-specified
+action.
 
 #### 13B spike — claim freshness under partial observability
 
@@ -2245,8 +2337,9 @@ Planned work:
 
 ### Bloat worklist (station extraction sketch — for design phase only)
 
-`operator_station.py` is ~5,613 lines / 178 methods; only ~67 are substrate-coupled
-(handled in Phase 14). The rest is substrate-independent orchestration.
+`operator_station.py` is ~5,870 lines / 168 methods; only a small portion is
+substrate-coupled (handled in Phase 14). The rest is substrate-independent
+orchestration.
 
 | Candidate module | ~Methods | Notes |
 |---|---|---|
@@ -2277,16 +2370,17 @@ good-faith operator** (see the "Threat model" note in Current Known State and th
 current architecture *contains* a misbehaving/jailbroken LLM for the dangerous cases — typed
 tool-call outputs only, enum-validated decision fields, unknown primitives rejected, side effects
 gated by station-minted tickets + `IntentVerifier` semantic preservation + `ReadinessGraph`, no
-LLM in the render loop — but this containment is **not yet proven** against adversarial inputs,
-and one dispatch field (`grounding_query_plan.answer_fields`) is still an open string list.
+LLM in the render loop — but this containment is **not yet proven** against adversarial inputs.
+The known `grounding_query_plan.answer_fields` near-miss has been closed by canonicalization and
+fail-closed validation; Phase 17 is the full decision-vocabulary and authority audit, not that
+single field repair.
 
 Scope when it lands:
 
 - **Close the decision vocabulary fully + fail-closed.** Audit every LLM-controlled field that
   influences dispatch; enum-constrain or normalize it; an unknown value must produce an explicit
-  reject/clarify, never a silent dead-end or a silent reroute. (`answer_fields` is the known open
-  field — its narrow correctness/robustness fix is an *easy win* that can land before Phase 17;
-  the full audit is Phase-17 scope.)
+  reject/clarify, never a silent dead-end or a silent reroute. Use the completed
+  `answer_fields` canonicalizer as the reference pattern; the full audit remains Phase-17 scope.
 - **Side-effect authority proof.** Demonstrate that no LLM-controlled field *value* alone can mint
   an `ExecutionTicket`/`RawMotorTicket`/`MemoryWriteTicket` without the utterance's semantics and
   `ReadinessGraph` concurring — i.e. a crafted-but-schema-valid tool-call cannot route to an
@@ -2299,4 +2393,3 @@ Scope when it lands:
 - **Untrusted-input channels.** If/when JEENOM ingests text it did not originate (documents, tool
   outputs, other agents), that becomes a distinct injection surface needing its own trust-boundary
   handling — out of scope until such a channel exists.
-

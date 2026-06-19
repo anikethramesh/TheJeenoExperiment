@@ -15,15 +15,17 @@ flowchart LR
   REG["CapabilityRegistry<br>contracts + context task families"]
   FP["Context fingerprint<br>cache / reuse boundary"]
   SLICE["Compact context slice<br>LLM only when needed"]
-  TEST["Phase 11B hostile eval ladder<br>same flow under paraphrases"]
+  TEST["Architecture + LLM-path eval ladder<br>same typed flow under paraphrases"]
   ORPI["ORPI contract boundary (Phase 12)<br>SubstrateAdapter publishes OrpiContracts via OrpiManifest"]
   EP["LabelledEpisode (Phase 12)<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
   CONF["ORPI conformance probes (Phase 12)<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
 
   subgraph ARCH["JEENOM WHAT"]
     TO["TurnOrchestrator<br>dispatch: 5 knowledge_type paths"]
-    IC["IntentCache<br>fast-path NLU (prim_def / concept_teach / forget)"]
-    CX["Cortex / LLM compiler + IntentVerifier<br>slow path: plan, repair, synthesize, ask"]
+    IC["Bounded deterministic routes<br>controls / continuations / exact compatibility patterns"]
+    LLM["Default semantic router<br>strict JSON-schema OperatorIntent"]
+    FB["Deterministic compiler fallback<br>visible degraded-availability path"]
+    CX["Cortex + IntentVerifier<br>normalize, plan, repair, synthesize, ask"]
     MC["MissionCortex<br>MissionContract / MissionExecutionPlan<br>compound mission lineage"]
     RG["ReadinessGraph<br>execute / ask / refuse / gather evidence"]
     KB["KnowledgeBase<br>claims + procedures + provenance"]
@@ -39,9 +41,10 @@ flowchart LR
 
   OP -->|CorticalEnvelope| MSG
   MSG --> TO
-  TO -->|fast path hit| IC --> TO
-  TO -->|slow path miss| CX --> TO
-  SLICE -. "only for compile / repair / synthesis" .-> CX
+  TO -->|bounded exact route| IC --> TO
+  TO -->|otherwise unresolved semantic input| LLM --> CX --> TO
+  LLM -. "key / transport / schema failure" .-> FB --> CX
+  SLICE -. "only for compile / repair / synthesis" .-> LLM
   TO -->|knowledge_type=action + compound| MC
   TO -->|knowledge_type=action simple / procedure / provenance| RG
   MC -->|RequestPlan + provenance| RG
@@ -59,11 +62,16 @@ flowchart LR
   SE -->|ObservationClaim| MSG
   MSG --> KB
 
-  RG -->|ExecutionTicket + mission lineage + ExecutionContract| MSG
+  RG -->|ExecutionTicket + mission lineage| MSG
+  MSG -->|authorize runtime entry| CX
+  CX -->|EvidenceFrame| MSG
+  MSG --> SE
+  CX -->|one ExecutionContract after fresh evidence| MSG
   MSG --> SP
   SP -->|action HOW| SUB
   SUB -->|execution result| SP
   SP -->|ExecutionClaim| MSG
+  MSG -->|ExecutionReport feedback| CX
   MSG --> KB
 
   RG -->|MemoryWriteTicket| MSG
