@@ -1,18 +1,23 @@
 # Operator-Station Decomposition Design (Phase 16 gate artifact)
 
+This file is the accepted design for the deferred Phase 16 refactor. It does not track the
+current roadmap; see [task_plan.md](task_plan.md) for phase status.
+
 Status: **accepted and banked.** This is the hard-prerequisite design the plan requires before
 *any* `operator_station.py` code moves. It defines target modules, the shared-state map, the
 `TurnOrchestrator` coupling fix, and an ordered green-able extraction sequence. It does not
 move code; it is the reviewed gate artifact for Phase 16.
 
-Sequencing decision: do **not** begin operator-station de-bloat now, including the safe leaf
-extractions. Phase 13B comes first because its partial-observability, evidence, ask-for-help,
-and claim-freshness structures should inform the eventual station boundary carving.
+Sequencing decision: do **not** begin operator-station de-bloat before Phase 16, including the
+safe leaf extractions. The active evidence, mission-termination, search, curriculum, and
+cross-substrate work must shape the kernel boundary before code moves.
 
-Current state: `operator_station.py` is **5,870 lines, 168 methods, ~62 instance attributes**
-on one `OperatorStationSession`. `TurnState` (13A.2.4) already extracted the 19 per-turn
-fields; `CommandAuthority`, `SideEffectAuthority`, `MissionCortex`, `TurnOrchestrator`,
-`PlanReuseCache`, `PlanCache` already exist as separate collaborators.
+Snapshot at the current repository head: `operator_station.py` is **5,923 lines and 167 methods**.
+`OperatorStationSession.__init__` directly initializes 41 attributes, while additional turn and
+pending fields are property-backed. `TurnState` already owns the per-turn trace fields;
+`CommandAuthority`, `SideEffectAuthority`, `MissionCortex`, `TurnOrchestrator`,
+`PlanReuseCache`, and `PlanCache` already exist as separate collaborators. These counts are
+diagnostic only; shared ownership is the problem, not the precise file length.
 
 ## Non-negotiable constraints (every extraction step must hold these)
 
@@ -28,7 +33,7 @@ fields; `CommandAuthority`, `SideEffectAuthority`, `MissionCortex`, `TurnOrchest
 ## The core problem: shared mutable state, not file length
 
 The reason this is high-blast-radius is one god-object passed around. `TurnOrchestrator`
-already reaches into **58 distinct session members (20 private)**. Naively moving methods into
+currently reaches into **61 distinct session members (23 private)**. Naively moving methods into
 new classes multiplies that coupling. So the design is **state-first**: define the shared
 surface explicitly, then methods follow their state.
 
@@ -50,7 +55,7 @@ facade that owns the `StationRuntime` and delegates.
 
 ## Target modules
 
-Grouped from the current 168 methods. Counts approximate; each module is a plain class taking
+Grouped from the current 167 methods. Counts approximate; each module is a plain class taking
 `StationRuntime`.
 
 | Module | ~Methods | Owns | Representative methods |
@@ -108,7 +113,7 @@ directly, run full suite, commit. A step that can't stay green is reverted and r
    step 5 before taking on the highest-coupling pending-flow and orchestrator rewiring.
 3. All station de-bloat, including the safe leaves, remains parked until Phase 16 unless a
    concrete regression forces an earlier boundary fix.
-4. Phase 13B conditional evidence execution must use the current typed control plane:
+4. Conditional evidence execution uses the current typed control plane:
    `ExecutionTicket` admits the mission; Cortex owns the sense/evaluate/act loop and issues
    per-step `ExecutionContract`s; Spine executes those contracts. This work must not be used as
    a pretext to begin the service extraction.
