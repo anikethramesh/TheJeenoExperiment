@@ -6,7 +6,7 @@ from typing import Any
 
 from . import fingerprint as _fp
 from .capability_registry import CapabilityRegistry
-from .planning_semantics import PlanningSemantics
+from .planning_semantics import PlanningSemantics, default_planning_semantics
 from .readiness_graph import evaluate_request_plan
 from .request_planner import build_request_plan
 from .schemas import (
@@ -180,8 +180,16 @@ def _continuation_intent(
     utterance: str,
     request: PrimitiveDefinitionRequest,
     expression: dict[str, Any],
+    planning_semantics: PlanningSemantics,
 ) -> OperatorIntent | str:
     normalized = _normalize_utterance(utterance)
+    object_type = (
+        planning_semantics.object_type_from_text(normalized)
+        or planning_semantics.default_object_type
+    )
+    if object_type is None:
+        return "The operational context does not declare an object type for this mission."
+    object_type_plural = planning_semantics.pluralize(object_type)
     wants_task = bool(
         re.search(r"\b(go to|go the|reach|find|get to|head to|navigate to)\b", normalized)
     )
@@ -196,7 +204,11 @@ def _continuation_intent(
         ordinal = 1
     is_rank_query = bool(
         re.search(r"\b(rank|list|show)\b", normalized)
-        or re.search(r"\b(all|every|each)\b.{0,30}\bdoors?\b", normalized)
+        or re.search(
+            rf"\b(all|every|each)\b.{{0,30}}\b"
+            rf"(?:{re.escape(object_type)}|{re.escape(object_type_plural)})\b",
+            normalized,
+        )
     )
     if wants_task and direction is None:
         return (
@@ -206,7 +218,10 @@ def _continuation_intent(
     operation = "select" if wants_task else "rank" if is_rank_query and direction is None else "answer"
     required = [request.proposed_handle]
     if wants_task:
-        required.append("task.go_to_object.door")
+        task_handle = planning_semantics.task_handle("go_to_object", object_type)
+        if task_handle is None:
+            return f"No go_to_object task handle is declared for {object_type}."
+        required.append(task_handle)
     answer_fields = (
         ["ranked_doors", "distance"]
         if operation in {"rank", "list"}
@@ -226,7 +241,7 @@ def _continuation_intent(
         status_query=None if wants_task else "ground_target",
         task_type="go_to_object" if wants_task else None,
         grounding_query_plan={
-            "object_type": "door",
+            "object_type": object_type,
             "operation": operation,
             "primitive_handle": request.proposed_handle,
             "metric": request.normalized_name,
@@ -264,7 +279,10 @@ def _continuation_intent(
 def parse_inline_metric_request(
     text: str,
     registry: CapabilityRegistry,
+    *,
+    planning_semantics: PlanningSemantics | None = None,
 ) -> InlineMetricMissionRequest | str | None:
+    semantics = planning_semantics or default_planning_semantics()
     normalized = _normalize_utterance(text)
     # Gate on navigation/query intent — no substrate primitive name check here.
     if not (
@@ -312,6 +330,7 @@ def parse_inline_metric_request(
             mission_id = _mission_id_for(text, request.proposed_handle)
             continuation = _continuation_intent(
                 mission_id=mission_id, utterance=text, request=request, expression=expression,
+                planning_semantics=semantics,
             )
             if isinstance(continuation, str):
                 return continuation
@@ -403,6 +422,7 @@ def parse_inline_metric_request(
         utterance=text,
         request=request,
         expression=expression,
+        planning_semantics=semantics,
     )
     if isinstance(continuation, str):
         return continuation

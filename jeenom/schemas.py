@@ -122,13 +122,22 @@ def get_registered_object_types() -> tuple[str, ...]:
     return _REGISTERED_OBJECT_TYPES if _REGISTERED_OBJECT_TYPES is not None else ()
 
 
-def _validate_object_type(value: str | None, label: str) -> None:
+def _validate_object_type(
+    value: str | None,
+    label: str,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> None:
     if value is None:
         return
-    if _REGISTERED_OBJECT_TYPES is not None and value not in _REGISTERED_OBJECT_TYPES:
+    allowed = (
+        tuple(object_types)
+        if object_types is not None
+        else _REGISTERED_OBJECT_TYPES
+    )
+    if allowed is not None and value not in allowed:
         raise SchemaValidationError(
             f"{label} object_type '{value}' is not in registered vocabulary: "
-            f"{', '.join(_REGISTERED_OBJECT_TYPES)}"
+            f"{', '.join(allowed)}"
         )
 OPERATOR_REFERENCES = ("delivery_target", "last_target", "last_task")
 OPERATOR_SELECTOR_RELATIONS = ("closest", "unique")
@@ -481,20 +490,30 @@ def _ensure_optional_int(value: Any, label: str) -> int | None:
     return value
 
 
-def _ensure_operator_target(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_operator_target(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     target = _ensure_dict(value, label)
     _check_keys(target, ("color", "object_type"), label)
     obj_type = _ensure_optional_str(target.get("object_type"), f"{label}.object_type")
-    _validate_object_type(obj_type, label)
+    _validate_object_type(obj_type, label, object_types)
     return {
         "color": _ensure_optional_str_enum(target.get("color"), OPERATOR_COLORS, f"{label}.color"),
         "object_type": obj_type,
     }
 
 
-def _ensure_operator_knowledge_update(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_operator_knowledge_update(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     update = _ensure_dict(value, label)
@@ -502,7 +521,11 @@ def _ensure_operator_knowledge_update(value: Any, label: str) -> dict[str, Any] 
     raw_delivery_target = update.get("delivery_target")
     if raw_delivery_target is None:
         return {"delivery_target": None}
-    delivery_target = _ensure_operator_target(raw_delivery_target, f"{label}.delivery_target")
+    delivery_target = _ensure_operator_target(
+        raw_delivery_target,
+        f"{label}.delivery_target",
+        object_types=object_types,
+    )
     if delivery_target.get("color") is None or delivery_target.get("object_type") is None:
         raise SchemaValidationError(f"{label}.delivery_target must be fully specified")
     return {"delivery_target": delivery_target}
@@ -683,7 +706,12 @@ def _migrate_exclude_color(selector: dict[str, Any]) -> None:
         selector["exclude_colors"] = []
 
 
-def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_target_selector(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     selector = _ensure_dict(value, label)
@@ -709,7 +737,7 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
             validated_exclude.append(validated)
 
     sel_obj_type = _ensure_optional_str(selector.get("object_type"), f"{label}.object_type")
-    _validate_object_type(sel_obj_type, label)
+    _validate_object_type(sel_obj_type, label, object_types)
     result = {
         "object_type": sel_obj_type,
         "color": _ensure_optional_str_enum(
@@ -733,11 +761,16 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
             f"{label}.distance_reference",
         ),
     }
-    _validate_object_type(result["object_type"], label)
+    _validate_object_type(result["object_type"], label, object_types)
     return result
 
 
-def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_grounding_query_plan(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     plan = _ensure_dict(value, label)
@@ -778,7 +811,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
         primitive_handle = _ensure_str(primitive_handle, f"{label}.primitive_handle")
 
     plan_obj_type = _ensure_optional_str(plan.get("object_type"), f"{label}.object_type")
-    _validate_object_type(plan_obj_type, label)
+    _validate_object_type(plan_obj_type, label, object_types)
     result = {
         "object_type": plan_obj_type,
         "operation": _ensure_optional_str_enum(
@@ -835,7 +868,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
             f"{label}.preserved_constraints",
         ),
     }
-    _validate_object_type(result["object_type"], label)
+    _validate_object_type(result["object_type"], label, object_types)
     if result["operation"] is None:
         raise SchemaValidationError(f"{label}.operation must not be null")
     ordinal = result["ordinal"]
@@ -897,8 +930,17 @@ class TargetSelector:
     distance_reference: str | None = None
 
     @classmethod
-    def from_dict(cls, data: Any) -> TargetSelector:
-        selector = _ensure_target_selector(data, "TargetSelector")
+    def from_dict(
+        cls,
+        data: Any,
+        *,
+        object_types: tuple[str, ...] | list[str] | None = None,
+    ) -> TargetSelector:
+        selector = _ensure_target_selector(
+            data,
+            "TargetSelector",
+            object_types=object_types,
+        )
         if selector is None:
             raise SchemaValidationError("TargetSelector must not be null")
         return cls(**selector)
@@ -1701,7 +1743,12 @@ class OperatorIntent:
         return self._KNOWLEDGE_TYPE_MAP.get(self.intent_type, "control")
 
     @classmethod
-    def from_dict(cls, data: Any) -> OperatorIntent:
+    def from_dict(
+        cls,
+        data: Any,
+        *,
+        object_types: tuple[str, ...] | list[str] | None = None,
+    ) -> OperatorIntent:
         mapping = _ensure_mapping(data, "OperatorIntent")
         intent_type = _ensure_str(mapping.get("intent_type"), "OperatorIntent.intent_type")
         if intent_type not in OPERATOR_INTENT_TYPES:
@@ -1710,10 +1757,15 @@ class OperatorIntent:
                 + ", ".join(OPERATOR_INTENT_TYPES)
             )
 
-        target = _ensure_operator_target(mapping.get("target"), "OperatorIntent.target")
+        target = _ensure_operator_target(
+            mapping.get("target"),
+            "OperatorIntent.target",
+            object_types=object_types,
+        )
         knowledge_update = _ensure_operator_knowledge_update(
             mapping.get("knowledge_update"),
             "OperatorIntent.knowledge_update",
+            object_types=object_types,
         )
         task_type = _ensure_optional_str_enum(
             mapping.get("task_type"),
@@ -1748,10 +1800,12 @@ class OperatorIntent:
         target_selector = _ensure_target_selector(
             mapping.get("target_selector"),
             "OperatorIntent.target_selector",
+            object_types=object_types,
         )
         grounding_query_plan = _ensure_grounding_query_plan(
             mapping.get("grounding_query_plan"),
             "OperatorIntent.grounding_query_plan",
+            object_types=object_types,
         )
         primitive_definition = (
             PrimitiveDefinitionRequest.from_dict(mapping.get("primitive_definition"))
@@ -2465,6 +2519,11 @@ class StationActiveClaims:
     source: str = "grounding"
     authority: str = "runtime"
 
+    @property
+    def ranked_objects(self) -> list[GroundedObjectEntry]:
+        """Object-generic view over the legacy MiniGrid field name."""
+        return self.ranked_scene_doors
+
     def is_valid_for(
         self,
         scene: SceneModel,
@@ -2485,20 +2544,32 @@ class StationActiveClaims:
             return self.ranked_scene_doors[rank], rank
         return None, None
 
-    def other_doors(self) -> list[GroundedObjectEntry]:
+    def other_objects(self) -> list[GroundedObjectEntry]:
         t = self.last_grounded_target
         return [
-            d for d in self.ranked_scene_doors
-            if not (d.x == t.x and d.y == t.y)
+            obj for obj in self.ranked_objects
+            if not (obj.x == t.x and obj.y == t.y)
         ]
 
+    def other_doors(self) -> list[GroundedObjectEntry]:
+        """Backward-compatible alias for older MiniGrid claim consumers."""
+        return self.other_objects()
+
     def compact_summary(self) -> dict[str, Any]:
+        ranked_objects = [
+            f"{obj.color} {obj.object_type}@{obj.distance}"
+            for obj in self.ranked_objects
+        ]
         return {
+            "object_type": self.last_grounded_target.object_type,
             "last_grounded_target": (
-                f"{self.last_grounded_target.color} door @ distance {self.last_grounded_target.distance}"
+                f"{self.last_grounded_target.color} "
+                f"{self.last_grounded_target.object_type} @ distance "
+                f"{self.last_grounded_target.distance}"
             ),
+            "ranked_objects": ranked_objects,
             "ranked_doors": [
-                f"{d.color}@{d.distance}" for d in self.ranked_scene_doors
+                f"{obj.color}@{obj.distance}" for obj in self.ranked_scene_doors
             ],
             "last_rank": self.last_grounded_rank,
             "environment_fingerprint": self.environment_fingerprint,
@@ -3328,12 +3399,19 @@ def memory_updates_json_schema() -> dict[str, Any]:
     }
 
 
-def operator_intent_json_schema() -> dict[str, Any]:
+def operator_intent_json_schema(
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
+    schema_object_types = list(
+        object_types if object_types is not None else get_registered_object_types()
+    )
+    example_object_type = schema_object_types[0] if schema_object_types else "object"
     target_schema = {
         "type": ["object", "null"],
         "properties": {
             "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
-            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
+            "object_type": {"type": ["string", "null"], "enum": [*schema_object_types, None]},
         },
         "required": ["color", "object_type"],
         "additionalProperties": False,
@@ -3341,7 +3419,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
     target_selector_schema = {
         "type": ["object", "null"],
         "properties": {
-            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
+            "object_type": {"type": ["string", "null"], "enum": [*schema_object_types, None]},
             "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
             "exclude_colors": {
                 "type": "array",
@@ -3371,7 +3449,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
     grounding_query_plan_schema = {
         "type": ["object", "null"],
         "properties": {
-            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
+            "object_type": {"type": ["string", "null"], "enum": [*schema_object_types, None]},
             "operation": {"type": ["string", "null"], "enum": [*GROUNDING_QUERY_OPERATIONS, None]},
             "primitive_handle": {"type": ["string", "null"]},
             "metric": {
@@ -3551,7 +3629,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
                         "type": "string",
                         "description": (
                             "The property being ranked/selected (e.g. 'distance', 'temperature'). "
-                            "Use 'distance' for door-distance queries."
+                            f"Use 'distance' for {example_object_type}-distance queries."
                         ),
                     },
                     "direction": {
@@ -3577,7 +3655,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "description": (
                     "Structured distillation of the operator's selection intent. "
                     "Set this whenever the request involves picking by a ranked attribute "
-                    "(farthest door, second closest, hottest room, etc.). "
+                    f"(farthest {example_object_type}, second closest, hottest room, etc.). "
                     "Null for non-ranking intents."
                 ),
             },
@@ -3598,7 +3676,8 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "type": ["string", "null"],
                 "description": (
                     "For concept_teach: the full instruction the label expands to "
-                    "(e.g. 'go to the red door'). Null for concept_recall."
+                    f"(e.g. 'go to the red {example_object_type}'). "
+                    "Null for concept_recall."
                 ),
             },
             "concept_steps": {
@@ -3614,7 +3693,9 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "items": {"type": "string"},
                 "description": (
                     "For sequence_instruction: ordered list of raw task utterances to "
-                    "execute sequentially (e.g. ['go to the red door', 'go to the green door']). "
+                    "execute sequentially (e.g. "
+                    f"['go to the red {example_object_type}', "
+                    f"'go to the green {example_object_type}']). "
                     "Null for all other intents."
                 ),
             },
@@ -3641,7 +3722,9 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "minItems": 2,
                 "description": (
                     "For mission_contract: ordered list of raw task utterances constituting "
-                    "the mission (e.g. ['go to the red door', 'go to the green door']). "
+                    "the mission (e.g. "
+                    f"['go to the red {example_object_type}', "
+                    f"'go to the green {example_object_type}']). "
                     "Requires at least 2 steps. Null for all other intents."
                 ),
             },

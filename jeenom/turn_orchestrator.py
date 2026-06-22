@@ -677,7 +677,12 @@ class TurnOrchestrator:
                     )
                 color = intent.target.get("color")
                 object_type = intent.target.get("object_type")
-                if not color or object_type != "door" or intent.task_type != "go_to_object":
+                supported_object_types = set(station.planning_semantics.object_types)
+                if (
+                    not color
+                    or object_type not in supported_object_types
+                    or intent.task_type != "go_to_object"
+                ):
                     return ApprovedCommand(command_type="unsupported", utterance=utterance)
                 instruction = intent.canonical_instruction or f"go to the {color} {object_type}"
             else:

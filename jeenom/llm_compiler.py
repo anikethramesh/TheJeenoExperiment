@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict
 from typing import Any, Callable
 
+from .planning_semantics import PlanningSemantics
 from .primitive_library import library_payload, primitive_names
 from .semantic_normalizer import normalize_distance_ordinal, get_semantic_constraints
 from .schemas import (
@@ -45,6 +46,92 @@ class CompilerBackend(ABC):
     def __init__(self) -> None:
         self.logs: list[str] = []
         self.call_history: list[dict[str, Any]] = []
+        self.planning_semantics: PlanningSemantics | None = None
+
+    def bind_planning_semantics(self, planning_semantics: PlanningSemantics) -> None:
+        self.planning_semantics = planning_semantics
+        fallback = getattr(self, "fallback", None)
+        if isinstance(fallback, CompilerBackend):
+            fallback.planning_semantics = planning_semantics
+
+    def object_types(self) -> tuple[str, ...]:
+        if self.planning_semantics is not None:
+            return self.planning_semantics.object_types
+        return get_registered_object_types()
+
+    def default_object_type(self) -> str | None:
+        if self.planning_semantics is not None:
+            return self.planning_semantics.default_object_type
+        object_types = self.object_types()
+        return object_types[0] if object_types else None
+
+    def object_type_pattern(self) -> str:
+        return "|".join(re.escape(object_type) for object_type in self.object_types())
+
+    def object_type_from_text(self, text: str) -> str | None:
+        if self.planning_semantics is not None:
+            return self.planning_semantics.object_type_from_text(text)
+        normalized = text.strip().lower()
+        for object_type in self.object_types():
+            if re.search(rf"\b{re.escape(object_type)}s?\b", normalized):
+                return object_type
+        return None
+
+    def task_handle(self, task_type: str, object_type: str) -> str:
+        if self.planning_semantics is not None:
+            handle = self.planning_semantics.task_handle(task_type, object_type)
+            if handle is not None:
+                return handle
+        return f"task.{task_type}.{object_type}"
+
+    def pluralize_object_type(self, object_type: str) -> str:
+        if self.planning_semantics is not None:
+            return self.planning_semantics.pluralize(object_type)
+        return object_type if object_type.endswith("s") else f"{object_type}s"
+
+    def ranked_handle(self, metric: str, object_type: str) -> str:
+        if self.planning_semantics is not None:
+            handle = self.planning_semantics.capability_handle(
+                "ranked",
+                metric=metric,
+                object_type=object_type,
+            )
+            if handle is not None:
+                return handle
+        plural = self.pluralize_object_type(object_type)
+        return f"grounding.all_{plural}.ranked.{metric}.agent"
+
+    def closest_handle(
+        self,
+        metric: str,
+        object_type: str,
+        reference: str = "agent",
+    ) -> str:
+        if self.planning_semantics is not None:
+            handle = self.planning_semantics.capability_handle(
+                "closest",
+                metric=metric,
+                reference=reference,
+                object_type=object_type,
+            )
+            if handle is not None:
+                return handle
+        return f"grounding.closest_{object_type}.{metric}.{reference}"
+
+    def unique_handle(self, object_type: str) -> str:
+        if self.planning_semantics is not None:
+            handle = self.planning_semantics.capability_handle(
+                "unique",
+                object_type=object_type,
+            )
+            if handle is not None:
+                return handle
+        return f"grounding.unique_{object_type}.color_filter"
+
+    def motor_object_terms(self) -> tuple[str, ...]:
+        if self.planning_semantics is not None:
+            return self.planning_semantics.motor_object_terms
+        return _MOTOR_TASK_OBJECT_TERMS
 
     @property
     def active_backend(self) -> str:
@@ -199,6 +286,8 @@ _WORD_TO_NUM: dict[str, int] = {
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
 }
 
+# Fallback object vocabulary used only when no domain semantics are bound; the
+# bound path sources these from PlanningSemantics.motor_object_terms (config).
 _MOTOR_TASK_OBJECT_TERMS = (
     "ball",
     "box",
@@ -209,15 +298,21 @@ _MOTOR_TASK_OBJECT_TERMS = (
 )
 
 
-def _looks_like_object_task(normalized: str) -> bool:
-    return any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in _MOTOR_TASK_OBJECT_TERMS)
+def _looks_like_object_task(
+    normalized: str,
+    object_terms: tuple[str, ...] = _MOTOR_TASK_OBJECT_TERMS,
+) -> bool:
+    return any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in object_terms)
 
 
-def _parse_motor_command(normalized: str) -> tuple[str, int] | None:
+def _parse_motor_command(
+    normalized: str,
+    object_terms: tuple[str, ...] = _MOTOR_TASK_OBJECT_TERMS,
+) -> tuple[str, int] | None:
     """Return (action_name, count) if the utterance is a direct motor command, else None."""
     for action_name, pattern in _MOTOR_ACTION_ALIASES.items():
         if pattern.search(normalized):
-            if action_name in {"pickup", "toggle"} and _looks_like_object_task(normalized):
+            if action_name in {"pickup", "toggle"} and _looks_like_object_task(normalized, object_terms):
                 return None
             m = re.search(r"\b(\d+)\b", normalized)
             if m:
@@ -233,7 +328,10 @@ def _parse_motor_command(normalized: str) -> tuple[str, int] | None:
     return None
 
 
-def _parse_motor_sequence(normalized: str) -> list[tuple[str, int]] | None:
+def _parse_motor_sequence(
+    normalized: str,
+    object_terms: tuple[str, ...] = _MOTOR_TASK_OBJECT_TERMS,
+) -> list[tuple[str, int]] | None:
     """Return ordered (action, count) pairs when the utterance chains multiple motor actions.
 
     Splits on 'and', 'then', 'and then'. Returns None if any segment is not a
@@ -245,7 +343,7 @@ def _parse_motor_sequence(normalized: str) -> list[tuple[str, int]] | None:
         return None
     results: list[tuple[str, int]] = []
     for part in parts:
-        cmd = _parse_motor_command(part)
+        cmd = _parse_motor_command(part, object_terms)
         if cmd is None:
             return None
         results.append(cmd)
@@ -266,17 +364,22 @@ class SmokeTestCompiler(CompilerBackend):
         )
         normalized = instruction.strip().lower()
 
-        door_match = re.search(
-            r"go to the (?P<color>\w+) (?P<object_type>door)",
-            normalized,
+        object_type_pattern = self.object_type_pattern()
+        object_match = (
+            re.search(
+                rf"go to the (?P<color>\w+) (?P<object_type>{object_type_pattern})\b",
+                normalized,
+            )
+            if object_type_pattern
+            else None
         )
-        if door_match:
+        if object_match:
             return TaskRequest(
                 instruction=instruction,
                 task_type="go_to_object",
                 params=canonical_task_params(
-                    color=door_match.group("color"),
-                    object_type=door_match.group("object_type"),
+                    color=object_match.group("color"),
+                    object_type=object_match.group("object_type"),
                 ),
                 source=self.name,
             )
@@ -544,8 +647,9 @@ class SmokeTestCompiler(CompilerBackend):
             cname = _bare_means_early.group(1).strip().strip("'\"")
             cutterance = _bare_means_early.group(2).strip().strip("'\"")
             _reserved = {
-                "manhattan", "euclidean", "distance", "closest", "door", "red",
+                "manhattan", "euclidean", "distance", "closest", "red",
                 "blue", "green", "yellow", "purple", "grey", "gray",
+                *self.object_types(),
             }
             if cname.lower() not in _reserved and cutterance:
                 return OperatorIntent(
@@ -607,10 +711,41 @@ class SmokeTestCompiler(CompilerBackend):
             color_pattern = "|".join(re.escape(c) for c in _color_names)
         else:
             color_pattern = r"red|green|blue|yellow|purple|grey|gray"
-        door_match = re.search(
-            rf"\b(?:go to|go the|reach|find|get to|head to|navigate to)\s+"
-            rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door)\b",
-            normalized,
+        object_type_pattern = self.object_type_pattern()
+        mentioned_object_type = self.object_type_from_text(normalized)
+        claims_object_type = (
+            active_claims_summary.get("object_type")
+            if active_claims_summary is not None
+            else None
+        )
+        if claims_object_type not in self.object_types():
+            claims_object_type = None
+        default_object_type = self.default_object_type()
+        object_type = (
+            mentioned_object_type
+            or claims_object_type
+            or default_object_type
+        )
+        task_handle = (
+            self.task_handle("go_to_object", object_type)
+            if object_type is not None
+            else None
+        )
+        object_type_mentioned = mentioned_object_type is not None
+        object_type_plural = (
+            self.pluralize_object_type(object_type)
+            if object_type is not None
+            else None
+        )
+        object_match = (
+            re.search(
+                rf"\b(?:go to|go the|reach|find|get to|head to|navigate to)\s+"
+                rf"(?:the )?(?P<color>{color_pattern}) "
+                rf"(?P<object_type>{object_type_pattern})\b",
+                normalized,
+            )
+            if object_type_pattern
+            else None
         )
         _SUPERLATIVE_TERMS = frozenset([
             "farthest", "furthest", "most distant", "most far",
@@ -621,7 +756,11 @@ class SmokeTestCompiler(CompilerBackend):
             "euclidean" if "euclidean" in normalized
             else "manhattan"
         )
-        ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
+        ranked_handle = (
+            self.ranked_handle(metric, object_type)
+            if object_type is not None
+            else None
+        )
         is_navigation = re.search(
             r"\b(go to|go the|reach|find|get to|head to|navigate to)\b",
             normalized,
@@ -633,7 +772,9 @@ class SmokeTestCompiler(CompilerBackend):
             r"(?P<value>\d+(?:\.\d+)?)\b",
             normalized,
         )
-        if threshold_match and ("door" in normalized or active_claims_summary is not None):
+        if threshold_match and (
+            object_type_mentioned or active_claims_summary is not None
+        ):
             comparison_text = threshold_match.group("comparison")
             comparison = {
                 "above": "above",
@@ -657,7 +798,11 @@ class SmokeTestCompiler(CompilerBackend):
                 else None
             )
             if metric is None and active_claims_summary is not None:
-                ranked = active_claims_summary.get("ranked_doors") or []
+                ranked = (
+                    active_claims_summary.get("ranked_objects")
+                    or active_claims_summary.get("ranked_doors")
+                    or []
+                )
                 # compact summaries are strings such as "red@7.62"; metric is not
                 # always present, so default to manhattan if the operator omitted it.
                 metric = "manhattan"
@@ -674,8 +819,8 @@ class SmokeTestCompiler(CompilerBackend):
             order = "descending" if wants_highest else "ascending" if wants_lowest else None
             ordinal = 1 if order is not None else None
             required = [claims_handle]
-            if is_navigation:
-                required.append("task.go_to_object.door")
+            if is_navigation and task_handle is not None:
+                required.append(task_handle)
             return OperatorIntent(
                 intent_type="task_instruction" if is_navigation else "claim_reference",
                 status_query=None,
@@ -683,7 +828,7 @@ class SmokeTestCompiler(CompilerBackend):
                 target_selector=None,
                 claim_reference="threshold_filter",
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "filter",
                     "primitive_handle": claims_handle,
                     "metric": metric,
@@ -700,7 +845,7 @@ class SmokeTestCompiler(CompilerBackend):
                     "answer_fields": ["target", "distance"],
                     "required_capabilities": required,
                     "preserved_constraints": [
-                        "door",
+                        str(object_type),
                         metric,
                         comparison,
                         str(threshold),
@@ -721,15 +866,20 @@ class SmokeTestCompiler(CompilerBackend):
         ordinal_semantics = normalize_distance_ordinal(normalized)
         if ordinal_semantics is not None:
             semantic_ranked_handle = (
-                f"grounding.all_doors.ranked.{ordinal_semantics.metric}.agent"
+                self.ranked_handle(ordinal_semantics.metric, object_type)
+                if object_type is not None
+                else None
             )
+            semantic_required = [semantic_ranked_handle]
+            if is_navigation and task_handle is not None:
+                semantic_required.append(task_handle)
             return OperatorIntent(
                 intent_type="task_instruction" if is_navigation else "status_query",
                 status_query=None if is_navigation else "ground_target",
                 task_type="go_to_object" if is_navigation else None,
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "select" if is_navigation else "answer",
                     "primitive_handle": semantic_ranked_handle,
                     "metric": ordinal_semantics.metric,
@@ -741,23 +891,18 @@ class SmokeTestCompiler(CompilerBackend):
                     "distance_value": None,
                     "tie_policy": "clarify",
                     "answer_fields": ["target", "distance"],
-                    "required_capabilities": (
-                        [semantic_ranked_handle, "task.go_to_object.door"]
-                        if is_navigation
-                        else [semantic_ranked_handle]
-                    ),
-                    "preserved_constraints": [*ordinal_semantics.preserved_constraints, "door"],
+                    "required_capabilities": semantic_required,
+                    "preserved_constraints": [
+                        *ordinal_semantics.preserved_constraints,
+                        str(object_type),
+                    ],
                 },
                 capability_status=(
                     "executable"
                     if ordinal_semantics.metric == "manhattan"
                     else "synthesizable"
                 ),
-                required_capabilities=(
-                    [semantic_ranked_handle, "task.go_to_object.door"]
-                    if is_navigation
-                    else [semantic_ranked_handle]
-                ),
+                required_capabilities=semantic_required,
                 selection_objective=SelectionObjective(
                     attribute="distance",
                     direction="maximum" if ordinal_semantics.order == "descending" else "minimum",
@@ -772,14 +917,14 @@ class SmokeTestCompiler(CompilerBackend):
             and
             ("closest" in normalized or "nearest" in normalized)
             and re.search(r"\b(second|2nd)\s+(closest|nearest)\b", normalized)
-            and "door" in normalized
+            and object_type_mentioned
         ):
             return OperatorIntent(
                 intent_type="status_query",
                 status_query="ground_target",
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "answer",
                     "primitive_handle": ranked_handle,
                     "metric": metric,
@@ -792,14 +937,19 @@ class SmokeTestCompiler(CompilerBackend):
                     "tie_policy": "display",
                     "answer_fields": ["closest", "second_closest"],
                     "required_capabilities": [ranked_handle],
-                    "preserved_constraints": ["closest", "second", "door", metric],
+                    "preserved_constraints": [
+                        "closest",
+                        "second",
+                        str(object_type),
+                        metric,
+                    ],
                 },
                 capability_status="executable" if metric == "manhattan" else "synthesizable",
                 required_capabilities=[ranked_handle],
                 confidence=0.9,
                 reason="Deterministic operator-intent fallback emitted a closest/second-closest answer plan.",
             )
-        if ordinal_match and "door" in normalized:
+        if ordinal_match and object_type_mentioned:
             ordinal_map = {
                 "second": 2,
                 "2nd": 2,
@@ -813,13 +963,16 @@ class SmokeTestCompiler(CompilerBackend):
             ordinal = ordinal_map[ordinal_match.group(1)]
             direction = ordinal_match.group(2)
             order = "descending" if direction in {"farthest", "furthest"} else "ascending"
+            ordinal_required = [ranked_handle]
+            if is_navigation and task_handle is not None:
+                ordinal_required.append(task_handle)
             return OperatorIntent(
                 intent_type="task_instruction" if is_navigation else "status_query",
                 status_query=None if is_navigation else "ground_target",
                 task_type="go_to_object" if is_navigation else None,
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "select" if is_navigation else "answer",
                     "primitive_handle": ranked_handle,
                     "metric": metric,
@@ -831,19 +984,16 @@ class SmokeTestCompiler(CompilerBackend):
                     "distance_value": None,
                     "tie_policy": "clarify",
                     "answer_fields": ["target", "distance"],
-                    "required_capabilities": (
-                        [ranked_handle, "task.go_to_object.door"]
-                        if is_navigation
-                        else [ranked_handle]
-                    ),
-                    "preserved_constraints": [ordinal_match.group(1), direction, "door", metric],
+                    "required_capabilities": ordinal_required,
+                    "preserved_constraints": [
+                        ordinal_match.group(1),
+                        direction,
+                        str(object_type),
+                        metric,
+                    ],
                 },
                 capability_status="executable" if metric == "manhattan" else "synthesizable",
-                required_capabilities=(
-                    [ranked_handle, "task.go_to_object.door"]
-                    if is_navigation
-                    else [ranked_handle]
-                ),
+                required_capabilities=ordinal_required,
                 selection_objective=SelectionObjective(
                     attribute="distance",
                     direction="maximum" if order == "descending" else "minimum",
@@ -858,15 +1008,18 @@ class SmokeTestCompiler(CompilerBackend):
             r"\b(?:distance\s+(?:of\s+)?|with\s+(?:a\s+)?distance\s+(?:of\s+)?)(\d+)\b",
             normalized,
         )
-        if distance_match and "door" in normalized:
+        if distance_match and object_type_mentioned:
             distance_value = int(distance_match.group(1))
+            distance_required = [ranked_handle]
+            if is_navigation and task_handle is not None:
+                distance_required.append(task_handle)
             return OperatorIntent(
                 intent_type="task_instruction" if is_navigation else "status_query",
                 status_query=None if is_navigation else "ground_target",
                 task_type="go_to_object" if is_navigation else None,
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "select" if is_navigation else "answer",
                     "primitive_handle": ranked_handle,
                     "metric": metric,
@@ -878,24 +1031,29 @@ class SmokeTestCompiler(CompilerBackend):
                     "distance_value": distance_value,
                     "tie_policy": "clarify",
                     "answer_fields": ["target", "distance"],
-                    "required_capabilities": (
-                        [ranked_handle, "task.go_to_object.door"]
-                        if is_navigation
-                        else [ranked_handle]
-                    ),
-                    "preserved_constraints": ["distance", str(distance_value), "door", metric],
+                    "required_capabilities": distance_required,
+                    "preserved_constraints": [
+                        "distance",
+                        str(distance_value),
+                        str(object_type),
+                        metric,
+                    ],
                 },
                 capability_status="executable" if metric == "manhattan" else "synthesizable",
-                required_capabilities=(
-                    [ranked_handle, "task.go_to_object.door"]
-                    if is_navigation
-                    else [ranked_handle]
-                ),
+                required_capabilities=distance_required,
                 confidence=0.9,
                 reason="Deterministic operator-intent fallback emitted a distance-value query plan.",
             )
 
-        color_mention = re.search(rf"\b(?P<color>{color_pattern})\s+door\b", normalized)
+        color_mention = (
+            re.search(
+                rf"\b(?P<color>{color_pattern})\s+"
+                rf"(?P<object_type>{object_type_pattern})\b",
+                normalized,
+            )
+            if object_type_pattern
+            else None
+        )
         if color_mention and (
             "how far" in normalized
             or "distance" in normalized
@@ -909,7 +1067,7 @@ class SmokeTestCompiler(CompilerBackend):
                 status_query="ground_target",
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": color_mention.group("object_type"),
                     "operation": "answer",
                     "primitive_handle": ranked_handle,
                     "metric": metric,
@@ -922,7 +1080,11 @@ class SmokeTestCompiler(CompilerBackend):
                     "tie_policy": "display",
                     "answer_fields": ["distance"] if wants_distance else ["exists"],
                     "required_capabilities": [ranked_handle],
-                    "preserved_constraints": [color, "door", "distance" if wants_distance else "exists"],
+                    "preserved_constraints": [
+                        color,
+                        color_mention.group("object_type"),
+                        "distance" if wants_distance else "exists",
+                    ],
                 },
                 capability_status="executable" if metric == "manhattan" else "synthesizable",
                 required_capabilities=[ranked_handle],
@@ -933,14 +1095,14 @@ class SmokeTestCompiler(CompilerBackend):
         if (
             ("closest" in normalized or "nearest" in normalized)
             and ("farthest" in normalized or "furthest" in normalized)
-            and "door" in normalized
+            and object_type_mentioned
         ):
             return OperatorIntent(
                 intent_type="status_query",
                 status_query="ground_target",
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "answer",
                     "primitive_handle": ranked_handle,
                     "metric": metric,
@@ -953,7 +1115,12 @@ class SmokeTestCompiler(CompilerBackend):
                     "tie_policy": "display",
                     "answer_fields": ["closest", "farthest"],
                     "required_capabilities": [ranked_handle],
-                    "preserved_constraints": ["closest", "farthest", "door", metric],
+                    "preserved_constraints": [
+                        "closest",
+                        "farthest",
+                        str(object_type),
+                        metric,
+                    ],
                 },
                 capability_status="executable" if metric == "manhattan" else "synthesizable",
                 required_capabilities=[ranked_handle],
@@ -963,12 +1130,15 @@ class SmokeTestCompiler(CompilerBackend):
 
         if is_navigation and re.search(r"\b(that|it|that one|the one)\b", normalized):
             claim_handle = "grounding.claims.last_grounded_target"
+            claim_required = [claim_handle]
+            if task_handle is not None:
+                claim_required.append(task_handle)
             return OperatorIntent(
                 intent_type="task_instruction",
                 task_type="go_to_object",
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "select",
                     "primitive_handle": claim_handle,
                     "metric": None,
@@ -980,14 +1150,11 @@ class SmokeTestCompiler(CompilerBackend):
                     "distance_value": None,
                     "tie_policy": "clarify",
                     "answer_fields": ["target"],
-                    "required_capabilities": [
-                        claim_handle,
-                        "task.go_to_object.door",
-                    ],
+                    "required_capabilities": claim_required,
                     "preserved_constraints": ["that"],
                 },
                 capability_status="executable",
-                required_capabilities=[claim_handle, "task.go_to_object.door"],
+                required_capabilities=claim_required,
                 confidence=0.9,
                 reason="Deterministic operator-intent fallback emitted an active-claim reference plan.",
             )
@@ -1004,14 +1171,17 @@ class SmokeTestCompiler(CompilerBackend):
                 reason="Random walk policy is not a supported navigation strategy.",
             )
 
-        if any(t in normalized for t in _SUPERLATIVE_TERMS) and "door" in normalized:
+        if any(t in normalized for t in _SUPERLATIVE_TERMS) and object_type_mentioned:
+            superlative_required = [ranked_handle]
+            if is_navigation and task_handle is not None:
+                superlative_required.append(task_handle)
             return OperatorIntent(
                 intent_type="task_instruction" if is_navigation else "status_query",
                 status_query=None if is_navigation else "ground_target",
                 task_type="go_to_object" if is_navigation else None,
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "select" if is_navigation else "answer",
                     "primitive_handle": ranked_handle,
                     "metric": metric,
@@ -1023,19 +1193,15 @@ class SmokeTestCompiler(CompilerBackend):
                     "distance_value": None,
                     "tie_policy": "clarify" if is_navigation else "display",
                     "answer_fields": ["farthest", "distance"],
-                    "required_capabilities": (
-                        [ranked_handle, "task.go_to_object.door"]
-                        if is_navigation
-                        else [ranked_handle]
-                    ),
-                    "preserved_constraints": ["farthest", "door", metric],
+                    "required_capabilities": superlative_required,
+                    "preserved_constraints": [
+                        "farthest",
+                        str(object_type),
+                        metric,
+                    ],
                 },
                 capability_status="executable" if metric == "manhattan" else "synthesizable",
-                required_capabilities=(
-                    [ranked_handle, "task.go_to_object.door"]
-                    if is_navigation
-                    else [ranked_handle]
-                ),
+                required_capabilities=superlative_required,
                 selection_objective=SelectionObjective(
                     attribute="distance",
                     direction="maximum",
@@ -1043,12 +1209,24 @@ class SmokeTestCompiler(CompilerBackend):
                     metric=metric if metric != "manhattan" else None,
                 ),
                 confidence=0.9,
-                reason="Deterministic operator-intent fallback emitted a farthest-door query plan.",
+                reason=(
+                    "Deterministic operator-intent fallback emitted a farthest-object "
+                    "query plan."
+                ),
             )
 
+        next_reference_phrases = ["next closest", "next one"]
+        other_reference_phrases = ["other one", "the other"]
+        if object_type is not None:
+            next_reference_phrases.extend(
+                [f"next {object_type}", f"another {object_type}"]
+            )
+            other_reference_phrases.extend(
+                [f"other {object_type}", f"remaining {object_type}"]
+            )
         if any(
             phrase in normalized
-            for phrase in ("next closest", "next one", "next door", "another door")
+            for phrase in next_reference_phrases
         ):
             return OperatorIntent(
                 intent_type="claim_reference",
@@ -1061,7 +1239,7 @@ class SmokeTestCompiler(CompilerBackend):
 
         if any(
             phrase in normalized
-            for phrase in ("other door", "remaining door", "other one", "the other")
+            for phrase in other_reference_phrases
         ):
             return OperatorIntent(
                 intent_type="claim_reference",
@@ -1069,7 +1247,10 @@ class SmokeTestCompiler(CompilerBackend):
                 target_selector=None,
                 required_capabilities=[],
                 confidence=0.85,
-                reason="Deterministic operator-intent fallback parsed an other-door claim reference.",
+                reason=(
+                    "Deterministic operator-intent fallback parsed an other-object "
+                    "claim reference."
+                ),
             )
 
         is_ranked_query = any(
@@ -1078,38 +1259,70 @@ class SmokeTestCompiler(CompilerBackend):
                 "in order", "in descending order", "in ascending order",
                 "ranked", "ranking", "rank them", "rank the", "rank distances",
                 "rank the distances", "list them",
-                "all doors", "all of them", "list all", "each door", "each of these doors",
+                "all of them", "list all",
             )
         )
-        # Paraphrase coverage: "how far are the doors", "distance to the doors", etc.
-        # Require "doors" (plural) or "distances" to avoid routing singular "the door"
-        # queries here (those are handled by color_mention or clarification).
-        if not is_ranked_query and not is_navigation and "door" in normalized:
+        if (
+            not is_ranked_query
+            and object_type is not None
+            and object_type_plural is not None
+        ):
+            is_ranked_query = bool(
+                re.search(
+                    rf"\b(?:all|each|every)\s+(?:of\s+these\s+)?"
+                    rf"(?:{re.escape(object_type)}|{re.escape(object_type_plural)})\b",
+                    normalized,
+                )
+            )
+        # Paraphrase coverage for plural object-distance questions. Requiring the
+        # plural form or "distances" avoids swallowing singular clarification cases.
+        if not is_ranked_query and not is_navigation and object_type_mentioned:
             is_ranked_query = (
                 "distances" in normalized
-                or ("how far" in normalized and "doors" in normalized)
-                or ("far away" in normalized and "doors" in normalized)
-                or ("distance" in normalized and "doors" in normalized)
+                or (
+                    object_type_plural is not None
+                    and "how far" in normalized
+                    and object_type_plural in normalized
+                )
+                or (
+                    object_type_plural is not None
+                    and "far away" in normalized
+                    and object_type_plural in normalized
+                )
+                or (
+                    object_type_plural is not None
+                    and "distance" in normalized
+                    and object_type_plural in normalized
+                )
             )
 
-        # Stateful pronoun reference: "show their distances" / "rank them" — when active
-        # claims already have ranked doors, resolve "their"/"them" as "the visible doors".
+        # Stateful pronoun reference: when active claims already have ranked
+        # objects, resolve "their"/"them" against those visible objects.
         _has_ranked_claims = (
             active_claims_summary is not None
-            and bool(active_claims_summary.get("ranked_doors") or active_claims_summary.get("ranked_scene_doors"))
+            and bool(
+                active_claims_summary.get("ranked_objects")
+                or active_claims_summary.get("ranked_doors")
+                or active_claims_summary.get("ranked_scene_doors")
+            )
         )
-        _has_implicit_door_ref = _has_ranked_claims and bool(
-            re.search(r"\b(?:their|them|these|those|the ones|the doors)\b", normalized)
+        implicit_terms = ["their", "them", "these", "those", "the ones", "the objects"]
+        if object_type_plural is not None:
+            implicit_terms.append(f"the {object_type_plural}")
+        _has_implicit_object_ref = _has_ranked_claims and any(
+            term in normalized for term in implicit_terms
         )
         if (
             not is_ranked_query
             and not is_navigation
-            and _has_implicit_door_ref
+            and _has_implicit_object_ref
             and ("distances" in normalized or "distance" in normalized or "how far" in normalized or "far" in normalized)
         ):
             is_ranked_query = True
 
-        if is_ranked_query and ("door" in normalized or _has_implicit_door_ref):
+        if is_ranked_query and (
+            object_type_mentioned or _has_implicit_object_ref
+        ):
             metric = (
                 "euclidean"
                 if "euclidean" in normalized
@@ -1117,13 +1330,13 @@ class SmokeTestCompiler(CompilerBackend):
                 if "manhattan" in normalized
                 else "manhattan"
             )
-            ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
+            ranked_handle = self.ranked_handle(metric, object_type)
             return OperatorIntent(
                 intent_type="status_query",
                 status_query="ground_target",
                 target_selector=None,
                 grounding_query_plan={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "operation": "rank",
                     "primitive_handle": ranked_handle,
                     "metric": metric,
@@ -1136,15 +1349,19 @@ class SmokeTestCompiler(CompilerBackend):
                     "tie_policy": "display",
                     "answer_fields": ["ranked_doors", "distance"],
                     "required_capabilities": [ranked_handle],
-                    "preserved_constraints": ["rank", "door", metric],
+                    "preserved_constraints": ["rank", str(object_type), metric],
                 },
                 capability_status="executable" if metric == "manhattan" else "synthesizable",
                 required_capabilities=[ranked_handle],
                 confidence=0.9,
-                reason="Deterministic operator-intent fallback emitted a ranked-door query plan.",
+                reason="Deterministic operator-intent fallback emitted a ranked-object query plan.",
             )
 
-        if ("closest" in normalized or "nearest" in normalized or "shortest" in normalized) and "door" in normalized:
+        if (
+            "closest" in normalized
+            or "nearest" in normalized
+            or "shortest" in normalized
+        ) and object_type_mentioned:
             metric = (
                 "euclidean"
                 if "euclidean" in normalized
@@ -1156,17 +1373,17 @@ class SmokeTestCompiler(CompilerBackend):
                 "delivery target" in normalized or "make" in normalized
             )
             if not is_closest_knowledge_update:
-                closest_ranked_handle = f"grounding.all_doors.ranked.{metric}.agent"
+                closest_ranked_handle = self.ranked_handle(metric, object_type)
                 closest_required = [closest_ranked_handle]
-                if is_navigation:
-                    closest_required.append("task.go_to_object.door")
+                if is_navigation and task_handle is not None:
+                    closest_required.append(task_handle)
                 return OperatorIntent(
                     intent_type="task_instruction" if is_navigation else "status_query",
                     status_query=None if is_navigation else "ground_target",
                     task_type="go_to_object" if is_navigation else None,
                     target_selector=None,
                     grounding_query_plan={
-                        "object_type": "door",
+                        "object_type": object_type,
                         "operation": "select" if is_navigation else "answer",
                         "primitive_handle": closest_ranked_handle,
                         "metric": metric,
@@ -1179,7 +1396,11 @@ class SmokeTestCompiler(CompilerBackend):
                         "tie_policy": "clarify" if is_navigation else "display",
                         "answer_fields": ["closest", "distance"],
                         "required_capabilities": closest_required,
-                        "preserved_constraints": ["closest", "door", metric],
+                        "preserved_constraints": [
+                            "closest",
+                            str(object_type),
+                            metric,
+                        ],
                     },
                     capability_status="executable" if metric == "manhattan" else "synthesizable",
                     required_capabilities=closest_required,
@@ -1190,7 +1411,7 @@ class SmokeTestCompiler(CompilerBackend):
                         metric=metric if metric != "manhattan" else None,
                     ),
                     confidence=0.9,
-                    reason="Deterministic operator-intent fallback emitted a closest-door query plan.",
+                    reason="Deterministic operator-intent fallback emitted a closest-object query plan.",
                 )
             if is_ranked_query:
                 metric_suffix = metric or "manhattan"
@@ -1198,7 +1419,7 @@ class SmokeTestCompiler(CompilerBackend):
                     intent_type="status_query",
                     status_query="ground_target",
                     target_selector={
-                        "object_type": "door",
+                        "object_type": object_type,
                         "color": None,
                         "exclude_colors": [],
                         "relation": "closest",
@@ -1206,9 +1427,14 @@ class SmokeTestCompiler(CompilerBackend):
                         "distance_reference": "agent" if metric is not None else None,
                     },
                     capability_status="missing_skills",
-                    required_capabilities=[f"grounding.all_doors.ranked.{metric_suffix}.agent"],
+                    required_capabilities=[
+                        self.ranked_handle(metric_suffix, object_type)
+                    ],
                     confidence=0.85,
-                    reason="Ranked listing requires grounding.all_doors.ranked — not the same as closest.",
+                    reason=(
+                        "Ranked listing requires the context-declared ranked "
+                        "grounding capability, not the single closest capability."
+                    ),
                 )
             return OperatorIntent(
                 intent_type=(
@@ -1236,7 +1462,7 @@ class SmokeTestCompiler(CompilerBackend):
                     else "ground_target"
                 ),
                 target_selector={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "color": None,
                     "exclude_colors": [],
                     "relation": "closest",
@@ -1251,14 +1477,14 @@ class SmokeTestCompiler(CompilerBackend):
                     else "executable"
                 ),
                 required_capabilities=(
-                    ["grounding.closest_door.euclidean.agent"]
+                    [self.closest_handle("euclidean", object_type)]
                     if metric == "euclidean"
-                    else ["grounding.closest_door.manhattan.agent"]
+                    else [self.closest_handle("manhattan", object_type)]
                     if metric == "manhattan"
                     else []
                 ),
                 confidence=0.85,
-                reason="Deterministic operator-intent fallback parsed a closest-door selector.",
+                reason="Deterministic operator-intent fallback parsed a closest-object selector.",
             )
 
         not_color_matches = re.findall(
@@ -1272,16 +1498,20 @@ class SmokeTestCompiler(CompilerBackend):
                 normalized,
             )
             not_color_matches.extend(extra)
-        if "door" in normalized and not_color_matches:
+        if object_type_mentioned and not_color_matches:
             exclude_colors = [
                 "grey" if c == "gray" else c
                 for c in not_color_matches
             ]
+            unique_handle = self.unique_handle(object_type)
+            excluded_required = [unique_handle]
+            if task_handle is not None:
+                excluded_required.append(task_handle)
             return OperatorIntent(
                 intent_type="task_instruction",
                 task_type="go_to_object",
                 target_selector={
-                    "object_type": "door",
+                    "object_type": object_type,
                     "color": None,
                     "exclude_colors": exclude_colors,
                     "relation": "unique",
@@ -1289,42 +1519,66 @@ class SmokeTestCompiler(CompilerBackend):
                     "distance_reference": None,
                 },
                 capability_status="executable",
-                required_capabilities=[
-                    "grounding.unique_door.color_filter",
-                    "task.go_to_object.door",
-                ],
+                required_capabilities=excluded_required,
                 confidence=0.85,
-                reason="Deterministic operator-intent fallback parsed an excluded-color door selector.",
+                reason=(
+                    "Deterministic operator-intent fallback parsed an excluded-color "
+                    "object selector."
+                ),
             )
 
-        if door_match:
-            color = "grey" if door_match.group("color") == "gray" else door_match.group("color")
+        if object_match:
+            color = (
+                "grey"
+                if object_match.group("color") == "gray"
+                else object_match.group("color")
+            )
+            matched_object_type = object_match.group("object_type")
+            matched_task_handle = self.task_handle(
+                "go_to_object",
+                matched_object_type,
+            )
             return OperatorIntent(
                 intent_type="task_instruction",
-                canonical_instruction=f"go to the {color} door",
+                canonical_instruction=f"go to the {color} {matched_object_type}",
                 task_type="go_to_object",
-                target={"color": color, "object_type": "door"},
+                target={"color": color, "object_type": matched_object_type},
                 target_selector=None,
-                required_capabilities=["task.go_to_object.door"],
+                required_capabilities=[matched_task_handle],
                 confidence=1.0,
-                reason="Deterministic operator-intent fallback parsed a door navigation task.",
+                reason=(
+                    "Deterministic operator-intent fallback parsed an object "
+                    "navigation task."
+                ),
             )
 
         delivery_match = re.search(
-            rf"\b(?P<color>{color_pattern}) (?P<object_type>door)\b.*\bdelivery target\b",
+            rf"\b(?P<color>{color_pattern}) "
+            rf"(?P<object_type>{object_type_pattern})\b.*\bdelivery target\b",
             normalized,
-        )
-        if delivery_match:
-            color = "grey" if delivery_match.group("color") == "gray" else delivery_match.group("color")
+        ) if object_type_pattern else None
+        if delivery_match is not None:
+            color = (
+                "grey"
+                if delivery_match.group("color") == "gray"
+                else delivery_match.group("color")
+            )
+            delivery_object_type = delivery_match.group("object_type")
             return OperatorIntent(
                 intent_type="knowledge_update",
                 knowledge_update={
-                    "delivery_target": {"color": color, "object_type": "door"}
+                    "delivery_target": {
+                        "color": color,
+                        "object_type": delivery_object_type,
+                    }
                 },
                 target_selector=None,
                 required_capabilities=[],
                 confidence=1.0,
-                reason="Deterministic operator-intent fallback parsed delivery target knowledge.",
+                reason=(
+                    "Deterministic operator-intent fallback parsed delivery "
+                    "target knowledge."
+                ),
             )
 
         if (
@@ -1346,7 +1600,7 @@ class SmokeTestCompiler(CompilerBackend):
                 task_type="go_to_object",
                 reference="last_target",
                 target_selector=None,
-                required_capabilities=["task.go_to_object.door"],
+                required_capabilities=[task_handle] if task_handle is not None else [],
                 confidence=0.8,
                 reason="Deterministic operator-intent fallback parsed a last-target reference.",
             )
@@ -1365,10 +1619,17 @@ class SmokeTestCompiler(CompilerBackend):
             or "what can you see" in normalized
             or "look around" in normalized
             or "around you" in normalized
-            or ("what doors" in normalized and ("see" in normalized or "there" in normalized or "visible" in normalized or "around" in normalized))
-            or ("which doors" in normalized and ("see" in normalized or "there" in normalized or "visible" in normalized or "available" in normalized))
-            or ("doors do you see" in normalized)
-            or ("do you see any door" in normalized)
+            or (
+                object_type_mentioned
+                and any(
+                    term in normalized
+                    for term in ("see", "there", "visible", "around", "available")
+                )
+                and any(
+                    prefix in normalized
+                    for prefix in ("what", "which", "do you see", "can you see")
+                )
+            )
         ):
             return OperatorIntent(
                 intent_type="status_query",
@@ -1428,18 +1689,23 @@ class SmokeTestCompiler(CompilerBackend):
         # truncating this to an ordinary motor command.
         until_target = re.search(
             rf"\b(?:until|till)\b.*\b(?:see|spot|observe|detect)\b.*"
-            rf"\b(?P<color>{color_pattern})\s+door\b",
+            rf"\b(?P<color>{color_pattern})\s+"
+            rf"(?P<object_type>{object_type_pattern})\b",
             normalized,
-        )
+        ) if object_type_pattern else None
         if until_target is not None and re.search(
             r"\b(?:go\s+straight|go\s+forward|move\s+forward|advance|step\s+ahead)\b",
             normalized,
         ):
             color = until_target.group("color")
             color = "grey" if color == "gray" else color
+            conditional_object_type = until_target.group("object_type")
             return OperatorIntent(
                 intent_type="conditional_sense_motor",
-                target={"color": color, "object_type": "door"},
+                target={
+                    "color": color,
+                    "object_type": conditional_object_type,
+                },
                 action_name="move_forward",
                 capability_status="executable",
                 required_capabilities=[
@@ -1460,32 +1726,44 @@ class SmokeTestCompiler(CompilerBackend):
                 ),
             )
 
-        # Ambiguous navigation: "go to the door" without a color specifier → ask which door.
+        # Ambiguous navigation to a typed object without a color specifier.
         if (
             is_navigation
-            and "door" in normalized
-            and not re.search(rf"\b(?:{color_pattern})\s+door\b", normalized)
+            and mentioned_object_type is not None
+            and not re.search(
+                rf"\b(?:{color_pattern})\s+{re.escape(mentioned_object_type)}\b",
+                normalized,
+            )
             and not re.search(r"\b(?:closest|nearest|farthest|furthest|highest|lowest|second|third|first)\b", normalized)
         ):
             color_list = "red, blue, green, yellow, purple, grey"
             return OperatorIntent(
                 intent_type="ambiguous",
                 confidence=0.85,
-                reason=f"Ambiguous target: no color specified. Please clarify which door. Supported: {color_list}",
+                reason=(
+                    f"Ambiguous target: no color specified. Please clarify which "
+                    f"{mentioned_object_type}. Supported: {color_list}"
+                ),
             )
 
-        # Ambiguous distance query: "how far is the door from you" — singular door, no color.
+        # Ambiguous distance query for one typed object without a color.
         if (
             ("how far" in normalized or "distance" in normalized)
-            and "door" in normalized
-            and not re.search(rf"\b(?:{color_pattern})\s+door\b", normalized)
-            and "doors" not in normalized
+            and mentioned_object_type is not None
+            and not re.search(
+                rf"\b(?:{color_pattern})\s+{re.escape(mentioned_object_type)}\b",
+                normalized,
+            )
+            and f"{mentioned_object_type}s" not in normalized
         ):
             color_list = "red, blue, green, yellow, purple, grey"
             return OperatorIntent(
                 intent_type="ambiguous",
                 confidence=0.85,
-                reason=f"Ambiguous query: no color specified. Please clarify which door. Supported: {color_list}",
+                reason=(
+                    f"Ambiguous query: no color specified. Please clarify which "
+                    f"{mentioned_object_type}. Supported: {color_list}"
+                ),
             )
 
         # Front-cell sense query paraphrases → status_query (no motion)
@@ -1529,7 +1807,7 @@ class SmokeTestCompiler(CompilerBackend):
 
         # Multi-motor sequence: "turn right once, and go straight two times"
         # Must be checked BEFORE single motor so the compound isn't truncated to one action.
-        _motor_seq = _parse_motor_sequence(motor_text)
+        _motor_seq = _parse_motor_sequence(motor_text, self.motor_object_terms())
         if _motor_seq is not None:
             # Encode each step as "action_name:count" in utterance_steps for lossless transport.
             seq_steps = [f"{a}:{c}" for a, c in _motor_seq]
@@ -1541,7 +1819,7 @@ class SmokeTestCompiler(CompilerBackend):
             )
 
         # Motor-command pattern: "go straight for N steps", "turn right twice", etc.
-        _motor = _parse_motor_command(motor_text)
+        _motor = _parse_motor_command(motor_text, self.motor_object_terms())
         if _motor is not None:
             action_name, count = _motor
             return OperatorIntent(
@@ -1679,7 +1957,7 @@ class LLMCompiler(CompilerBackend):
         active_claims_summary: dict[str, Any] | None = None,
         pending_proposal: dict[str, Any] | None = None,
     ) -> OperatorIntent:
-        object_types = list(get_registered_object_types() or ("door",))
+        object_types = list(self.object_types())
         payload = {
             "utterance": utterance,
             "knowledge": memory.knowledge,
@@ -1709,15 +1987,22 @@ class LLMCompiler(CompilerBackend):
         return self._compile_or_fallback(
             method_name="compile_operator_intent",
             schema_name="jeenom_operator_intent",
-            schema=operator_intent_json_schema(),
-            parser=OperatorIntent.from_dict,
+            schema=operator_intent_json_schema(object_types=object_types),
+            parser=lambda data: OperatorIntent.from_dict(
+                data,
+                object_types=object_types,
+            ),
             system_prompt=(
                 "You are the JEENOM operator intent compiler. Convert the operator utterance "
                 "into one typed OperatorIntent. You only describe intent; you do not update "
-                "memory, execute tasks, or call tools. Current executable task scope is only "
-                "go_to_object for door targets. For unsupported, ambiguous, non-door, pickup, "
-                "open, unlock, exploration, correction, or replan requests, emit unsupported "
-                "or ambiguous and do not fabricate a supported intent. Knowledge updates are "
+                "memory, execute tasks, or call tools. The payload's supported.object_types "
+                "and capability_manifest are authoritative. An object type being registered "
+                "does not make a task executable; require the exact task/grounding capability "
+                "handle declared by the manifest. Examples below use MiniGrid doors only as "
+                "illustrations: substitute the payload's exact object type and exact handles. "
+                "For unsupported, ambiguous, pickup, open, unlock, exploration, correction, "
+                "or replan requests, emit unsupported or ambiguous and do not fabricate a "
+                "supported intent. Knowledge updates are "
                 "narrowly limited to delivery_target. Question-shaped utterances must be "
                 "status_query intents, not knowledge_update intents. Scene questions such as "
                 "'what do you see around you' map to status_query=scene. Delivery-target "

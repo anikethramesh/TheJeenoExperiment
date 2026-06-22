@@ -51,16 +51,26 @@ The current 13B.5 runtime:
 
 This is **not** autonomous search. The procedure may execute only the operator-authorized action.
 
+Pulled-forward Phase 14 object-parametric slice:
+
+- `OperationalContext.object_vocabulary` and `PlanningSemantics` now drive deterministic
+  parsing, LLM tool schemas, task handles, grounding handles, mission continuations, and
+  station task-plan construction;
+- exact manifest handles remain the capability authority, so registering an object word does
+  not fabricate executable support;
+- active claims expose an object-generic view while preserving the legacy
+  `ranked_scene_doors` field for compatibility.
+
 ### Verification Baseline
 
-Last verified with the 13B.5 implementation:
+Last verified after the object-parametric routing slice:
 
 - `python evals/eval_master.py`: **78/78**
 - `python evals/eval_master.py --suite orpi`: **10/10**
 - `python evals/eval_master.py --suite cleanup`: **30/30**
 - `python evals/eval_master.py --suite llm_path`: **5/5**
 - `python evals/eval_master.py --suite live_llm`: **1/1** when a live backend is configured
-- `python -m pytest -q tests`: **322 passed**, 1 warning, 12 subtests passed
+- `python -m pytest -q tests`: **333 passed**, 1 warning, 12 subtests passed
 
 The deterministic gate runs without the live LLM key. The `live_llm` lane is opt-in and is not
 part of the offline release gate.
@@ -299,7 +309,8 @@ branch:
 
 - manifest-derived compiler prompt examples;
 - injected runtime package instead of MiniGrid imports in generic station code;
-- context-derived object/color parsing;
+- finish migration of legacy door-named claim/output compatibility fields;
+- context-derived color schemas and remaining example/help text;
 - stronger static architecture guards.
 
 Structural `MiniGridSense` and `MiniGridSpine` bindings are validated by the second-substrate work,
@@ -347,8 +358,10 @@ operators or untrusted text.
 - Registry preconditions and validation hooks are not yet a universal executable preflight
   mechanism.
 - `search_allowed` does not yet construct bounded evidence-gathering behavior.
-- Some generic-looking modules still contain MiniGrid vocabulary or bindings tracked for
-  Phases 14-15.
+- Legacy compatibility names such as `ranked_scene_doors`, `ranked_doors`, and `other_door`
+  remain even though runtime object routing is context-driven; Phase 14 owns their migration.
+- Some generic-looking modules still contain MiniGrid examples or bindings tracked for Phases
+  14-15.
 - `OperatorStationSession` remains a large facade; its accepted decomposition is deliberately
   parked for Phase 16.
 - Adversarial prompt and schema-valid side-effect containment are not yet proven.
