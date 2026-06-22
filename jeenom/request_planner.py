@@ -44,7 +44,7 @@ def _fold_steering(steps: list[RequestPlanStep], directive: Any) -> None:
 
 
 def _objective_type(intent: OperatorIntent) -> str:
-    if intent.intent_type == "task_instruction":
+    if intent.intent_type in {"task_instruction", "conditional_sense_motor"}:
         return "task"
     if intent.intent_type == "motor_command":
         return "motor_control"
@@ -66,7 +66,7 @@ def _expected_response(intent: OperatorIntent) -> str:
         return "propose_synthesis"
     if intent.intent_type == "primitive_definition":
         return "propose_definition"
-    if intent.intent_type == "task_instruction":
+    if intent.intent_type in {"task_instruction", "conditional_sense_motor"}:
         return "execute_task"
     if intent.intent_type == "motor_command":
         return "execute_motor"
@@ -258,6 +258,76 @@ def build_request_plan(
             steps=steps,
             preservation_signals=semantics.preservation_signals(utterance),
             expected_response=expected_response,
+            steering=steering_payload,
+        )
+
+    if intent.intent_type == "conditional_sense_motor":
+        target = dict(intent.target or {})
+        action_name = str(intent.action_name or "")
+        steps.extend(
+            [
+                RequestPlanStep(
+                    step_id="sense_stop_condition",
+                    layer="sensing",
+                    operation="execute",
+                    required_handle="sensing.find_object_by_color_type",
+                    inputs={"target": target},
+                    outputs=["target_visible", "target_location", "target_object"],
+                    constraints={
+                        "fresh_evidence_required": True,
+                        "evidence_scope": "visible_only",
+                    },
+                    environment_assumption_ids=environment_assumption_ids,
+                ),
+                RequestPlanStep(
+                    step_id="execute_conditional_action",
+                    layer="action",
+                    operation="execute",
+                    required_handle=f"action.{action_name}",
+                    inputs={"action_name": action_name},
+                    outputs=["execution_report"],
+                    depends_on=["sense_stop_condition"],
+                    constraints={
+                        "stop_claim": "target_visible",
+                        "stop_value": True,
+                    },
+                    environment_assumption_ids=environment_assumption_ids,
+                ),
+                RequestPlanStep(
+                    step_id="execute_conditional_mission",
+                    layer="task",
+                    operation="execute",
+                    required_handle="task.act_until_evidence",
+                    inputs={
+                        "target": target,
+                        "action_name": action_name,
+                        "stop_claim": "target_visible",
+                        "stop_value": True,
+                    },
+                    outputs=["task_result"],
+                    depends_on=[
+                        "sense_stop_condition",
+                        "execute_conditional_action",
+                    ],
+                    memory_writes=[
+                        "episodic.last_request_plan",
+                        "episodic.last_task",
+                        "episodic.last_result",
+                    ],
+                    environment_assumption_ids=environment_assumption_ids,
+                ),
+            ]
+        )
+        _fold_steering(steps, steering_directive)
+        return RequestPlan(
+            request_id=request_id,
+            original_utterance=utterance,
+            objective_type=objective_type,
+            objective_summary=intent.reason or "Conditional evidence mission.",
+            steps=steps,
+            preservation_signals=semantics.preservation_signals(utterance),
+            expected_response=expected_response,
+            environment_assumptions=environment_assumptions,
             steering=steering_payload,
         )
 

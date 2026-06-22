@@ -421,7 +421,7 @@ and the first four Phase 13B slices: claim freshness, MiniGrid FOV, typed
 
 **Verification:** deterministic gate `python evals/eval_master.py` is 78/78 passing
 (incl. 10/10 ORPI, 30/30 cleanup, 5/5 llm_path), run with the live-LLM key stripped so it
-stays reproducible; `python -m pytest -q tests` is 312 passing. The opt-in `--suite live_llm`
+stays reproducible; `python -m pytest -q tests` is 322 passing. The opt-in `--suite live_llm`
 (real model calls, skip-if-no-key) is 1/1 and is NOT part of the gate.
 
 Current enforced gateways:
@@ -552,11 +552,11 @@ Current architectural debt:
 Phase 12 and 12D are complete for MiniGrid ORPI v0.1. The current phase is
 **Phase 13B - Partial observability, evidence gathering, and ask-for-help**.
 Claim freshness, MiniGrid FOV, `needs_evidence`, LLM-path parity, and interactive
-episode continuity are implemented. The next slice is a typed conditional
-evidence mission: Sense produces fresh target evidence, Cortex evaluates the
-stop rule and issues one `ExecutionContract` at a time, and Spine executes only
-that contract. Today `conditional_sense_motor` is only a conservative
-non-actuation/clarification gate; it is not yet an executing procedure. Broader
+episode continuity are implemented. Typed conditional evidence missions are also
+implemented: `MissionContract` carries a validated procedure and exact role
+bindings; Sense produces fresh target evidence, Cortex evaluates the stop rule
+and issues one `ExecutionContract` at a time, and Spine executes only that
+contract. Blocked movement and budget exhaustion terminate finitely. Broader
 autonomous `search_allowed` behavior follows separately.
 
 Phase order from here, and the reasoning behind it:

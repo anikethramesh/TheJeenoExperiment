@@ -564,10 +564,22 @@ class OperatorStationSession:
             base["object_vocabulary"] = manifest_dict.get("object_vocabulary", [])
         return base
 
-    def _budget_failure_outcome(self) -> FailureOutcome | None:
-        """Phase 13A: a budget-exhausted episode surfaces as a typed FailureOutcome so the
-        LabelledEpisode attributes it to the steering authority limit, not a substrate fault."""
+    def _task_failure_outcome(self) -> FailureOutcome | None:
+        """Project bounded runtime failures into the typed episode attribution surface."""
         if not getattr(self, "_turn_budget_exhausted", False):
+            final_state = (
+                self.last_result.get("final_state", {})
+                if isinstance(self.last_result, dict)
+                else {}
+            )
+            if final_state.get("failure_reason") == "no_progress":
+                return FailureOutcome(
+                    category="stuck",
+                    detail=(
+                        "Conditional mission halted because the authorized action "
+                        "did not change the sensed agent pose."
+                    ),
+                )
             return None
         return FailureOutcome(
             category="budget_exhausted",
@@ -616,7 +628,7 @@ class OperatorStationSession:
                 "kb_reuse_counters": self.knowledge_channel.consume_reuse_counters(),
             },
             last_result=self.last_result,
-            failure_outcome=self._budget_failure_outcome(),
+            failure_outcome=self._task_failure_outcome(),
         )
         self.last_cortical_envelope = command_result.envelope
         self.last_approved_command = command_result.command
@@ -989,6 +1001,29 @@ class OperatorStationSession:
             record_plan=record_plan,
         )
         return self._run_task_with_ticket(ticket)
+
+    def _run_conditional_mission(
+        self,
+        mission_plan: MissionExecutionPlan,
+    ) -> str:
+        contract = mission_plan.mission_contract
+        if contract is None or contract.procedure is None:
+            raise RuntimeError("Conditional mission requires an approved procedure")
+        ticket = self.side_effect_authority.issue_execution_ticket(
+            instruction=contract.description,
+            task_type=contract.procedure.task_type,
+            params=contract.params,
+            request_plan=mission_plan.request_plan,
+            readiness_graph=mission_plan.readiness_graph,
+            source="mission_cortex",
+            mission_id=mission_plan.mission_id,
+            parent_request_id=mission_plan.request_plan.request_id,
+            provenance=dict(mission_plan.provenance),
+            mission_contract=contract,
+        )
+        mission_plan.child_tickets.append(ticket)
+        result = self._run_task_with_ticket(ticket)
+        return self.result_summary(result)
 
     def _motor_intent_for_action(self, action_name: str, count: int) -> OperatorIntent:
         return OperatorIntent(
@@ -4963,7 +4998,23 @@ class OperatorStationSession:
         self.log("compiling task/procedure and warming JIT templates before motion")
         task_override = None
         procedure_override = None
-        if _parse_go_to_object_utterance(instruction) is not None:
+        if ticket.mission_contract is not None:
+            contract = ticket.mission_contract
+            if contract.procedure is None:
+                raise RuntimeError("Mission ExecutionTicket requires a procedure")
+            task_override = TaskRequest(
+                instruction=instruction,
+                task_type=ticket.task_type,
+                params=dict(ticket.params),
+                source="mission_cortex",
+            )
+            procedure_override = contract.procedure
+            self.log(
+                "using approved mission contract: "
+                f"mission_id={contract.mission_id} "
+                f"procedure={procedure_override.steps}"
+            )
+        elif _parse_go_to_object_utterance(instruction) is not None:
             task_override = self.compose_known_task(instruction)
             procedure_override = self.compose_known_procedure(task_override)
             self.log(
@@ -5774,6 +5825,8 @@ class OperatorStationSession:
             available_targets = progress.get("available_targets")
             if available_targets is not None:
                 lines.append(f"available_targets={_format_targets(available_targets)}")
+        elif result["final_state"].get("failure_reason"):
+            lines.append(f"reason={result['final_state']['failure_reason']}")
         return "\n".join(lines)
 
     def _last_task_complete(self) -> bool | None:

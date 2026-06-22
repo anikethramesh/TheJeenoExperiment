@@ -13,6 +13,7 @@ from .schemas import (
     MissionContract,
     MissionExecutionPlan,
     OperatorIntent,
+    ProcedureRecipe,
     PrimitiveDefinitionRequest,
     ReadinessGraph,
     RequestPlan,
@@ -487,6 +488,87 @@ class MissionCortex:
             environment_identity=environment_identity,
         )
         return plan, graph
+
+    def plan_conditional_evidence_action(
+        self,
+        intent: OperatorIntent,
+        *,
+        utterance: str,
+        active_claims: StationActiveClaims | None,
+        claims_valid: bool,
+        environment_identity: Any,
+    ) -> MissionExecutionPlan:
+        """Build the typed mission that binds one Sense primitive to one Spine command."""
+        if intent.intent_type != "conditional_sense_motor":
+            raise ValueError("Conditional evidence planning requires conditional_sense_motor")
+        target = dict(intent.target or {})
+        action_name = str(intent.action_name or "")
+        if not target.get("color") or not target.get("object_type") or not action_name:
+            raise ValueError("Conditional evidence mission requires target and action")
+
+        procedure = ProcedureRecipe(
+            task_type="act_until_evidence",
+            steps=["act_until_evidence"],
+            source="mission_cortex",
+            compiler_backend="deterministic",
+            validated=True,
+            rationale=(
+                "Sense target visibility, let Cortex evaluate first_match, and issue "
+                "one approved Spine action only while the condition is false."
+            ),
+        )
+        params = {
+            "color": target["color"],
+            "object_type": target["object_type"],
+            "action_name": action_name,
+            "stop_claim": "target_visible",
+            "stop_value": True,
+        }
+        required = [
+            "sensing.find_object_by_color_type",
+            f"action.{action_name}",
+            "task.act_until_evidence",
+        ]
+        mission_id = _mission_id_for(utterance, "|".join(required))
+        contract = MissionContract(
+            mission_id=mission_id,
+            description=utterance,
+            task_sequence=[utterance],
+            success_condition="target_visible",
+            abort_on_failure=True,
+            risk_tier="operator_authorized",
+            cadence="control",
+            procedure=procedure,
+            params=params,
+            required_capabilities=required,
+        )
+        plan = build_request_plan(
+            utterance,
+            intent,
+            active_claims_summary=None,
+            environment_identity=environment_identity,
+            planning_semantics=self.planning_semantics,
+        )
+        graph = evaluate_request_plan(
+            plan,
+            registry=self.registry,
+            active_claims=active_claims,
+            claims_valid=claims_valid,
+            environment_identity=environment_identity,
+        )
+        return MissionExecutionPlan(
+            mission_id=mission_id,
+            description=utterance,
+            request_plan=plan,
+            readiness_graph=graph,
+            mission_contract=contract,
+            provenance={
+                "original_utterance": utterance,
+                "sense_primitive": "sensing.find_object_by_color_type",
+                "action_primitive": f"action.{action_name}",
+                "stop_claim": "target_visible",
+            },
+        )
 
     def plan_inline_metric_request(
         self,

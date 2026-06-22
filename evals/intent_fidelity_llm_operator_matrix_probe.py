@@ -368,6 +368,7 @@ def main() -> int:
             llm_payloads={
                 "if the cell ahead is empty, go forward once": _base_operator_intent(
                     intent_type="conditional_sense_motor",
+                    capability_status="needs_clarification",
                     reason="Conditional motor command requires Sense evidence before actuation.",
                 )
             },
@@ -375,6 +376,36 @@ def main() -> int:
             expected_command_kind="clarification",
             response_contains="Conditional motor command requires Sense evidence",
             compare_graph_status=False,
+        ),
+        MatrixCase(
+            name="conditional_until_visible_mission",
+            utterance="go straight until you see a blue door",
+            llm_payloads={
+                "go straight until you see a blue door": _base_operator_intent(
+                    intent_type="conditional_sense_motor",
+                    target={"color": "blue", "object_type": "door"},
+                    action_name="move_forward",
+                    required_capabilities=[
+                        "sensing.find_object_by_color_type",
+                        "action.move_forward",
+                        "task.act_until_evidence",
+                    ],
+                    steering_directive={
+                        "budget": {
+                            "max_steps": 32,
+                            "max_clarifications": None,
+                        },
+                        "scope": "visible_only",
+                        "risk": "operator_authorized",
+                        "stopping_rule": "first_match",
+                    },
+                    reason="LLM preserved the until-visible stop condition.",
+                )
+            },
+            expected_primary_intent="conditional_sense_motor",
+            expected_command_kind="conditional_mission_execute",
+            response_contains="RUN",
+            compare_pose=True,
         ),
         MatrixCase(
             name="concept_teach",

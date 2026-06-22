@@ -48,6 +48,7 @@ def _normalize_utterance(utterance: str) -> str:
 _NEW_INTENT_COMMAND_KINDS = {
     "ambiguous",
     "claim_reference",
+    "conditional_mission_execute",
     "concept_forget",
     "concept_teach",
     "ground_target_query",
@@ -572,43 +573,49 @@ class TurnOrchestrator:
             return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
 
         if intent.intent_type == "conditional_sense_motor":
-            import uuid
-            cond_plan = RequestPlan(
-                request_id=f"conditional_sense_motor:{str(uuid.uuid4())[:8]}",
-                original_utterance=utterance,
-                objective_type="control",
-                objective_summary="Conditional motor: sense environment before actuation.",
-                steps=[
-                    RequestPlanStep(
-                        step_id="sense_condition",
-                        layer="sensing",
-                        operation="execute",
-                        inputs={"query": "scene"},
-                        outputs=["sense.front_cell"],
-                    ),
-                    RequestPlanStep(
-                        step_id="conditional_execute_motor",
-                        layer="action",
-                        operation="refuse",
-                        depends_on=["sense_condition"],
-                        inputs={"condition": utterance},
-                    ),
-                ],
-                expected_response="ask_clarification",
-            )
-            cond_graph = self.cortex_session.evaluate(
-                cond_plan,
+            target = intent.target or {}
+            if (
+                not target.get("color")
+                or not target.get("object_type")
+                or not intent.action_name
+                or intent.steering_directive is None
+            ):
+                return _approved(
+                    "clarification",
+                    utterance,
+                    "Conditional motor command requires Sense evidence before actuation. "
+                    "Please specify a visible target condition and the action to repeat.",
+                )
+            mission_plan = self.mission_cortex.plan_conditional_evidence_action(
+                intent,
+                utterance=utterance,
                 active_claims=station.active_claims,
                 claims_valid=station._claims_valid_for_current_environment(),
                 environment_identity=station.current_environment_identity,
             )
-            station.last_request_plan = cond_plan
-            station.last_readiness_graph = cond_graph
+            station.last_request_plan = mission_plan.request_plan
+            station.last_readiness_graph = mission_plan.readiness_graph
+            station._record_request_state(
+                request_plan=mission_plan.request_plan,
+                readiness_graph=mission_plan.readiness_graph,
+                reason="conditional_mission_planned",
+            )
+            if mission_plan.readiness_graph.graph_status != "executable":
+                return _approved(
+                    "clarification",
+                    utterance,
+                    (
+                        "Conditional mission is not executable: "
+                        f"{mission_plan.readiness_graph.explanation}"
+                    ),
+                )
             return _approved(
-                "clarification",
+                "conditional_mission_execute",
                 utterance,
-                "Conditional motor command requires Sense evidence before actuation. "
-                "Please confirm the condition and the fallback action.",
+                payload={"mission_plan": mission_plan},
+                request_id=mission_plan.request_plan.request_id,
+                request_plan=mission_plan.request_plan,
+                readiness_graph=mission_plan.readiness_graph,
             )
 
         if intent.intent_type == "mission_contract":
@@ -954,6 +961,8 @@ class TurnOrchestrator:
                 command.payload["sequence"],
                 command.utterance,
             )
+        if command.kind == "conditional_mission_execute":
+            return station._run_conditional_mission(command.payload["mission_plan"])
         if command.kind == "mission_execute":
             return station._run_mission(command.payload["steps"], command.utterance)
         if command.kind == "cache_query":

@@ -31,10 +31,11 @@ Elon-algorithm rule for this repo:
   **13B in progress**: 13B.1 claim freshness, 13B.2 MiniGrid FOV, 13B.3 `needs_evidence`,
   and 13B.4 eval-pipeline + tool-call discipline (deterministic gate + opt-in `live_llm`
   suite; root-caused and fixed a silent LLM→regex fallback from a `max_tokens` truncation)
-  are complete. Interactive episode continuity is also fixed. The next implementation slice is
-  **13B.5: a typed conditional evidence mission** for requests such as "go straight until you
-  see a blue door." It must compose sensing, Cortex stop-condition evaluation, and one-step Spine
-  contracts; bounded general search/meta-primitives remain the following 13B decision).
+  are complete. Interactive episode continuity is also fixed. **13B.5 is complete**: typed
+  conditional evidence missions now compose Sense grounding, Cortex stop-condition evaluation,
+  and one-step Spine contracts for requests such as "go straight until you see a blue door."
+  Bounded general `search_allowed` behavior and deterministic meta-primitives remain the next
+  13B decision).
   13A delivered the typed, constraint-first steering layer
   (`SteeringDirective`: budget/scope/risk/stopping-rule) that demonstrably reshapes plan
   assembly — risk withdraws actuation authority via `needs_authorization`, budget caps
@@ -83,8 +84,8 @@ Elon-algorithm rule for this repo:
 - Phase 11B is complete. Hostile primitive/mission evals now prove paraphrase
   stability, typed procedure teaching, conditional Sense-before-Spine
   **non-actuation gating**, multi-action lineage, and compound mission provenance.
-  That conditional guard does not yet implement an executing sense/act/stop loop;
-  13B.5 owns that capability.
+  Phase 13B.5 has since extended that guard into an executing, bounded
+  sense/evaluate/act/stop mission.
 - Phase 11C is complete. Seven compounding architectural violations resolved
   (import partition, domain purge, TurnOrchestrator dispatch extraction,
   knowledge-type rerouting, IntentCache, Readiness deletion, eval naming
@@ -102,7 +103,7 @@ Elon-algorithm rule for this repo:
   - `python evals/eval_master.py --suite llm_path`: 5/5 passing
   - `python evals/eval_master.py --suite live_llm`: 1/1 passing (opt-in; REAL model calls,
     skips when `OPENROUTER_API_KEY` is unset — NOT part of the gate)
-  - `python -m pytest -q tests`: 312 passed, 1 warning, 12 subtests passed
+  - `python -m pytest -q tests`: 322 passed, 1 warning, 12 subtests passed
 - Operator routing contract:
   - `run_operator_station.py` and `OperatorStationSession` default to `compiler=llm`
   - bounded deterministic controls, pending-flow continuations, and exact
@@ -2065,34 +2066,36 @@ sequence; only zero parseable steps is unparseable — matching the `sequence_in
 `tests/test_motor_sequence_single_step.py` covers single-step, multi-step, and empty. The full
 compound flow now works end-to-end under partial observability.
 
-Verification after the continuity follow-up: `pytest -q tests` 312 passed;
-`eval_master` 78/78. The opt-in `--suite live_llm` remains 1/1 when run with a configured
-backend.
+Verification after 13B.5: `pytest -q tests` 322 passed; `eval_master` 78/78;
+ORPI 10/10. The opt-in `--suite live_llm` remains 1/1 when run with a configured backend.
 
 #### 13B.5 — conditional evidence mission contract
 
-Status: **next; not implemented yet.**
+Status: **complete.**
 
-Current repo gap: `conditional_sense_motor` can be classified, but
-`TurnOrchestrator` currently resolves it to clarification/non-actuation rather than a runnable
-procedure. The LLM operator matrix verifies this conservative gate only. Any observed movement
-from a phrase such as "turn right and go straight until..." came from the ordinary motor-sequence
-parser discarding the stop clause, not from a genuine conditional mission.
+Delivered:
 
-Target operator request: "go straight until you see a blue door." This is not a raw repeated
-motor command and it is not permission for unconstrained global search. It is a typed,
-bounded conditional mission:
+- `SmokeTestCompiler` and the strict LLM prompt preserve `until`/`till` stop clauses as
+  `conditional_sense_motor`; they no longer truncate the request to `motor_command` or
+  `motor_sequence`.
+- `MissionCortex.plan_conditional_evidence_action` constructs a `MissionContract` carrying the
+  validated `ProcedureRecipe`, target/action/stop parameters, and exact Sense/Spine/task handles.
+- Readiness validates `sensing.find_object_by_color_type`, the configured action handle, and
+  `task.act_until_evidence` before execution.
+- The station mints an `ExecutionTicket` carrying the approved `MissionContract`; the normal
+  task runtime consumes the contract's `TaskRequest` and procedure without recompiling them.
+- `act_until_evidence` is an ORPI-visible Cortex procedure contract with actuation authority,
+  validation hook, and typed `budget_exhausted` / `no_progress` failure modes.
 
-1. The compiler emits the target evidence predicate, allowed actuation, stopping rule, and budget.
-2. The station/readiness path validates the mission and issues an `ExecutionTicket` authorizing
-   runtime entry.
-3. The procedure requests fresh target-visibility evidence from Sense.
-4. Cortex evaluates the stop condition before every actuation.
-5. If satisfied, Cortex completes the procedure without issuing another motor contract.
-6. If unsatisfied and still within budget, Cortex issues exactly one `ExecutionContract` for the
-   allowed action; Spine executes it and returns an `ExecutionReport`.
-7. The procedure repeats from sensing. Budget exhaustion or no progress produces a typed failure,
-   never an unbounded spin.
+Runtime sequence:
+
+1. Sense grounds the requested target and emits fresh `target_visible` evidence.
+2. Cortex checks `target_visible` before actuation.
+3. If false, Cortex issues exactly one `ExecutionContract` for the approved action.
+4. Spine executes that one contract and returns an `ExecutionReport`.
+5. Cortex requests fresh evidence again and stops before another action on the first match.
+6. A blocked action produces `FailureOutcome(category="stuck")`; budget exhaustion remains typed
+   and finite.
 
 Architecture boundary:
 
@@ -2103,19 +2106,19 @@ Architecture boundary:
   implement the loop.
 - The LLM may compile the typed mission fields, but it never runs inside the loop.
 
-Required red bars:
+Red bars now green:
 
-- the initial observation already satisfies the condition -> zero actuation
-- false condition -> one Sense pass before one Spine action
+- initial matching evidence -> zero actuation
+- false evidence -> one Sense pass before one Spine action
 - newly visible target -> stop before the next action
-- deterministic and LLM routes normalize to the same mission contract
+- deterministic and LLM routes normalize to the same conditional mission
 - task starts from the current live pose and does not reset the adapter
 - budget/no-progress termination is typed and finite
-- no phrase-specific MiniGrid branch in station orchestration
+- the approved mission procedure survives onto the `ExecutionTicket`
 
-After this slice, decide the broader `search_allowed` procedure and deterministic meta-primitives.
-General search may choose actions; this conditional mission may execute only the operator-specified
-action.
+Scope boundary: this is not autonomous exploration. The procedure may execute only the
+operator-specified action. Broader `search_allowed` procedures may choose evidence-gathering
+actions and remain the next 13B design.
 
 #### 13B spike — claim freshness under partial observability
 

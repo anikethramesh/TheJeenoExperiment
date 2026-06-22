@@ -1926,6 +1926,29 @@ class OperatorIntent:
                 raise SchemaValidationError("motor_command requires action_name")
             if self.repeat_count is not None and self.repeat_count < 1:
                 raise SchemaValidationError("motor_command repeat_count must be >= 1")
+        elif self.intent_type == "conditional_sense_motor":
+            if self.capability_status == "needs_clarification":
+                return
+            has_target = (
+                isinstance(self.target, dict)
+                and self.target.get("color") is not None
+                and self.target.get("object_type") is not None
+            )
+            if not has_target:
+                raise SchemaValidationError(
+                    "conditional_sense_motor requires a color and object_type target"
+                )
+            if not self.action_name:
+                raise SchemaValidationError(
+                    "conditional_sense_motor requires action_name"
+                )
+            if (
+                self.steering_directive is None
+                or self.steering_directive.stopping_rule != "first_match"
+            ):
+                raise SchemaValidationError(
+                    "conditional_sense_motor requires stopping_rule=first_match"
+                )
         elif self.intent_type == "mission_contract":
             if not self.mission_steps or len(self.mission_steps) < 2:
                 raise SchemaValidationError(
@@ -2797,19 +2820,33 @@ class ExecutionContext:
 
 @dataclass
 class MissionContract:
-    """L4 goal — an ordered sequence of tasks with explicit success conditions.
+    """L4 goal — approved tasks/procedure with explicit success conditions.
 
     Distinct from sequence_instruction (L2 procedure): MissionContract carries
-    abort-on-failure semantics and is the entry point for the Phase 9 repair loop.
+    abort-on-failure semantics and may carry the validated ProcedureRecipe and
+    parameters that an ExecutionTicket authorizes.
     """
 
     mission_id: str
     description: str
-    task_sequence: list[str]          # ordered raw task utterances
+    task_sequence: list[str]          # ordered raw task utterances; one for a conditional mission
     success_condition: str = "all_complete"
     abort_on_failure: bool = True
     risk_tier: str = "low"
     cadence: str | None = None
+    procedure: ProcedureRecipe | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    required_capabilities: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.mission_id:
+            raise SchemaValidationError("MissionContract requires mission_id")
+        if not self.task_sequence:
+            raise SchemaValidationError("MissionContract requires at least one task")
+        if self.procedure is not None and not self.procedure.steps:
+            raise SchemaValidationError("MissionContract procedure requires at least one step")
+        if self.procedure is not None and not self.procedure.validated:
+            raise SchemaValidationError("MissionContract procedure must be validated")
 
 
 @dataclass
@@ -2897,6 +2934,7 @@ class ExecutionTicket:
     mission_id: str | None = None
     parent_request_id: str | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
+    mission_contract: MissionContract | None = None
 
     def __post_init__(self) -> None:
         if self.readiness_graph.request_id != self.request_id:
@@ -2907,6 +2945,24 @@ class ExecutionTicket:
             raise SchemaValidationError("ExecutionTicket requires executable readiness graph")
         if self.readiness_graph.next_action != "execute_task":
             raise SchemaValidationError("ExecutionTicket requires next_action=execute_task")
+        if self.mission_contract is not None:
+            contract = self.mission_contract
+            if self.mission_id != contract.mission_id:
+                raise SchemaValidationError(
+                    "ExecutionTicket mission_id must match MissionContract"
+                )
+            if contract.procedure is None:
+                raise SchemaValidationError(
+                    "ExecutionTicket MissionContract requires an approved procedure"
+                )
+            if self.task_type != contract.procedure.task_type:
+                raise SchemaValidationError(
+                    "ExecutionTicket task_type must match MissionContract procedure"
+                )
+            if self.params != contract.params:
+                raise SchemaValidationError(
+                    "ExecutionTicket params must match MissionContract params"
+                )
 
 
 @dataclass
@@ -3565,7 +3621,8 @@ def operator_intent_json_schema() -> dict[str, Any]:
             "action_name": {
                 "type": ["string", "null"],
                 "description": (
-                    "For motor_command: the low-level action primitive key to authorize "
+                    "For motor_command or conditional_sense_motor: the low-level action "
+                    "primitive key to authorize "
                     "(e.g. 'move_forward', 'turn_right', 'turn_left'). "
                     "Null for all other intents."
                 ),

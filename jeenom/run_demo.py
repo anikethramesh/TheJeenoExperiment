@@ -285,6 +285,30 @@ def prewarm_jit_cache(
             ExecutionContext(active_skill="navigate_to_object", params=dict(navigate_params)),
         ),
     ]
+    if "act_until_evidence" in procedure_recipe.steps:
+        sense_warmups = [
+            (
+                "act_until_evidence:idle",
+                EvidenceFrame(
+                    needs=["object_location", "agent_pose"],
+                    context=dict(base_params),
+                    active_step="act_until_evidence",
+                ),
+                ExecutionContext(active_skill="idle", params=dict(base_params)),
+            ),
+            (
+                "act_until_evidence:action",
+                EvidenceFrame(
+                    needs=["object_location", "agent_pose"],
+                    context=dict(base_params),
+                    active_step="act_until_evidence",
+                ),
+                ExecutionContext(
+                    active_skill=str(base_params.get("action_name") or "move_forward"),
+                    params=dict(base_params),
+                ),
+            ),
+        ]
 
     seen_sense_labels: set[str] = set()
     for label, evidence_frame, execution_context in sense_warmups:
@@ -339,6 +363,21 @@ def prewarm_jit_cache(
             ),
         ),
     ]
+    if "act_until_evidence" in procedure_recipe.steps:
+        action_name = str(base_params.get("action_name") or "move_forward")
+        skill_warmups = [
+            (
+                action_name,
+                ExecutionContract(
+                    skill=action_name,
+                    params=dict(base_params),
+                    stop_conditions=[
+                        str(base_params.get("stop_claim") or "target_visible")
+                    ],
+                    source="cortex",
+                ),
+            )
+        ]
 
     seen_skill_labels: set[str] = set()
     for label, contract in skill_warmups:
@@ -488,7 +527,7 @@ def run_episode(
                 created_at_loop=-1,
             )
 
-        if instruction is not None:
+        if instruction is not None and task.task_type == "go_to_object":
             target_probe = _probe_requested_target(env_id=env_id, seed=seed, task_request=task)
             if target_probe is not None:
                 aligned_target = target_probe.get("matched_target")

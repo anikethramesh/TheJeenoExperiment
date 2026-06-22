@@ -16,9 +16,10 @@ JEENOM is an architecture prototype in MiniGrid. The current work is **Phase
 13B: partial observability, evidence gathering, and ask-for-help**. Completed
 13B slices include claim freshness, native MiniGrid FOV, typed
 `needs_evidence`, deterministic/LLM-path routing discipline, and continuous
-interactive episode ownership. The next slice is a typed Cortex-owned
-sense/evaluate/act procedure for requests such as "go straight until you see a
-blue door."
+interactive episode ownership. Typed Cortex-owned conditional evidence missions
+are now implemented for requests such as "go straight until you see a blue
+door." The next work is broader bounded `search_allowed` evidence gathering and
+deterministic meta-primitives.
 
 The project has eval-backed enforcement for the core architecture boundaries:
 
@@ -92,6 +93,10 @@ Implemented so far:
 - `CorticalEnvelope`, `ApprovedCommand`, `ExecutionTicket`, `RawMotorTicket`,
   `MemoryWriteTicket`, and `CommandResult` as the current execution-authority
   and trace objects.
+- `MissionContract` can carry a validated conditional `ProcedureRecipe` that
+  binds target sensing to one approved Spine action. Cortex re-senses and checks
+  the stop claim before every action; no-progress and budget exhaustion terminate
+  as typed failures.
 - Plan reuse, environment assumptions, stale-claim detection, mismatch detection,
   and early repair-loop scaffolding.
 - JIT procedure/sense/skill template caching with the invariant that rendered
@@ -250,13 +255,13 @@ Current green baseline:
 - `python evals/eval_master.py --suite orpi`: 10/10 passing.
 - `python evals/eval_master.py --suite cleanup`: 30/30 passing.
 - `python evals/eval_master.py --suite llm_path`: 5/5 passing.
-- `python -m pytest -q tests`: 312 passed, 1 warning, 12 subtests passed.
+- `python -m pytest -q tests`: 322 passed, 1 warning, 12 subtests passed.
 - `python evals/eval_master.py --suite live_llm`: opt-in, 1/1 with a configured key.
 
 Roadmap:
 
-- Phase 13B: current. Complete conditional evidence missions, bounded evidence
-  gathering, and deterministic meta-primitives.
+- Phase 13B: current. Conditional evidence missions are complete; bounded
+  `search_allowed` evidence gathering and deterministic meta-primitives remain.
 - Phase 13C: curriculum, knowledge reuse, and intervention metrics.
 - Phase 14: cheap substrate-leak removal plus an AI2-THOR discovery spike.
 - Phase 15: committed cross-substrate demonstration and ORPI v1 freeze.

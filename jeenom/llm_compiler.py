@@ -27,6 +27,7 @@ from .schemas import (
     SelectionObjective,
     SensePlanTemplate,
     SkillPlanTemplate,
+    SteeringDirective,
     TaskRequest,
     memory_updates_json_schema,
     get_registered_object_types,
@@ -1423,6 +1424,42 @@ class SmokeTestCompiler(CompilerBackend):
                 reason="Door toggle/open task is unsupported.",
             )
 
+        # Bounded conditional evidence mission: preserve the stop clause instead of
+        # truncating this to an ordinary motor command.
+        until_target = re.search(
+            rf"\b(?:until|till)\b.*\b(?:see|spot|observe|detect)\b.*"
+            rf"\b(?P<color>{color_pattern})\s+door\b",
+            normalized,
+        )
+        if until_target is not None and re.search(
+            r"\b(?:go\s+straight|go\s+forward|move\s+forward|advance|step\s+ahead)\b",
+            normalized,
+        ):
+            color = until_target.group("color")
+            color = "grey" if color == "gray" else color
+            return OperatorIntent(
+                intent_type="conditional_sense_motor",
+                target={"color": color, "object_type": "door"},
+                action_name="move_forward",
+                capability_status="executable",
+                required_capabilities=[
+                    "sensing.find_object_by_color_type",
+                    "action.move_forward",
+                    "task.act_until_evidence",
+                ],
+                steering_directive=SteeringDirective(
+                    budget={"max_steps": 32},
+                    scope="visible_only",
+                    risk="operator_authorized",
+                    stopping_rule="first_match",
+                ),
+                confidence=0.95,
+                reason=(
+                    "Deterministic fallback preserved an until-visible condition as "
+                    "a bounded conditional evidence mission."
+                ),
+            )
+
         # Ambiguous navigation: "go to the door" without a color specifier → ask which door.
         if (
             is_navigation
@@ -1853,6 +1890,15 @@ class LLMCompiler(CompilerBackend):
                 "['action_name:count', ...], for example ['turn_left:2','move_forward:1']. "
                 "Do not emit sequence_instruction for all-motor sequences. "
                 "Set required_capabilities=[]. "
+                "When the operator says to repeat one motor action UNTIL or TILL a target "
+                "becomes visible — e.g. 'go straight until you see a blue door' — emit "
+                "intent_type='conditional_sense_motor', target={color:'blue',object_type:'door'}, "
+                "action_name='move_forward', repeat_count=null, required_capabilities=["
+                "'sensing.find_object_by_color_type','action.move_forward',"
+                "'task.act_until_evidence'], and steering_directive={budget:{max_steps:32,"
+                "max_clarifications:null},scope:'visible_only',risk:'operator_authorized',"
+                "stopping_rule:'first_match'}. Do not emit motor_command or motor_sequence "
+                "for an until/till request, because that would discard the stop condition. "
                 "Do NOT classify concept-teach utterances as task_instruction. "
                 "Do NOT try to execute the concept's underlying instruction yourself. "
                 "Concepts listing query 'list concepts', 'what concepts do you know', "
