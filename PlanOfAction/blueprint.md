@@ -410,6 +410,25 @@ Do not begin service extraction merely to reduce file size. The refactor must fo
 [operator_station_decomposition.md](operator_station_decomposition.md) and preserve public session
 behavior, typed tickets, traces, and runtime guarantees after every step.
 
+### Freshness decay — known debt (Phase 13B claim decay on the cortex loop)
+
+The decay machine is live on the cortex loop, clocked by `world_sample.step_count`. Three
+deliberate simplifications are tagged in-code with greppable markers (`grep -rn "TECH-DEBT" jeenom/`):
+
+- `# TECH-DEBT(uniform-decay):` — every claim ages as an observation at the single
+  `UNVERIFIABLE_DECAY_STEPS` rate; per-kind rates (`ttl_for_kind`) stay dormant until a
+  substrate with a changing world (AI2-THOR) can falsify per-kind decay. MiniGrid cannot.
+- `# TECH-DEBT(intra-task-decay):` — `cortex._claims` is rebuilt per task, so decay is
+  intra-task only; mission-scope decay waits until belief moves into `memory` (mission-contract
+  phase).
+- `# TECH-DEBT(mission-clock-rests-on-skip-reset):` — `step_count` spans a mission only because
+  the station reuses the adapter with `skip_reset=True`; that reuse is not yet a guaranteed
+  contract, and mission-scope decay will depend on it.
+- `# TECH-DEBT(occupancy-decay-sites):` — the spatial passable belief decays in the perception
+  layer (Sense) via the same freshness TTL, parallel to the Step 2 cortex claim-decay loop rather
+  than unified with it. It must be Sense-side because the planner reads `passable_positions` from
+  percepts before the cortex runs. Unifying the two decay sites onto one claim store is deferred.
+
 ## Threat Model
 
 Current assumption: good-faith operator and backend.
